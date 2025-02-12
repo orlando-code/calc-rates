@@ -1,28 +1,236 @@
-- name: Lizard Island, GBR, Australia
-  coordinates: 
-    latitude: -14.6680
-    longitude: 145.4610
-- name: Moorea, French Polynesia
-  coordinates: 
-    latitude: -17.5388
-    longitude: -149.8295
-- name: Key Largo, Florida, US
-  coordinates: 
-    latitude: 25.0865
-    longitude: -80.4473
-- name: Boca Raton, Florida, US
-  coordinates: 
-    latitude: 26.3683
-    longitude: -80.1289
-- name: Palmyra Atoll, US
-  coordinates: 
-    latitude: 5.8886
-    longitude: -162.0797
-- name: Pelorus Island, GBR, Australia
-  coordinates: 
-    latitude: -18.2870
-    longitude: 146.4990
-- name: South China Sea
-  coordinates: 
-    latitude: 17.05
-    longitude: 111.30
+- DOI: 10.1111/jpy.13290
+  coordinates:
+    Latitude: -14.6680433
+    Longitude: 145.463777
+  location: Lizard Island, GBR, Australia
+- DOI: 10.1038/s41598-019-40620-8
+  coordinates:
+    Latitude: -17.5388435
+    Longitude: -149.8295234
+  location: Mo'orea, French Polynesia
+- DOI: 10.3354/meps10981
+  coordinates:
+    Latitude: 25.0926205
+    Longitude: -80.44203999999999
+  location: Key Largo, Florida, US
+- DOI: 10.1098/rsbl.2018.0371
+  coordinates:
+    Latitude: -17.5388435
+    Longitude: -149.8295234
+  location: Mo'orea, French Polynesia
+- DOI: 10.3354/meps11591
+  coordinates:
+    Latitude: 26.3683064
+    Longitude: -80.1289321
+  location: Boca Raton, Florida, US
+- DOI: 10.3354/meps09309
+  coordinates:
+    Latitude: 5.8885026
+    Longitude: -162.0786656
+  location: Palmyra Atoll
+- DOI: 10.3354/meps11088
+  coordinates:
+    Latitude: -18.5485656
+    Longitude: 146.4971995
+  location: Pelorus Island, GBR, Australia
+- DOI: 10.1007/s13131-022-2037-x
+  coordinates:
+    Latitude: 15.488092
+    Longitude: 114.404754
+  location: "South China Sea, 17.03\xB0\u201317.07\xB0N,\n111.28\xB0\u2013111.32\xB0\
+    E"
+- DOI: 10.1016/j.chemgeo.2018.09.004
+  coordinates:
+    Latitude: 55.378051
+    Longitude: -3.435973
+  location: Fiji, UK aquarium
+- DOI: 10.1007/s00338-019-01775-y
+  coordinates:
+    Latitude: -23.4422976
+    Longitude: 151.9148004
+  location: Heron Island, GBR, Australia
+- DOI: 10.3390/jmse10081106
+  coordinates:
+    Latitude: -17.713371
+    Longitude: 178.065032
+  location: Fiji
+- DOI: 10.1098/rsos.220760
+  coordinates:
+    Latitude: 8.537981
+    Longitude: -80.782127
+  location: Island Point, Panama
+- DOI: 10.1093/icesjms/fsaa015
+  coordinates:
+    Latitude: -17.5388435
+    Longitude: -149.8295234
+  location: Mo'orea, French Polynesia
+- DOI: 10.5194/bg-17-887-2020
+  coordinates:
+    Latitude: 29.5320522
+    Longitude: 35.0063209
+  location: Gulf of Aqaba, Jordan
+- DOI: 10.1007/s00338-017-1634-1
+  coordinates:
+    Latitude: 18.221668
+    Longitude: 109.500946
+  location: Luhuitou fringing reef, Hainan Island, China
+- DOI: 10.1016/j.ecochg.2021.100016
+  coordinates:
+    Latitude: 9.2993407
+    Longitude: -82.2311642
+  location: Almirante Bay, Panama, in-situ
+- DOI: 10.1016/j.ecochg.2021.100016
+  coordinates:
+    Latitude: 9.2993407
+    Longitude: -82.2311642
+  location: Almirante Bay, Panama, ex-situ
+- DOI: 10.1371/journal.pone.0139223
+  coordinates:
+    Latitude: -23.4422976
+    Longitude: 151.9148004
+  location: Heron Island, GBR, Australia
+- DOI: 10.1016/j.marmicro.2023.102232
+  coordinates:
+    Latitude: 26.3343533
+    Longitude: 127.8056058
+  location: Okinawa, Japan
+- DOI: 10.1016/j.scitotenv.2020.140308
+  coordinates:
+    Latitude: -18.6932861
+    Longitude: 146.5196111
+  location: Fantome Island, GBR, Australia
+- DOI: 10.1038/s41598-022-06896-z
+  coordinates:
+    Latitude: 19.8986819
+    Longitude: -155.6658568
+  location: Hawaii, various
+- DOI: 10.1007/s00227-022-04071-6
+  coordinates:
+    Latitude: 23.69781
+    Longitude: 120.960515
+  location: Southern Taiwan
+- DOI: 10.1111/maec.12444
+  coordinates:
+    Latitude: 26.8271449
+    Longitude: 128.2796738
+  location: Oku Reef, Okinawa, Japan
+- DOI: 10.3389/fmars.2021.704487
+  coordinates:
+    Latitude: 16.3425356
+    Longitude: 119.8927296
+  location: Lucero, Bolinao, Philippines
+- DOI: 10.1111/gcb.14998
+  coordinates:
+    Latitude: -23.4422976
+    Longitude: 151.9148004
+  location: Heron Island, GBR, Australia
+- DOI: 10.1186/s40168-023-01653-4
+  coordinates:
+    Latitude: 20.0199699
+    Longitude: 110.34863
+  location: Hainan Island, China
+- DOI: 10.1016/j.marpolbul.2018.11.053
+  coordinates:
+    Latitude: 18.221668
+    Longitude: 109.500946
+  location: Luhuitou Bay, China
+- DOI: 10.1088/1755-1315/253/1/012022
+  coordinates:
+    Latitude: -4.8755556
+    Longitude: 119.1144444
+  location: Spermonde Archipelago, Sulawesi, Indonesia
+- DOI: 10.1098/rspb.2019.0614
+  coordinates:
+    Latitude: 21.4627778
+    Longitude: -157.8102778
+  location: "K\u0101ne\u2018ohe Bay, Hawaii"
+- DOI: 10.1038/s42003-022-04353-1
+  coordinates:
+    Latitude: 20.8478084
+    Longitude: -86.87553419999999
+  location: Puerto Morelos, Mexico
+- DOI: 10.3389/fmars.2020.581160
+  coordinates:
+    Latitude: 7.514979999999999
+    Longitude: 134.58252
+  location: Palau
+- DOI: 10.1016/j.jembe.2016.10.002
+  coordinates:
+    Latitude: -17.5388435
+    Longitude: -149.8295234
+  location: Mo'orea, French Polynesia
+- DOI: 10.1016/j.marenvres.2023.106150
+  coordinates:
+    Latitude: 26.3343533
+    Longitude: 127.8056058
+  location: Okinawa, Japan
+- DOI: 10.1016/j.jembe.2019.151225
+  coordinates:
+    Latitude: -17.5388435
+    Longitude: -149.8295234
+  location: Mo'orea, French Polynesia
+- DOI: 10.3389/fmars.2022.872631
+  coordinates:
+    Latitude: .nan
+    Longitude: .nan
+  location: Indo-Pacific
+- DOI: 10.1007/s00338-012-0952-6
+  coordinates:
+    Latitude: -23.4422976
+    Longitude: 151.9148004
+  location: Heron Island, Southern GBR, Australia
+- DOI: 10.1098/rsos.170683
+  coordinates:
+    Latitude: 21.4627778
+    Longitude: -157.8102778
+  location: Kane'ohe Bay, Hawaii
+- DOI: 10.1098/rspb.2021.0923
+  coordinates:
+    Latitude: 25.0979464
+    Longitude: -80.4369215
+  location: Florida Keys, US
+- DOI: 10.1111/gcb.13481
+  coordinates:
+    Latitude: 25.5722
+    Longitude: -80.2321
+  location: Biscayne National Park, Florida Keys
+- DOI: 10.1111/gcb.13481
+  coordinates:
+    Latitude: 24.5550593
+    Longitude: -81.7799871
+  location: Key West, Florida Keys
+- DOI: 10.1111/gcb.13481
+  coordinates:
+    Latitude: 25.693713
+    Longitude: -80.1628248
+  location: Key Biscayne, Florida Keys
+- DOI: 10.1111/gcb.13481
+  coordinates:
+    Latitude: 24.9586323
+    Longitude: -80.67985209999999
+  location: Florida Bay, Florida Keys
+- DOI: 10.3390/jmse9070739
+  coordinates:
+    Latitude: 24.4269857
+    Longitude: -83.11127979999999
+  location: Florida Keys National Marine Sanctuary
+- DOI: 10.1007/s00227-016-2986-8
+  coordinates:
+    Latitude: -17.5388435
+    Longitude: -149.8295234
+  location: Mo'orea, French Polynesia
+- DOI: 10.1007/s10126-018-9864-y
+  coordinates:
+    Latitude: 18.279309
+    Longitude: 109.470411
+  location: Sanya Bay, China
+- DOI: 10.3389/fmars.2021.644965
+  coordinates:
+    Latitude: 19.2982799
+    Longitude: 109.05559
+  location: Changjiang, Hainan, China
+- DOI: 10.1029/2020JG005726
+  coordinates:
+    Latitude: 29.557669
+    Longitude: 34.951925
+  location: Gulf of Aqaba-Eilat, Israel
