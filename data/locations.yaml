@@ -1,0 +1,28 @@
+- name: Lizard Island, GBR, Australia
+  coordinates: 
+    latitude: -14.6680
+    longitude: 145.4610
+- name: Moorea, French Polynesia
+  coordinates: 
+    latitude: -17.5388
+    longitude: -149.8295
+- name: Key Largo, Florida, US
+  coordinates: 
+    latitude: 25.0865
+    longitude: -80.4473
+- name: Boca Raton, Florida, US
+  coordinates: 
+    latitude: 26.3683
+    longitude: -80.1289
+- name: Palmyra Atoll, US
+  coordinates: 
+    latitude: 5.8886
+    longitude: -162.0797
+- name: Pelorus Island, GBR, Australia
+  coordinates: 
+    latitude: -18.2870
+    longitude: 146.4990
+- name: South China Sea
+  coordinates: 
+    latitude: 17.05
+    longitude: 111.30
