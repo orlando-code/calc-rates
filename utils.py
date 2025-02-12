@@ -3,8 +3,8 @@ import pandas as pd
 
 
 # function to read in yamls
-def read_yaml(yaml_file):
-    with open(yaml_file, "r") as stream:
+def read_yaml(yaml_fp) -> dict:
+    with open(yaml_fp, "r") as stream:
         try:
             return yaml.safe_load(stream)
         except yaml.YAMLError as exc:
@@ -12,17 +12,17 @@ def read_yaml(yaml_file):
             return None
 
 
-def write_yaml(data, fp="unnamed.yaml"):
+def write_yaml(data: dict, fp="unnamed.yaml") -> None:
     with open(fp, "w") as file:
         yaml.dump(data, file)
 
 
-def append_to_yaml(data, fp="unnamed.yaml"):
+def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
     with open(fp, "a") as file:
         yaml.dump(data, file)
 
 
-def get_coordinates_from_gmaps(location_name, gmaps_client):
+def get_coordinates_from_gmaps(location_name: str, gmaps_client) -> pd.Series:
     """
     Get the latitude and longitude of a location using the Google Maps API. Used row-wise on a DataFrame.
 
