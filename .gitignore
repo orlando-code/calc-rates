@@ -174,3 +174,5 @@ cython_debug/
 
 # ignore private data
 api_keys.yaml
+# ignore complete data
+data/Orlando_data.xlsx
