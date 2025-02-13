@@ -35,8 +35,8 @@
   location: Pelorus Island, GBR, Australia
 - DOI: 10.1007/s13131-022-2037-x
   coordinates:
-    Latitude: 15.488092
-    Longitude: 114.404754
+    Latitude: 17.05488092
+    Longitude: 111.30
   location: "South China Sea, 17.03\xB0\u201317.07\xB0N,\n111.28\xB0\u2013111.32\xB0\
     E"
 - DOI: 10.1016/j.chemgeo.2018.09.004
@@ -169,11 +169,6 @@
     Latitude: -17.5388435
     Longitude: -149.8295234
   location: Mo'orea, French Polynesia
-- DOI: 10.3389/fmars.2022.872631
-  coordinates:
-    Latitude: .nan
-    Longitude: .nan
-  location: Indo-Pacific
 - DOI: 10.1007/s00338-012-0952-6
   coordinates:
     Latitude: -23.4422976
