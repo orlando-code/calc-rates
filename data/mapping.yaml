@@ -9,6 +9,7 @@ unit_map:
     - mg cm-2day-1
   mgCaCO3 mg-1d-1:  # per mass
     - mgCaCO3 mg-1day-1
+    - mg mg-1day-1
   mgCaCO3 g-1hr-1:  # per mass
     - mgCaCO3 gFW-1hr-1
   gCaCO3 g-1d-1:  # per mass
@@ -38,8 +39,6 @@ unit_map:
     - µmol cm-2hr-1
   μmolCaCO3 g−1d−1: # per mass
     - μmolC  gWW−1day−1
-  mgCaCO3 mg-1d-1:
-    - mg mg-1day-1
 # per specimen
   µg d-1:
     - µg day-1 (per specimen)
