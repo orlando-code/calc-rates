@@ -38,7 +38,7 @@ unit_map:
     - ug cm-2hr-1
     - umol cm-2hr-1
   umolCaCO3 g−1d−1: # per mass
-    - umolC  gWW−1day−1
+    - umolC gWW−1day−1
 # per specimen
   ug d-1:
     - ug day-1 (per specimen)
