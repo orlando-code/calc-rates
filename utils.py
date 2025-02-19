@@ -4,7 +4,8 @@ import pandas as pd
 from openpyxl import load_workbook
 import unicodedata
 import re
-
+import itertools
+import string
 
 # universal constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
@@ -266,3 +267,20 @@ def select_by_stat(ds, variables_stats: dict):
     ds_selected = ds.sel(selected_coords, method="nearest")
     
     return ds_selected
+
+
+def uniquify_repeated_values(vals: list) -> list:
+    """
+    Append a unique suffix to repeated values in a list.
+    
+    Parameters:
+        vals (list): List of values.
+    
+    Returns:
+        list: List of values with unique suffixes.
+    """
+    def zip_letters(l):
+        """Zip a list of strings with uppercase letters."""
+        al = string.ascii_uppercase
+        return ['-LOC-'.join(i) for i in zip(l, al)] if len(l) > 1 else l
+    return [j for _, i in itertools.groupby(vals) for j in zip_letters(list(i))]
