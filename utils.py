@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 import unicodedata
+import re
 
 
 # universal constants
@@ -140,47 +141,62 @@ def get_coordinates_from_gmaps(location_name: str, gmaps_client) -> pd.Series:
         return pd.Series([None, None])
 
 
-def dms_to_dd(degrees, minutes=0, seconds=0, direction=""):
+def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
     """Convert degrees, minutes, and seconds to decimal degrees."""
-    decimal_degrees = float(degrees) + float(minutes) / 60 + float(seconds) / 3600
-    if direction in ["S", "W"]:
-        decimal_degrees *= -1
-    return decimal_degrees
+    try:
+        degrees, minutes, seconds = float(degrees), float(minutes), float(seconds)
+        if not (0 <= minutes < 60) or not (0 <= seconds < 60):
+            raise ValueError("Invalid minutes or seconds range.")
+        decimal = degrees + minutes / 60 + seconds / 3600
+        if direction in ['S', 'W']:
+            decimal *= -1
+        return decimal
+    except Exception as e:
+        print(f"Error converting DMS: {degrees}° {minutes}′ {seconds}″ {direction} → {e}")
+        return None
+        
 
-def parse_coordinates(coord):
-    """Convert various coordinate formats to decimal degrees."""
-    coord = coord.strip()
-    coord = coord.replace("''", '"')
-    coord = coord.replace('"', "+")
-    coord = coord.replace("′", "'")
-    coord = coord.replace("’", "'")
+def standardize_coordinates(coord_string):
+    """Convert various coordinate formats into decimal degrees."""
+    coord_string = coord_string.replace("′′", '″')
+    parts = re.split(r'\s*/\s*', coord_string)  # Split at '/' if present
+    decimal_coords = []
 
-    # **Decimal Degrees (DD)**
-    dd_match = re.match(r"(-?\d+\.\d+)\s*[\u00B0]?\s*,?\s*(-?\d+\.\d+)\s*[\u00B0]?", coord)
-    if dd_match:
-        return float(dd_match.group(1)), float(dd_match.group(2))
+    lat_lng_pattern = re.compile(r'''
+        ([NSEW])?\s*  # optional leading direction
+        (\d+(?:\.\d+)?)\s*[° ]\s*  # degrees (mandatory)
+        (?:(\d+(?:\.\d+)?)\s*[′'’]\s*)?  # optional Minutes
+        (?:(\d+(?:\.\d+)?)\s*[″"]\s*)?  # optional Seconds
+        ([NSEW])?  # optional trailing direction
+    ''', re.VERBOSE)
+    for part in parts:
+        lat_lng = lat_lng_pattern.findall(part)
+        
+        if len(lat_lng) != 2:
+            print(f"Invalid coordinate pair: {part}")
+            continue
+        
+        for coord in lat_lng:
+            dir1, deg, mins, secs, dir2 = coord
+            if dir1 is None and dir2 is None:
+                print(f"Could not determine direction in: {part}")
+                continue
+            decimal = dms_to_decimal(deg, mins or 0, secs or 0, dir1 or dir2)
+            if "N" in coord or "S" in coord:
+                lat = decimal
+            elif "E" in coord or "W" in coord:
+                lng = decimal
+        decimal_coords.append((lat, lng))
 
-    # **Degrees and Decimal Minutes (DMM)**
-    dmm_match = re.match(
-        r"(\d+\.?\d*)\u00B0\s*([NS]),?\s*(\d+\.?\d*)\u00B0\s*([EW])", coord
-    )
-    if dmm_match:
-        lat_dd = dms_to_dd(dmm_match.group(1), direction=dmm_match.group(2))
-        lon_dd = dms_to_dd(dmm_match.group(3), direction=dmm_match.group(4))
-        return lat_dd, lon_dd
-
-    # **Degrees, Minutes, and Seconds (DMS) & Degrees and Minutes (DM)**
-    dms_match = re.match(
-        r"(\d+)\u00B0\s*(\d+)[′']\s*([\d.]*)?[\″+]?\s*([NSEW])\D+"
-        r"(\d+)\u00B0\s*(\d+)[′']\s*([\d.]*)?[\″+]?\s*([EWNS])", coord
-    )
-    if dms_match:
-        lat_dd = dms_to_dd(dms_match.group(1), dms_match.group(2), dms_match.group(3) or 0, dms_match.group(4))
-        lon_dd = dms_to_dd(dms_match.group(5), dms_match.group(6), dms_match.group(7) or 0, dms_match.group(8))
-        return lat_dd, lon_dd
-
-    raise ValueError(f"Unknown coordinate format: {coord}")
-
+    if len(decimal_coords) == 0:
+        print(f"Failed to parse: {coord_string}")
+        return None
+    if len(decimal_coords) == 1:
+        return decimal_coords[0]
+    else:
+        avg_lat = np.mean([c[0] for c in decimal_coords if c[0] is not None])
+        avg_lng = np.mean([c[1] for c in decimal_coords if c[1] is not None])
+        return (avg_lat, avg_lng)
 
 def rate_conversion(rate_val: float, rate_unit: str) -> float:
     """Conversion into gCaCO3 ... day-1 for absolute rates"""
