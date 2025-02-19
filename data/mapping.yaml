@@ -1,8 +1,8 @@
 unit_map:
 ## absolute rates
 # mass CaCO3
-  μgCaCO3 cm-2d-1: 
-    - μg cm-2d-1
+  ugCaCO3 cm-2d-1: 
+    - ug cm-2d-1
   mgCaCO3 cm-2d-1:  # per area
     - mg CaCO3 cm-2 d-1
     - mgCaCO3 cm-2day-1
@@ -23,25 +23,25 @@ unit_map:
     - nmol CaCO3 mg-1day-1
   nmolCaCO3 cm-2hr-1:  # per area
     - nmolCaCO3 cm-2hr-1
-  µmolCaCO3 g-1hr-1:  # per mass
-    - µmol gDW-1h-1
+  umolCaCO3 g-1hr-1:  # per mass
+    - umol gDW-1h-1
     - mg g-1day-1
-    - µmol g-1hr-1
-    - µmol C gBW-1day-1
-  µmolCaCO3 cm-2hr-1: # per mass
-    - μmolC  gWW−1day−1
-  µmolCaCO3 cm-2d-1:  # per area
-    - µmolCaCO3 cm-2day-1
-    - µmol C cm-2day-1
-  µmolCaCO3 cm-2hr-1: # per area
-    - µmolCaCO3 cm-2hr-1
-    - μg cm-2hr-1
-    - µmol cm-2hr-1
-  μmolCaCO3 g−1d−1: # per mass
-    - μmolC  gWW−1day−1
+    - umol g-1hr-1
+    - umol C gBW-1day-1
+  umolCaCO3 cm-2hr-1: # per mass
+    - umolC  gWW−1day−1
+  umolCaCO3 cm-2d-1:  # per area
+    - umolCaCO3 cm-2day-1
+    - umol C cm-2day-1
+  umolCaCO3 cm-2hr-1: # per area
+    - umolCaCO3 cm-2hr-1
+    - ug cm-2hr-1
+    - umol cm-2hr-1
+  umolCaCO3 g−1d−1: # per mass
+    - umolC  gWW−1day−1
 # per specimen
-  µg d-1:
-    - µg day-1 (per specimen)
+  ug d-1:
+    - ug day-1 (per specimen)
   mg d-1:
     - mgWW day-1
     - mgWW day-1 (per specimen)
