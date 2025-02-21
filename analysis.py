@@ -5,7 +5,7 @@ from tqdm.auto import tqdm
 # custom
 import cbsyst.helpers as cbh
 
-def calc_hedges_g(mu1: float, mu2: float, sd_pooled: float) -> float:
+def calc_cohens_d(mu1: float, mu2: float, sd_pooled: float) -> float:
     """Calculate Hedges G metric: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
     
     Args:
@@ -33,6 +33,63 @@ def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
         float: pooled standard deviation
     """
     return np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))
+
+
+def calc_cohens_d_var(n1: int, n2: int, d: float) -> float:
+    """Calculate variance of Cohen's d metric: https://www.campbellcollaboration.org/calculator/equations
+    
+    Args:
+        n1 (int): number of samples in group 1
+        n2 (int): number of samples in group 2
+        d (float): Hedges G metric
+        
+    Returns:
+        float: variance of Hedges G metric
+    """
+    return (n1 + n2) / (n1 * n2) + d ** 2 / (2 * (n1 + n2))
+
+
+def calc_bias_correction(n1: int, n2: int) -> float:
+    """Calculate bias correction for Cohen's d metric: https://www.campbellcollaboration.org/calculator/equations
+    
+    Args:
+        n1 (int): number of samples in group 1
+        n2 (int): number of samples in group 2
+        
+    Returns:
+        float: bias correction factor
+    """
+    return 1 - 3 / (4 * (n1 + n2 - 2) - 1)
+
+
+def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: int) -> float:
+    """Calculate Hedges G metric: https://www.campbellcollaboration.org/calculator/equations
+    
+    Args:
+        mu1 (float): mean of group 1
+        mu2 (float): mean of group 2
+        sd1 (float): standard deviation of group 1
+        sd2 (float): standard deviation of group 2
+        n1 (int): number of samples in group 1
+        n2 (int): number of samples in group 2
+        
+    Returns:
+        float: Hedges G metric
+    """
+    sd_pooled = calc_sd_pooled(n1, n2, sd1, sd2)
+    d = calc_cohens_d(mu1, mu2, sd_pooled)
+    var = calc_cohens_d_var(n1, n2, d)
+    bias_correction = calc_bias_correction(n1, n2)
+    
+    hedges_g = d * bias_correction
+    # calculate confidence intervals
+    se_g = np.sqrt(var*bias_correction**2)  # standard error
+    hedges_g_lower = hedges_g - 1.959964 * se_g
+    hedges_g_upper = hedges_g + 1.959964 * se_g
+    
+    return hedges_g, (hedges_g_lower, hedges_g_upper)
+
+    
 
 
 def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percentage: float, resolution: int=20) -> xa.DataArray:
