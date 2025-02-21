@@ -61,3 +61,108 @@ unit_map:
     - "% change BW day-1"
   delta wk-1:
     - "%change BWweek-1"
+
+
+sheet_column_map:
+  pCO2 (uatm):
+    pCO2
+  pCO2 se (uatm):
+    pCO2 se
+  pCO2 sd (uatm):
+    pCO2 sd
+  pH (NBS):
+    pHNBS
+  pH se (NBS):
+    pHNBS se
+  pH sd (NBS):
+    pHNBS sd
+  pH (Total):
+    pHtot
+  pH se (Total):
+    pHtot se
+  pH sd (Total):
+    pHtot sd
+  TA (umol kg-1):
+    TA
+  TA se (umol kg-1):
+    TA se
+  TA sd (umol kg-1):
+    TA sd
+  DIC (umol/L):
+    DIC
+  DIC se (umol/L):
+    DIC se
+  DIC sd (umol/L):
+    DIC sd
+  omegaCa:
+    omegaC
+  omegaCa se:
+    omegaC se
+  omegaCa sd:
+    omegaC sd
+  omegaAr:
+    omegaA
+  omegaAr se:
+    omegaA se
+  omegaAr sd:
+    omegaA sd
+  CO32– (umol kg SW-1):
+    CO3
+  CO32– se (umol kg SW-1):
+    CO3 se
+  CO32– sd (umol kg SW-1):
+    CO3 sd
+  HCO3- (umol kg SW-1):
+    HCO3
+  HCO3- se (umol kg SW-1):
+    HCO3 se
+  HCO3- sd (umol kg SW-1):
+    HCO3 sd
+  DO (mg l-1):
+    DO
+  DO se (mg l-1):
+    DO se
+  DO sd (mg l-1):
+    DO sd
+  Irradiance (umol photons m-2 s-1):
+    Irr
+  Irradiance se (umol photons m-2 s-1):
+    Irr se
+  Irradiance sd (umol photons m-2 s-1):
+    Irr sd
+  Integrated PAR (mol quanta m-2day-1):
+    IPAR
+  Integrated PAR se (mol quanta m-2day-1):
+    IPAR se
+  Temperature (oC):
+    T_in
+  Temperature se (oC):
+    T_in se
+  Temperature sd (oC):
+    T_in sd
+  Salinity (ppt):
+    S_in
+  Salinity se (ppt):
+    S_in se 
+  Salinity sd (ppt):
+    S_in sd
+  # n
+  # Calcification
+  # Calcification se
+  # Calcification sd
+  # Calcification units
+  # Duration
+  # Methods
+  # Notes+
+  # Notes++
+
+# may need to update with errors
+carbonate_chemistry_params:
+  - pco2
+  - phtot
+  - ta
+  - dic
+  - omegac
+  - omegaa
+  - co3
+  - hco3
