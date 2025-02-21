@@ -82,14 +82,25 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     bias_correction = calc_bias_correction(n1, n2)
     
     hedges_g = d * bias_correction
-    # calculate confidence intervals
+    # calculate 95% confidence intervals
     se_g = np.sqrt(var*bias_correction**2)  # standard error
     hedges_g_lower = hedges_g - 1.959964 * se_g
     hedges_g_upper = hedges_g + 1.959964 * se_g
     
     return hedges_g, (hedges_g_lower, hedges_g_upper)
 
+
+def calc_sd_from_se(se: float, n: int) -> float:
+    """Calculate standard deviation from standard error and sample size
     
+    Args:
+        se (float): standard error
+        n (int): number of samples
+        
+    Returns:
+        float: standard deviation
+    """
+    return se * np.sqrt(n)
 
 
 def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percentage: float, resolution: int=20) -> xa.DataArray:
