@@ -1,11 +1,19 @@
+# files
 import yaml
+from openpyxl import load_workbook
+
+# general
 import numpy as np
 import pandas as pd
-from openpyxl import load_workbook
 import unicodedata
 import re
 import itertools
 import string
+
+# clustering
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
 
 ### global constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
@@ -57,13 +65,11 @@ def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: di
     for key, value in selection_kws.items():
         df = df[df[key] == value]
         
-    # df = df.map(lambda x: unicodedata.normalize("NFKC", str(x)).replace("μ", "u") if isinstance(x, str) else x)
-
     # missing values
     df = df[~df['n'].str.contains('~', na=False)]   # remove any rows in which 'n' has '~' in the string
     df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
     
-    df = df.apply(safe_to_numeric)
+    df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].apply(safe_to_numeric)
     if require_results:
         df = df.dropna(subset=['n', 'calcification', 'calcification_units'])    # keep only rows with all the necessary data
 
@@ -326,3 +332,20 @@ def select_by_stat(ds, variables_stats: dict):
     return ds_selected
 
 
+# Function to determine optimal number of clusters using silhouette score
+def optimal_kmeans(data, max_clusters=8):
+    best_k = 2  # Minimum sensible number of clusters
+    best_score = -1
+    scores = []
+
+    for k in range(2, min(len(data), max_clusters + 1)):  # Avoid excessive clustering
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=max_clusters)
+        labels = kmeans.fit_predict(data)
+        score = silhouette_score(data, labels)
+        scores.append((k, score))
+
+        if score > best_score:
+            best_score = score
+            best_k = k
+
+    return best_k, scores
