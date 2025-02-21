@@ -7,12 +7,13 @@ import re
 import itertools
 import string
 
-# universal constants
+### global constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
 PREFIXES = {'m': 1e-3, 'μ': 1e-6, 'n': 1e-9}
 DURATIONS = {'hr': 24, 'd': 1, 'wk': 1/7}
 
 
+### file handling
 # function to read in yamls
 def read_yaml(yaml_fp) -> dict:
     with open(yaml_fp, "r") as stream:
@@ -33,9 +34,21 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
         yaml.dump(data, file)
 
 
+### processing files
 def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: dict) -> pd.DataFrame:
+    df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
+
+    
+    # general processing
+    df.rename(columns=read_yaml("data/mapping.yaml")['sheet_column_map'], inplace=True)    # rename columns to agree with cbsyst output    
+    df.columns = df.columns.str.lower() # columns lower case headers for less confusing access later on
+    df.columns = df.columns.str.replace(' ', '_')   # process columns to replace whitespace with underscore
+    df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
+    df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
+    df[['doi', 'year', 'authors']] = df[['doi', 'year', 'authors']].ffill()    # where I haven't these values for every row
+
     # Default selection values
-    default_selection = {'Extractor': 'Orlando', 'Include': 'yes'}
+    default_selection = {'extractor': 'Orlando', 'include': 'yes'}
     
     # Merge defaults with user-provided values (user values take priority)
     selection_kws = {**default_selection, **selection_kws}
@@ -43,25 +56,28 @@ def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: di
     # Apply selection
     for key, value in selection_kws.items():
         df = df[df[key] == value]
-    
-    # general processing
-    df.columns = df.columns.str.lower() # columns lower case headers
-    df.columns = df.columns.str.replace(' ', '_')   # process columns to replace whitespace with underscore
-    df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
-    df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
-    df[['doi', 'year', 'authors']] = df[['doi', 'year', 'authors']].ffill()    # where I haven't these values for every row
-
+        
     # df = df.map(lambda x: unicodedata.normalize("NFKC", str(x)).replace("μ", "u") if isinstance(x, str) else x)
 
     # missing values
     df = df[~df['n'].str.contains('~', na=False)]   # remove any rows in which 'n' has '~' in the string
     df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
+    
+    df = df.apply(safe_to_numeric)
     if require_results:
         df = df.dropna(subset=['n', 'calcification', 'calcification_units'])    # keep only rows with all the necessary data
 
     return df
 
 
+def safe_to_numeric(col):
+    """Convert column to numeric if possible, otherwise return as is."""
+    try:
+        return pd.to_numeric(col)
+    except (ValueError, TypeError):
+        return col  # Return original column if conversion fails
+    
+    
 def get_highlighted_mask(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") -> pd.DataFrame:
     """
     Creates a boolean mask DataFrame where True indicates a highlighted cell.
@@ -121,6 +137,24 @@ def get_highlighted(fp: str, sheet_name: str, rgb_color: str = "FFFFC000", keep_
     return df.where(final_mask, np.nan)
 
 
+def uniquify_repeated_values(vals: list) -> list:
+    """
+    Append a unique suffix to repeated values in a list.
+    
+    Parameters:
+        vals (list): List of values.
+    
+    Returns:
+        list: List of values with unique suffixes.
+    """
+    def zip_letters(l):
+        """Zip a list of strings with uppercase letters."""
+        al = string.ascii_uppercase
+        return ['-LOC-'.join(i) for i in zip(l, al)] if len(l) > 1 else l
+    return [j for _, i in itertools.groupby(vals) for j in zip_letters(list(i))]
+
+
+### spatial
 def get_coordinates_from_gmaps(location_name: str, gmaps_client) -> pd.Series:
     """
     Get the latitude and longitude of a location using the Google Maps API. Used row-wise on a DataFrame.
@@ -199,6 +233,29 @@ def standardize_coordinates(coord_string):
         avg_lng = np.mean([c[1] for c in decimal_coords if c[1] is not None])
         return (avg_lat, avg_lng)
 
+
+### carbonate chemistry
+def calculate_carb_chem(row):
+    """Calculate carbonate chemistry parameters and return a dictionary."""
+    try:
+        out_dict = cb.Csys(
+            pHtot=row['phtot'],
+            TA=row['ta'],
+            T_in=row['t_in'],
+            S_in=row['s_in'],
+        )
+        # return out_dict
+        # lower the keys of the dictionary to ensure case-insensitivity
+        out_dict = {key.lower(): value for key, value in out_dict.items()}
+        
+        return {
+            key: (out_dict.get(key.lower(), None)[0] if isinstance(out_dict.get(key.lower()), (list, np.ndarray)) else out_dict.get(key.lower(), None))
+            for key in out_values
+            }    
+    except Exception as e:
+        print(f"Error: {e}")
+
+
 def rate_conversion(rate_val: float, rate_unit: str) -> float:
     """Conversion into gCaCO3 ... day-1 for absolute rates"""
     
@@ -269,18 +326,3 @@ def select_by_stat(ds, variables_stats: dict):
     return ds_selected
 
 
-def uniquify_repeated_values(vals: list) -> list:
-    """
-    Append a unique suffix to repeated values in a list.
-    
-    Parameters:
-        vals (list): List of values.
-    
-    Returns:
-        list: List of values with unique suffixes.
-    """
-    def zip_letters(l):
-        """Zip a list of strings with uppercase letters."""
-        al = string.ascii_uppercase
-        return ['-LOC-'.join(i) for i in zip(l, al)] if len(l) > 1 else l
-    return [j for _, i in itertools.groupby(vals) for j in zip_letters(list(i))]
