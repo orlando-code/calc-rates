@@ -15,6 +15,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 
+
 ### global constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
 PREFIXES = {'m': 1e-3, 'μ': 1e-6, 'n': 1e-9}
@@ -46,7 +47,6 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
 def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: dict) -> pd.DataFrame:
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
 
-    
     # general processing
     df.rename(columns=read_yaml("data/mapping.yaml")['sheet_column_map'], inplace=True)    # rename columns to agree with cbsyst output    
     df.columns = df.columns.str.lower() # columns lower case headers for less confusing access later on
@@ -72,8 +72,32 @@ def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: di
     df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].apply(safe_to_numeric)
     if require_results:
         df = df.dropna(subset=['n', 'calcification', 'calcification_units'])    # keep only rows with all the necessary data
-
+    
+    # calculate calcification standard deviation only when 'calcification_se' and 'n' are not NaN
+    df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else np.nan, axis=1)
+    
     return df
+
+
+def aggregate_df(df, method: str='mean') -> pd.DataFrame:
+    # Define aggregation functions
+    aggregation_funcs = {col: method if pd.api.types.is_numeric_dtype(df[col]) else lambda x: x.iloc[0] for col in df.columns}
+
+    # Aggregate DataFrame
+    return df.agg(aggregation_funcs)
+
+
+def calc_sd_from_se(se: float, n: int) -> float:
+    """Calculate standard deviation from standard error and sample size
+    
+    Args:
+        se (float): standard error
+        n (int): number of samples
+        
+    Returns:
+        float: standard deviation
+    """
+    return se * np.sqrt(n)
 
 
 def safe_to_numeric(col):

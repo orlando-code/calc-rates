@@ -90,17 +90,6 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     return hedges_g, (hedges_g_lower, hedges_g_upper)
 
 
-def calc_sd_from_se(se: float, n: int) -> float:
-    """Calculate standard deviation from standard error and sample size
-    
-    Args:
-        se (float): standard error
-        n (int): number of samples
-        
-    Returns:
-        float: standard deviation
-    """
-    return se * np.sqrt(n)
 
 
 def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percentage: float, resolution: int=20) -> xa.DataArray:
