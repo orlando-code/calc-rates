@@ -1,6 +1,12 @@
-import xarray as xa
 import numpy as np
+import pandas as pd
+import xarray as xa
+from itertools import combinations
 from tqdm.auto import tqdm
+
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
 
 # custom
 import cbsyst.helpers as cbh
@@ -90,8 +96,6 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     return hedges_g, (hedges_g_lower, hedges_g_upper)
 
 
-
-
 def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percentage: float, resolution: int=20) -> xa.DataArray:
     # TODO: make this generic for any sensitivity analysis
     results_dict = {}
@@ -143,3 +147,253 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
         },
         name="pH_Total"
     )
+    
+    
+def optimal_kmeans(data, max_clusters=8):
+    best_k = 2  # Minimum sensible number of clusters
+    best_score = -1
+    scores = []
+
+    for k in range(2, min(len(data), max_clusters + 1)):  # Avoid excessive clustering
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=max_clusters)
+        labels = kmeans.fit_predict(data)
+        score = silhouette_score(data, labels)
+        scores.append((k, score))
+
+        if score > best_score:
+            best_score = score
+            best_k = k
+
+    return best_k, scores
+
+
+def cluster_treatments(df, vars_to_cluster):
+    """Cluster treatments based on independent variables and species types."""
+    
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module='sklearn.cluster._kmeans')  # Suppress convergence warnings
+
+    df = df.copy()  # Avoid modifying the original dataframe
+
+    # Ensure 'treatment_group' column exists
+    df['treatment_group'] = np.nan
+
+    # Cluster separately for each species type
+    for species, group_df in df.groupby('species_types'):
+        treatment_data = group_df[vars_to_cluster].dropna(axis=1)  # Only keep non-missing variables
+
+        if treatment_data.shape[0] < 2:  # Skip clustering if there's only one sample
+            print(f"Skipping {species}: Not enough samples for clustering")
+            continue
+
+        try:
+            optimal_k, _ = optimal_kmeans(treatment_data)  # Determine optimal clusters
+            kmeans = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
+            df.loc[group_df.index, 'treatment_group'] = kmeans.fit_predict(treatment_data)
+        except ValueError:
+            print(f"Error: Could not cluster {species}, df of length {len(group_df)}")
+            df.loc[group_df.index, 'treatment_group'] = np.nan
+
+    return df
+
+
+def determine_control_conditions(df):
+    """Identify the rows corresponding to min temperature and/or max pH."""
+    grouped = df.groupby('treatment_group')
+
+    control_treatments = {}
+
+    for group, sub_df in grouped:
+        group = int(group)  # convert group to integer for consistency
+        min_temp = sub_df.loc[sub_df['t_in'].idxmin()]['t_in'] if not any(sub_df['phtot'].isna()) else None # Row with minimum temperature
+        max_pH = sub_df.loc[sub_df['phtot'].idxmax()]['phtot'] if not any(sub_df['phtot'].isna()) else None # Row with maximum pH
+
+        control_treatments[group] = {
+            'control_t_in': min_temp,
+            'control_phtot': max_pH,
+        }
+
+    return control_treatments
+
+
+def compute_hedges_g(df, vars_to_compare=['t_in', 'phtot']):
+    """
+    Compute Hedges' g effect size for each treatment compared to the control within each species.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing treatment groups.
+        vars_to_compare (list): List of numeric variables to compute Hedges' g for.
+
+    Returns:
+        pd.DataFrame: DataFrame containing effect sizes for each treatment group.
+    """
+    def calculate_effect_size(df1_sample, df2_sample, var, group1, group2):
+        other_var = 't_in' if var == 'phtot' else 'phtot'
+        if np.isclose(df1_sample[other_var], df2_sample[other_var], atol=0.05):
+            if (var == 'phtot' and df1_sample[var] < df2_sample[var]) or (var == 't_in' and df1_sample[var] > df2_sample[var]):
+                group1, group2 = group2, group1
+                df1_sample, df2_sample = df2_sample, df1_sample
+            delta_var = abs(df2_sample[var] - df1_sample[var])
+            mu1, std1, n1 = df1_sample['calcification'], df1_sample['calcification_sd'], df1_sample['n']
+            mu2, std2, n2 = df2_sample['calcification'], df2_sample['calcification_sd'], df2_sample['n']
+            g = calc_hedges_g(mu2, mu1, std2, std1, n2, n1)
+            return {
+                'doi': df.doi.iloc[0],
+                'species_types': species,
+                'group1': group1,
+                'group2': group2,
+                'variable': var,
+                'delta_var': delta_var,
+                'hedges_g': g[0],
+                'hg_ci_l': g[1][0],
+                'hg_ci_u': g[1][1],
+                'control_val': df1_sample[var],
+                'treatment_val': df2_sample[var],
+            }
+        return None
+
+    results = []
+    for species, group_df in df.groupby('species_types'):
+        treatment_groups = group_df['treatment_group'].unique()
+        for group1, group2 in combinations(treatment_groups, 2):
+            df1 = group_df[group_df['treatment_group'] == group1]
+            df2 = group_df[group_df['treatment_group'] == group2]
+            if df1.n.all() == 1 and df2.n.all() == 1:
+                df1['calcification_sd'] = np.std(df1['calcification'])
+                df2['calcification_sd'] = np.std(df2['calcification'])
+                n1, n2 = len(df1), len(df2)
+                df1 = utils.aggregate_df(df1)
+                df2 = utils.aggregate_df(df2)
+                df1['n'] = n1
+                df2['n'] = n2
+            if len(df1) != len(df2):
+                print(f"Skipping comparison between {group1} and {group2} treatments: Different sample sizes")
+                continue
+            for sample in range(len(df1)):
+                df1_sample = df1.iloc[sample] if isinstance(df1, pd.DataFrame) else df1
+                df2_sample = df2.iloc[sample] if isinstance(df2, pd.DataFrame) else df2
+                for var in vars_to_compare:
+                    result = calculate_effect_size(df1_sample, df2_sample, var, group1, group2)
+                    if result:
+                        results.append(result)
+    return results
+
+
+### deprecated
+def compute_hedges_g_dep(df, vars_to_compare=['t_in', 'phtot']):
+    """
+    Compute Hedges' g effect size for each treatment compared to the control within each species.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing treatment groups.
+        vars_to_compare (list): List of numeric variables to compute Hedges' g for.
+
+    Returns:
+        pd.DataFrame: DataFrame containing effect sizes for each treatment group.
+    """
+    results = []
+
+    for species, group_df in study_df.groupby('species_types'):
+        treatment_groups = group_df['treatment_group'].unique()
+        
+        # Compare each pair of treatment groups
+        for group1, group2 in combinations(treatment_groups, 2):
+            df1 = group_df[group_df['treatment_group'] == group1]
+            df2 = group_df[group_df['treatment_group'] == group2]
+            
+            if df1.n.all() == 1 and df2.n.all() == 1:
+                # aggregate data (take mean calcification and sd)
+                df1['calcification_sd'] = np.std(df1['calcification'])
+                df2['calcification_sd'] = np.std(df2['calcification'])
+                n1, n2 = len(df1), len(df2)
+                
+                df1 = utils.aggregate_df(df1)
+                df2 = utils.aggregate_df(df2)
+                df1['n'] = n1
+                df2['n'] = n2
+
+            if len(df1) != len(df2):
+                print(f"Skipping comparison between {group1} and {group2} treatments: Different sample sizes")
+                continue
+            
+            if isinstance(df1, pd.DataFrame):   # if there are multiple samples
+                for sample in range(len(df1)):
+                    df1_sample = df1.iloc[sample]
+                    df2_sample = df2.iloc[sample]
+                    
+                    for var in vars_to_compare:
+
+                        other_var = 't_in' if var == 'phtot' else 'phtot'  # The variable that must remain constant
+                        
+                        # Check if the other variable is approximately the same in both groups
+                        if np.isclose(df1_sample[other_var], df2_sample[other_var], atol=0.05):  # Adjust tolerance as needed
+                            if var == 'phtot':
+                                # mu1 is greater than mu2, switch groups such that control = mu1
+                                if df1_sample[var] < df2_sample[var]:
+                                    group1, group2 = group2, group1
+                                    df1_sample, df2_sample = df2_sample, df1_sample
+                                delta_var = df2_sample[var] - df1_sample[var]
+                            elif var == 't_in':
+                                # mu1 is less than mu2, switch groups such that control = mu1
+                                if df1_sample[var] > df2_sample[var]:
+                                    group1, group2 = group2, group1
+                                    df1_sample, df2_sample = df2_sample, df1_sample
+                                delta_var = df1_sample[var] - df2_sample[var]
+                                    
+                            mu1, std1, n1 = df1_sample['calcification'], df1_sample['calcification_sd'], df1_sample['n']
+                            mu2, std2, n2 = df2_sample['calcification'], df2_sample['calcification_sd'], df2_sample['n']
+
+                            g = analysis.calc_hedges_g(mu2, mu1, std2, std1, n2, n1)    # TODO: check signage
+                            results.append({
+                                'doi': study_df.doi.iloc[0],
+                                'species_types': species,
+                                'group1': group1,
+                                'group2': group2,
+                                'variable': var,
+                                'delta_var': delta_var,
+                                'hedges_g': g[0],
+                                'hg_ci_l': g[1][0],
+                                'hg_ci_u': g[1][1],
+                                })
+            else:
+                df1_sample = df1
+                df2_sample = df2
+                for var in vars_to_compare:
+                    
+                    other_var = 't_in' if var == 'phtot' else 'phtot'  # The variable that must remain constant
+                    
+                    # Check if the other variable is approximately the same in both groups
+                    if np.isclose(df1_sample[other_var], df2_sample[other_var], atol=0.05):  # Adjust tolerance as needed
+                        if var == 'phtot':
+                            # mu1 is greater than mu2, switch groups such that control = mu1
+                            if df1_sample[var] < df2_sample[var]:
+                                group1, group2 = group2, group1
+                                df1_sample, df2_sample = df2_sample, df1_sample
+                            delta_var = df2_sample[var] - df1_sample[var]
+                        elif var == 't_in':
+                            # mu1 is less than mu2, switch groups such that control = mu1
+                            if df1_sample[var] > df2_sample[var]:
+                                group1, group2 = group2, group1
+                                df1_sample, df2_sample = df2_sample, df1_sample
+                            delta_var = df2_sample[var] - df1_sample[var]
+                                
+                        mu1, std1, n1 = df1_sample['calcification'], df1_sample['calcification_sd'], df1_sample['n']
+                        mu2, std2, n2 = df2_sample['calcification'], df2_sample['calcification_sd'], df2_sample['n']
+
+                        g = analysis.calc_hedges_g(mu2, mu1, std2, std1, n2, n1)    # TODO: check signage
+                        results.append({
+                            'doi': study_df.doi.iloc[0],
+                            'location': study_df.location.iloc[0],
+                            'species_types': species,
+                            'group1': group1,
+                            'group2': group2,
+                            'variable': var,
+                            'delta_var': delta_var,
+                            'hedges_g': g[0],
+                            'hg_ci_l': g[1][0],
+                            'hg_ci_u': g[1][1],
+                            'control_val': df1_sample[var],
+                            'treatment_val': df2_sample[var],
+                        })
+    return results
+
