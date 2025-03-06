@@ -178,6 +178,6 @@ api_keys.yaml
 *.xlsx
 
 # deprecated folder (the ones I don't need but don't want to delete, just in case)
-deprecated/
+tmp/
 # ignore climatology
 climatology/
