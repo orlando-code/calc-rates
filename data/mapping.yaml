@@ -166,3 +166,38 @@ carbonate_chemistry_params:
   - omegaa
   - co3
   - hco3
+
+carbonate_chemistry_cols:
+  - pco2 
+  - pco2_se 
+  - pco2_sd
+  - phnbs
+  - phnbs_se
+  - phnbs_sd
+  - phtot
+  - phtot_se
+  - phtot_sd
+  - ta
+  - ta_se
+  - ta_sd
+  - dic
+  - dic_se
+  - dic_sd
+  - omegac
+  - omegac_se
+  - omegac_sd
+  - omegaa
+  - omegaa_se
+  - omegaa_sd
+  - co3
+  - co3_se
+  - co3_sd
+  - hco3
+  - hco3_se
+  - hco3_sd
+  - t_in
+  - t_in_se
+  - t_in_sd
+  - s_in
+  - s_in_se
+  - s_in_sd
