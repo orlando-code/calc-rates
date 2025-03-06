@@ -176,3 +176,8 @@ cython_debug/
 api_keys.yaml
 # ignore datasets (may change in future)
 *.xlsx
+
+# deprecated folder (the ones I don't need but don't want to delete, just in case)
+deprecated/
+# ignore climatology
+climatology/
