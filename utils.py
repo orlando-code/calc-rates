@@ -10,11 +10,10 @@ import re
 import itertools
 import string
 
-# clustering
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-
-
+# custom
+import utils
+import cbsyst as cb
+import cbsyst.helpers as cbh
 
 ### global constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
@@ -44,7 +43,7 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
 
 
 ### processing files
-def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: dict) -> pd.DataFrame:
+def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'extractor': 'Orlando', 'include': 'yes'}) -> pd.DataFrame:
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
 
     # general processing
@@ -53,19 +52,22 @@ def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: di
     df.columns = df.columns.str.replace(' ', '_')   # process columns to replace whitespace with underscore
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
     df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
-    df[['doi', 'year', 'authors']] = df[['doi', 'year', 'authors']].ffill()    # where I haven't these values for every row
+    # unique_doi_combos = df.drop_duplicates(subset=['doi', 'location']).doi
+    # # return non-nan values of unique_doi_combos
+    # unique_doi_combos = unique_doi_combos[unique_doi_combos.notna()]
+    
 
-    # Default selection values
-    default_selection = {'extractor': 'Orlando', 'include': 'yes'}
-    
-    # Merge defaults with user-provided values (user values take priority)
-    selection_kws = {**default_selection, **selection_kws}
-    
-    # Apply selection
-    for key, value in selection_kws.items():
-        df = df[df[key] == value]
+    # unique_dois = utils.uniquify_repeated_values(unique_doi_combos) # uniquify values in doi column which have different values of location
+    # replace the current doi values with the uniquified values
+    # df['doi'] = df.apply(lambda row: unique_dois.pop(0) if pd.notna(row['doi']) else row['doi'], axis=1)
+    df[['doi', 'year', 'authors']] = df[['doi', 'year', 'authors']].infer_objects(copy=False).ffill()
+
+    # apply selection
+    if selection_dict:
+        for key, value in selection_dict.items():
+            df = df[df[key] == value]
         
-    # missing values
+    # missing sample size values
     df = df[~df['n'].str.contains('~', na=False)]   # remove any rows in which 'n' has '~' in the string
     df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
     
@@ -74,7 +76,7 @@ def process_df(df: pd.DataFrame, require_results: bool=True, **selection_kws: di
         df = df.dropna(subset=['n', 'calcification', 'calcification_units'])    # keep only rows with all the necessary data
     
     # calculate calcification standard deviation only when 'calcification_se' and 'n' are not NaN
-    df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else np.nan, axis=1)
+    df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else row['calcification_sd'], axis=1)
     
     return df
 
@@ -135,11 +137,15 @@ def get_highlighted_mask(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") 
         for col_idx, cell in enumerate(row):
             if cell.fill and cell.fill.fgColor and cell.fill.fgColor.rgb == rgb_color:
                 mask.iat[row_idx, col_idx] = True
+                
+    # set column of 'include' to True   # TODO: hacky, but useful for future processing
+    if 'Include' in mask.columns:
+        mask['Include'] = True
 
     return mask
 
 
-def get_highlighted(fp: str, sheet_name: str, rgb_color: str = "FFFFC000", keep_cols: list = None) -> pd.DataFrame:
+def get_highlighted(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") -> pd.DataFrame:
     """
     Loads an Excel sheet into a DataFrame and masks non-highlighted values with NaN,
     except for a specified subset of columns.
@@ -153,18 +159,9 @@ def get_highlighted(fp: str, sheet_name: str, rgb_color: str = "FFFFC000", keep_
     Returns:
         pd.DataFrame: DataFrame with non-highlighted values masked as NaN.
     """
-    # TODO: missing first two rows for some reason
     df = pd.read_excel(fp, sheet_name=sheet_name, engine="openpyxl", dtype=str)
     mask = get_highlighted_mask(fp, sheet_name, rgb_color)  # generate mask of highlighted cells
-
-    if keep_cols:   # don't mask these columns
-        keep_mask = pd.DataFrame(np.tile(df.columns.isin(keep_cols), (df.shape[0], 1)), 
-                                index=df.index, columns=df.columns)
-        final_mask = mask | keep_mask
-    else:
-        final_mask = mask
-
-    return df.where(final_mask, np.nan)
+    return df.where(mask.drop(0).reset_index(drop=True), np.nan)     # remove first row of mask and reset index
 
 
 def uniquify_repeated_values(vals: list) -> list:
@@ -265,7 +262,39 @@ def standardize_coordinates(coord_string):
 
 
 ### carbonate chemistry
-def calculate_carb_chem(row):
+def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data") -> pd.DataFrame:
+    df = process_df(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict={'include': 'yes'})
+
+    ### load measured values
+    print("Loading measured values...")
+    measured_df = get_highlighted(fp, sheet_name=sheet_name)    # keeping all cols
+    measured_df = process_df(measured_df, require_results=False, selection_dict={'include': 'yes'})
+    
+    ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
+    print("Converting pH values to total scale...")
+    measured_df.loc[:, 'phtot'] = measured_df.apply(
+        lambda row: cbh.pH_scale_converter(
+            pH=row['phnbs'], scale='NBS', Temp=row['t_in'], Sal=row['s_in'] if pd.notna(row['s_in']) else 35
+        ).get('pHtot', None) if pd.notna(row['phnbs']) and pd.notna(row['t_in'])
+        else row['phtot'],
+        axis=1
+    )
+    
+    ### calculate carbonate chemistry
+    print("Calculating carbonate chemistry parameters...")
+    carb_metadata = read_yaml("data/mapping.yaml")
+    carb_chem_cols = carb_metadata['carbonate_chemistry_cols']
+    out_values = carb_metadata['carbonate_chemistry_params']
+    carb_df = measured_df[carb_chem_cols].copy()
+
+    
+    # apply function row-wise
+    carb_df.loc[:, out_values] = carb_df.apply(lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1)
+    return df.combine_first(carb_df)
+    # return measured_df
+
+
+def calculate_carb_chem(row, out_values: list) -> dict:
     """Calculate carbonate chemistry parameters and return a dictionary."""
     try:
         out_dict = cb.Csys(
