@@ -13,12 +13,13 @@ import string
 # custom
 import utils
 import cbsyst as cb
+from tqdm import tqdm
 import cbsyst.helpers as cbh
 
 ### global constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
 PREFIXES = {'m': 1e-3, 'μ': 1e-6, 'n': 1e-9}
-DURATIONS = {'hr': 24, 'd': 1, 'wk': 1/7}
+DURATIONS = {'hr': 24, 'd': 1, 'wk': 1/7, 's': 86400}
 
 
 ### file handling
@@ -41,7 +42,6 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
     with open(fp, "a") as file:
         yaml.dump(data, file)
 
-
 ### processing files
 def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'extractor': 'Orlando', 'include': 'yes'}) -> pd.DataFrame:
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
@@ -52,15 +52,9 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     df.columns = df.columns.str.replace(' ', '_')   # process columns to replace whitespace with underscore
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
     df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
-    # unique_doi_combos = df.drop_duplicates(subset=['doi', 'location']).doi
-    # # return non-nan values of unique_doi_combos
-    # unique_doi_combos = unique_doi_combos[unique_doi_combos.notna()]
-    
 
-    # unique_dois = utils.uniquify_repeated_values(unique_doi_combos) # uniquify values in doi column which have different values of location
-    # replace the current doi values with the uniquified values
-    # df['doi'] = df.apply(lambda row: unique_dois.pop(0) if pd.notna(row['doi']) else row['doi'], axis=1)
-    df[['doi', 'year', 'authors']] = df[['doi', 'year', 'authors']].infer_objects(copy=False).ffill()
+
+    df[['doi', 'year', 'authors', 'location', 'species_types']] = df[['doi', 'year', 'authors', 'location', 'species_types']].infer_objects(copy=False).ffill()
 
     # apply selection
     if selection_dict:
@@ -72,6 +66,14 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
     
     df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].apply(safe_to_numeric)
+    
+    problem_cols = ['irr', 'ipar']  # some columns have rogue strings when they should all contain numbers: in this case, convert unconvertable values to NaN
+    for col in problem_cols:
+        # df.loc[:, df.columns == col] = df.loc[:, df.columns == col].apply(pd.to_numeric, errors='coerce')
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    df['irr'] = df.apply(lambda row: irradiance_conversion(row['ipar'], 'PAR') if pd.notna(row['ipar']) else row['irr'], axis=1)  # convert irradiance to consistent unit
+    
     if require_results:
         df = df.dropna(subset=['n', 'calcification', 'calcification_units'])    # keep only rows with all the necessary data
     
@@ -108,6 +110,12 @@ def safe_to_numeric(col):
         return pd.to_numeric(col)
     except (ValueError, TypeError):
         return col  # Return original column if conversion fails
+    
+    
+def irradiance_conversion(irr_val: float, irr_unit: str="PAR") -> float:
+    # convert from mol quanta m-2 day-1 to μmol quanta m-2 s-1
+    s_in_day = DURATIONS['s']
+    return irr_val / s_in_day * PREFIXES['μ'] if irr_unit == "PAR" else irr_val
     
     
 def get_highlighted_mask(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") -> pd.DataFrame:
@@ -263,11 +271,13 @@ def standardize_coordinates(coord_string):
 
 ### carbonate chemistry
 def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data") -> pd.DataFrame:
+    # df = pd.read_excel(fp, sheet_name=sheet_name)
     df = process_df(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict={'include': 'yes'})
-
+    # return df
     ### load measured values
     print("Loading measured values...")
     measured_df = get_highlighted(fp, sheet_name=sheet_name)    # keeping all cols
+    # return measured_df
     measured_df = process_df(measured_df, require_results=False, selection_dict={'include': 'yes'})
     
     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
@@ -287,9 +297,10 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data") -> pd.Data
     out_values = carb_metadata['carbonate_chemistry_params']
     carb_df = measured_df[carb_chem_cols].copy()
 
-    
+
     # apply function row-wise
-    carb_df.loc[:, out_values] = carb_df.apply(lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1)
+    tqdm.pandas(desc="Calculating carbonate chemistry")
+    carb_df.loc[:, out_values] = carb_df.progress_apply(lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1)
     return df.combine_first(carb_df)
     # return measured_df
 
@@ -303,10 +314,8 @@ def calculate_carb_chem(row, out_values: list) -> dict:
             T_in=row['t_in'],
             S_in=row['s_in'],
         )
-        # return out_dict
-        # lower the keys of the dictionary to ensure case-insensitivity
-        out_dict = {key.lower(): value for key, value in out_dict.items()}
-        
+        out_dict = {key.lower(): value for key, value in out_dict.items()}  # lower the keys of the dictionary to ensure case-insensitivity
+
         return {
             key: (out_dict.get(key.lower(), None)[0] if isinstance(out_dict.get(key.lower()), (list, np.ndarray)) else out_dict.get(key.lower(), None))
             for key in out_values
