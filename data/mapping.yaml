@@ -134,6 +134,8 @@ sheet_column_map:
     IPAR
   Integrated PAR se (mol quanta m-2day-1):
     IPAR se
+  Integrated PAR sd (mol quanta m-2day-1):
+    IPAR sd
   Temperature (oC):
     T_in
   Temperature se (oC):
@@ -201,3 +203,83 @@ carbonate_chemistry_cols:
   - s_in
   - s_in_se
   - s_in_sd
+
+
+save_cols:
+  - authors
+  - original_doi
+  - year
+  - location
+  - species_types
+  - irr
+  - irr_group
+  - t_in
+  - phtot
+  - treatment_group
+  - treatment_level_t
+  - treatment_level_ph
+  - treatment
+  - delta_t
+  - delta_pH
+  - control_calcification
+  - treatment_calcification
+  - n
+  - calcification
+  - calcification_sd
+  - hedges_g
+  - hedges_g_l
+  - hedges_g_u
+  # - s_in
+  # - treatment_val
+  # - calcification_se
+  # - calcification_units
+  # - cleaned_coords
+  # - co3
+  # - co3_sd
+  # - co3_se
+  # - coords
+  # - dic
+  # - dic_sd
+  # - dic_se
+  # - do
+  # - do_sd
+  # - do_se
+  # - duration
+  # - extractor
+  # - hco3
+  # - hco3_sd
+  # - hco3_se
+  # - include
+  # - integrated_par_sd_mol_quanta_m-2day-1
+  # - ipar
+  # - ipar_se
+  # - irr_sd
+  # - irr_se
+  # - life_stages
+  # - methods
+  # - notes
+  # - notes+
+  # - notes++
+  # - omegaa
+  # - omegaa_sd
+  # - omegaa_se
+  # - omegac
+  # - omegac_sd
+  # - omegac_se
+  # - pco2
+  # - pco2_sd
+  # - pco2_se
+  # - phnbs
+  # - phnbs_sd
+  # - phnbs_se
+  # - phtot_sd
+  # - phtot_se
+  # - s_in_sd
+  # - s_in_se
+  # - secondary_check
+  # - t_in_sd
+  # - t_in_se
+  # - ta
+  # - ta_sd
+  # - ta_se
+  # - taxa
