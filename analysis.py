@@ -117,6 +117,59 @@ def determine_control_conditions(df):
     return control_treatments
 
 
+def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: float, t_mapping: dict, ph_mapping: dict, irr_group: float) -> pd.DataFrame:
+    
+    # apply classification to each row in this group
+    for idx in df.index:
+        row = df.loc[idx]
+        
+        # get temperature cluster level (0 is control)
+        t_level = None
+        if not np.isnan(row['t_in']) and control_T is not None:
+            t_cluster_idx = t_mapping.get(row['t_in'])
+            control_cluster_idx = t_mapping.get(control_T)
+            if t_cluster_idx is not None and control_cluster_idx is not None:
+                t_level = t_cluster_idx - control_cluster_idx
+        
+        # get pH cluster level (0 is control)
+        ph_level = None
+        if not np.isnan(row['phtot']) and control_pH is not None:
+            ph_cluster_idx = ph_mapping.get(row['phtot'])
+            control_cluster_idx = ph_mapping.get(control_pH)
+            if ph_cluster_idx is not None and control_cluster_idx is not None:
+                ph_level = control_cluster_idx - ph_cluster_idx  # reverse order since higher pH is control
+        
+        # determine clusters for cases where there is only one of t or ph
+        if t_level is None and ph_level is not None:
+            t_level = 0
+        if ph_level is None and t_level is not None:
+            ph_level = 0
+                    
+        # determine if values are in control clusters   # TODO: not currently capturing rare case when studies have both T and pH varied from control with no intermediary values
+        is_control_T = t_level == 0 if t_level is not None else False
+        is_control_pH = ph_level == 0 if ph_level is not None else False
+        
+        # classify the treatment
+        if is_control_T and is_control_pH:
+            treatment = 'cTcP'
+        elif is_control_T:
+            treatment = 'cTtP'
+        elif is_control_pH:
+            treatment = 'tTcP'
+        elif not (is_control_T or is_control_pH):
+            treatment = 'tTtP'
+        else:
+            treatment = 'uncertain'
+            
+        # Update the treatment info in the result dataframe
+        df.loc[idx, 'treatment_group'] = treatment
+        df.loc[idx, 'treatment_level_t'] = t_level if t_level is not None else np.nan
+        df.loc[idx, 'treatment_level_ph'] = ph_level if ph_level is not None else np.nan
+        df.loc[idx, 'irr_group'] = irr_group
+
+    return df
+
+
 def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.1, irr_atol: float=30) -> pd.DataFrame:
     """
     Assign treatment groups to each row based on temperature and pH values,
@@ -138,6 +191,7 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
     result_df['treatment_group'] = pd.Series(dtype='object')
     result_df['treatment_level_t'] = pd.Series(dtype='object')
     result_df['treatment_level_ph'] = pd.Series(dtype='object')
+    result_df['irr_group'] = pd.Series(dtype='object')
     
     # Process each study separately
     for study_doi, study_df in df.groupby('doi'):
@@ -149,64 +203,27 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
             if len(group_df) <= 1:  # skip if too few samples
                 continue
                 
-            # Find control values (min T, max pH)
+            # find control values (min T, max pH)
             control_T = group_df['t_in'].min() if not group_df['t_in'].isna().all() else None
             control_pH = group_df['phtot'].max() if not group_df['phtot'].isna().all() else None
             
-            # Cluster temperature values
+            # cluster temperature values
             t_values = group_df['t_in'].dropna().unique()
             t_clusters = cluster_values(t_values, t_atol)
             
-            # Cluster pH values
+            # cluster pH values
             ph_values = group_df['phtot'].dropna().unique()
             ph_clusters = cluster_values(ph_values, pH_atol)
             
-            # Map each value to its cluster index
+            # map each value to its cluster index
             t_mapping = {val: cluster_idx for cluster_idx, cluster in enumerate(t_clusters) for val in cluster}
             ph_mapping = {val: cluster_idx for cluster_idx, cluster in enumerate(ph_clusters) for val in cluster}
             
-            # Apply classification to each row in this group
-            for idx in group_df.index:
-                row = group_df.loc[idx]
-                
-                # Get temperature cluster level (0 is control)
-                t_level = None
-                if not np.isnan(row['t_in']) and control_T is not None:
-                    t_cluster_idx = t_mapping.get(row['t_in'])
-                    control_cluster_idx = t_mapping.get(control_T)
-                    if t_cluster_idx is not None and control_cluster_idx is not None:
-                        t_level = t_cluster_idx - control_cluster_idx
-                
-                # Get pH cluster level (0 is control)
-                ph_level = None
-                if not np.isnan(row['phtot']) and control_pH is not None:
-                    ph_cluster_idx = ph_mapping.get(row['phtot'])
-                    control_cluster_idx = ph_mapping.get(control_pH)
-                    if ph_cluster_idx is not None and control_cluster_idx is not None:
-                        ph_level = control_cluster_idx - ph_cluster_idx  # Reverse order since higher pH is control
-                
-                # Determine if values are in control clusters
-                is_control_T = t_level == 0 if t_level is not None else False
-                is_control_pH = ph_level == 0 if ph_level is not None else False
-                
-                # Classify the treatment
-                if is_control_T and is_control_pH:
-                    treatment = 'cTcP'
-                elif is_control_T:
-                    treatment = 'cTtP'
-                elif is_control_pH:
-                    treatment = 'tTcP'
-                elif not (is_control_T or is_control_pH):
-                    treatment = 'tTtP'
-                else:
-                    treatment = 'uncertain'
-                
-                # Update the treatment info in the result dataframe
-                result_df.loc[idx, 'treatment_group'] = treatment
-                result_df.loc[idx, 'treatment_level_t'] = t_level if t_level is not None else np.nan
-                result_df.loc[idx, 'treatment_level_ph'] = ph_level if ph_level is not None else np.nan
-                result_df.loc[idx, 'irr_group'] = irr_group
-    
+            treatments_df = assign_treatment_groups(group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group)
+
+            # fill in result_df values with results from treatments_df
+            result_df = result_df.combine_first(treatments_df)
+            
     result_df['treatment'] = result_df['treatment_group'].apply(
         lambda x: 't_in-phtot' if isinstance(x, str) and 'tT' in x and 'tP' in x else 
                  't_in' if isinstance(x, str) and 'tT' in x else 
@@ -332,8 +349,7 @@ def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     control_row['calcification_sd'] = aggregation['calcification']['std']
     control_row['n'] = aggregation['n']['count']
     return control_row
-    
-    
+
 
 def process_group(species_df):
     """
@@ -349,7 +365,8 @@ def process_group(species_df):
     # Extract control data
     control_df = species_df[species_df['treatment_group'] == 'cTcP']
     if control_df.empty:
-        return species_df
+        print(f"Control group not found for {species_df['doi'].iloc[0]}")
+        return None
     if len(control_df) > 1:
         # aggregate control data by taking the mean of the rows. Insert the standard deviation of the 'calcification' column in the 'calcification_sd' column
         control_row = aggregate_by_treatment_group(control_df)
@@ -382,9 +399,11 @@ def process_group(species_df):
             axis=1
         )
         result_dfs.append(processed_df) if not processed_df.empty else None
+        
+        if np.any(processed_df.n == 1):
+            print('here')
     
-    return pd.concat(result_dfs, axis=0) if result_dfs else species_df
-    # return pd.concat(result_dfs, axis=0)
+    return pd.concat(result_dfs, axis=0) if result_dfs else None
 
 
 def hedges_g_for_df(df) -> pd.DataFrame:
@@ -412,13 +431,13 @@ def hedges_g_for_df(df) -> pd.DataFrame:
         study_df = result_df[result_df['doi'] == doi]
         for irr_group, irr_df in study_df.groupby('irr_group'):
             for species, species_df in irr_df.groupby('species_types'):
-                grouped_data.append(process_group(species_df))
-    
-    # combine processed data
-    if grouped_data:
-        result_df = pd.concat(grouped_data)
-    
-    return result_df
+                df = process_group(species_df)
+                if df is not None:
+                    if np.any(df.n == 1):
+                        print('here')
+                grouped_data.append(df)
+                
+    return pd.concat(grouped_data)
 
 
 ### cbsyst sensitivity investigation
