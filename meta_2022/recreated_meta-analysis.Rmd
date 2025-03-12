@@ -59,7 +59,7 @@ threshold <- function(data, mods_formula) {
 }
 ```
 ```{r}
-run_meta_analysis <- function(data, mods_formula, threshold = None, parallel_opts = list(type = "multicore", ncpus = 8)) {
+run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 8)) {
   # Eliminates anomalies based on Cook's distance, then runs a random-effects multi-level model.
   model <- rma.mv(yi = hedges_g,
                  V = hedges_g_var,
@@ -87,17 +87,17 @@ run_meta_analysis <- function(data, mods_formula, threshold = None, parallel_opt
   axis(side = 1, at = seq_along(cooks_dist), 
        labels = as.numeric(names(cooks_dist)))
   
-  # if threshold in argument is None, compute
-  if (is.null(threshold)) {
-    threshold <- threshold(data, mods_formula)
+  # if threshold in argument is NULL, compute
+  if (is.null(threshold_val)) {
+    threshold_val <- threshold(data, mods_formula)
   }
   # threshold <- 
-  cat(sprintf("Cook's distance threshold: %.2f\n", threshold))
+  cat(sprintf("Cook's distance threshold: %.2f\n", threshold_val))
   # determine outliers
   outliers <- cooks_dist %>% 
     as_tibble() %>% 
     mutate(ID = seq_len(nrow(data))) %>%
-    filter(value > threshold)
+    filter(value > threshold_val)
   
   # Remove outliers if any were found
   cleaned_data <- data
@@ -171,10 +171,11 @@ phtot_hedges <- phtot_hedges %>% drop_na(necessary_cols)
 print(n_samples - nrow(phtot_hedges)) # print how many rows were dropped
 
 
+mods_formula = ~ delta_pH + phtot - 1 # -ve 1 removes the model intercept
 # run model for univariate analysis of temperature
 phtot_results <- run_meta_analysis(
   data = phtot_hedges,
-  mods_formula = ~ delta_pH + phtot + factor(genus) - 1 # -ve 1 removes the model intercept
+  mods_formula = mods_formula
 )
 
 phtot_model <- phtot_results$model
@@ -186,10 +187,12 @@ phtot_hedges <- phtot_results$data # cleaned data
 
 # Overall plot of all studies assessing calcification in wrt ph
 
-svg(file = 'output/phtot_overall_bubble_with_id_nested.svg', width = 8, height = 8)
+svg(file = 'output/phtot_overall_bubble_with_id_nested2.svg', width = 8, height = 8)
 
 regplot.rma(phtot_model, mod = "delta_pH", refline = 0, 
   # xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
-            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
-dev.off() 
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]),
+            main = bquote(.(as.character(mods_formula)))
+      )
+      dev.off() 
 ```
