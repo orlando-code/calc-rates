@@ -16,6 +16,7 @@ def get_repo_root():
 # REPO DIRECTORIES
 repo_dir = get_repo_root()
 resources_dir = repo_dir / "resources"
+meta_dir = repo_dir / "meta_2022"
 module_dir = repo_dir / "calcification"
 
 # DATA DIRECTORIES
