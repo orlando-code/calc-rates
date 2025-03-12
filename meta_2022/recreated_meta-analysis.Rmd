@@ -1,0 +1,223 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(metafor) # need version 3.0 or higher (else 'regplot' function missing)
+library(tidyverse)
+library(MASS)
+library(viridis)
+library(patchwork)
+library(magick)
+library(ggsci)
+library(ggpubr)
+library(tidync)
+library(lubridate)
+library(rsvg)
+library(svglite)
+
+```
+
+```{r ggplot settings}
+#set general theme for figures
+theme_cca <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      panel.border = element_rect(colour = "black", fill = NA, linetype = 1),
+      panel.background = element_rect(fill = "transparent"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_blank(),
+      plot.title = element_text(face = "italic"),
+      axis.text = element_text(colour = "black"),
+      axis.ticks = element_line(colour = "black"),
+      legend.position = c(0.1,0.925),
+      legend.text.align = 0, 
+      legend.background = element_blank(), 
+      legend.spacing = unit(0, "lines"), 
+      legend.key = element_blank(), 
+      legend.spacing.y = unit(0.25, 'cm'),
+      legend.title = element_blank()
+    ) 
+}
+
+colour.scheme <- c("black",
+                   pal_npg(palette = c("nrc"), alpha = 1)(10)[4],
+                   pal_npg(palette = c("nrc"), alpha = 0.6)(10)[10],
+                   pal_npg(palette = c("nrc"), alpha = 0.6)(10)[1]
+)
+
+```
+
+
+```{r}
+t_in_data_hedges <- read.csv(file="data/tmp/results_t_in.csv")
+# fill nans with 0
+t_in_data_hedges[is.na(t_in_data_hedges)] <- 0
+```
+
+```{r}
+t_in_model <- rma.mv(yi = hedges_g,
+  V = hedges_g_var,
+  data = t_in_data_hedges,
+  method = "REML",
+  mods = ~ delta_t + t_in - 1,
+  test = "z",
+  random = list(~ 1 | (original_doi/ID))
+)
+
+t_in_cooks <- cooks.distance.rma.mv(
+  t_in_model, 
+  progbar = TRUE,
+  reestimate = TRUE, 
+  parallel = "multicore", 
+  ncpus = 8, 
+  cl = NULL
+)
+
+# Check if cook object exists with the correct name before using it
+if (exists("t_in_cooks")) {
+  # Plot Cook's distances
+  plot(t_in_cooks, type = "o", pch = 19, 
+       xlab = "ID", ylab = "Cook's Distance", xaxt = "n")
+  
+  axis(side = 1, at = seq_along(t_in_cooks), 
+       labels = as.numeric(names(t_in_cooks)))
+  
+  # Those studies with a Cook's distance greater than the threshold are removed.
+  # Threshold is ascertained by a conservative cut-off threshold of 
+  # 2√((k+1)/(n - k - 1)).
+  
+  t_in_outliers <- t_in_cooks %>% 
+    as_tibble() %>% 
+    mutate(ID = seq_len(nrow(t_in_data_hedges))) %>%
+    filter(value > 0.31)
+  
+  # Only remove outliers if any were found
+  if (nrow(t_in_outliers) > 0) {
+    t_in_data_hedges <- t_in_data_hedges[-c(t_in_outliers$ID), ]
+  }
+  # print how many outliers were removed
+    print(nrow(t_in_outliers))
+}
+```
+
+
+```{r include=FALSE}
+
+# Random-effects multi-level model for assessing calcification in adults is re-run after removing outliers.
+
+t_in_model <- rma.mv(yi = hedges_g,
+  V = hedges_g_var,
+  data = t_in_data_hedges,
+  method = "REML",
+  mods = ~ delta_t + t_in - 1,
+  test = "z",
+  random = list(~ 1 | (original_doi/ID))
+)
+
+```
+
+```{r, fig.width = 6, fig.height = 8}
+
+#Overall plot of all studies assessing calcification in adults
+
+svg(file = 't_in_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(t_in_model, mod = "delta_t", refline = 0, 
+  # xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "Temperature")))
+dev.off() 
+
+```
+
+
+
+```{r}
+phtot_data_hedges <- read.csv(file="data/tmp/results_phtot.csv")
+# fill nans with 0
+phtot_data_hedges[is.na(phtot_data_hedges)] <- 0
+```
+
+```{r}
+phtot_model <- rma.mv(yi = hedges_g,
+  V = hedges_g_var,
+  data = phtot_data_hedges,
+  method = "REML",
+  mods = ~ delta_pH + phtot - 1,
+  test = "z",
+  random = list(~ 1 | (original_doi / ID))
+)
+
+phtot_cooks <- cooks.distance.rma.mv(
+  phtot_model, 
+  progbar = TRUE,
+  reestimate = TRUE, 
+  parallel = "multicore", 
+  ncpus = 8, 
+  cl = NULL
+)
+
+# Check if cook object exists with the correct name before using it
+if (exists("phtot_cooks")) {
+  # Plot Cook's distances
+  plot(phtot_cooks, type = "o", pch = 19, 
+       xlab = "ID", ylab = "Cook's Distance", xaxt = "n")
+  
+  axis(side = 1, at = seq_along(phtot_cooks), 
+       labels = as.numeric(names(phtot_cooks)))
+  
+  # Those studies with a Cook's distance greater than the threshold are removed.
+  # Threshold is ascertained by a conservative cut-off threshold of 
+  # 2√((k+1)/(n - k - 1)).
+  
+  phtot_outliers <- phtot_cooks %>% 
+    as_tibble() %>% 
+    mutate(ID = seq_len(nrow(phtot_data_hedges))) %>%
+    filter(value > 0.31)
+  
+  # Only remove outliers if any were found
+  if (nrow(phtot_outliers) > 0) {
+    phtot_data_hedges <- phtot_data_hedges[-c(phtot_outliers$ID), ]
+  }
+  # print how many outliers were removed
+    print(nrow(phtot_outliers))
+}
+```
+
+
+```{r include=FALSE}
+
+# Random-effects multi-level model for assessing calcification in adults is re-run after removing outliers.
+
+phtot_model <- rma.mv(yi = hedges_g,
+  V = hedges_g_var,
+  data = phtot_data_hedges,
+  method = "REML",
+  mods = ~ delta_pH + phtot + factor(genus) - 1,
+  test = "z",
+  random = list(~ 1 | (original_doi/ID))
+)
+
+```
+
+```{r, fig.width = 10, fig.height = 12}
+# Create forest plot and save as SVG
+svg(file = 'phtot_forest_plot.svg')
+forest(phtot_model, slab = paste(phtot_data_hedges$genus, phtot_data_hedges$ID))
+dev.off()
+
+# Display forest plot in the document
+forest(phtot_model, slab = paste(phtot_data_hedges$genus, phtot_data_hedges$ID))
+
+```
+
+
+```{r, fig.width = 6, fig.height = 8}
+
+#Overall plot of all studies assessing calcification in adults
+
+svg(file = 'phtot_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(phtot_model, mod = "delta_pH", refline = 0, 
+  # xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH"[T])))
+dev.off() 
+
+```

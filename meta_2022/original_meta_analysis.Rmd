@@ -1,0 +1,1121 @@
+---
+title: "CCA - Meta-analysis BH"
+author: "Ben Harvey"
+date: "5/28/2021"
+output: html_document
+---
+
+#Setup and Packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(metafor) # need version 3.0 or higher (otherwise 'regplot' function missing)
+library(tidyverse)
+library(MASS)
+library(viridis)
+library(patchwork)
+library(magick)
+library(ggsci)
+library(ggpubr)
+library(tidync)
+library(lubridate)
+library(rsvg)
+library(svglite)
+
+```
+
+```{r ggplot settings}
+#set general theme for figures
+theme_cca <- function() {
+  theme_classic(base_size = 12) +
+    theme(
+      panel.border = element_rect(colour = "black", fill = NA, linetype = 1),
+      panel.background = element_rect(fill = "transparent"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_blank(),
+      plot.title = element_text(face = "italic"),
+      axis.text = element_text(colour = "black"),
+      axis.ticks = element_line(colour = "black"),
+      legend.position = c(0.1,0.925),
+      legend.text.align = 0, 
+      legend.background = element_blank(), 
+      legend.spacing = unit(0, "lines"), 
+      legend.key = element_blank(), 
+      legend.spacing.y = unit(0.25, 'cm'),
+      legend.title = element_blank()
+    ) 
+}
+
+colour.scheme <- c("black",
+                   pal_npg(palette = c("nrc"), alpha = 1)(10)[4],
+                   pal_npg(palette = c("nrc"), alpha = 0.6)(10)[10],
+                   pal_npg(palette = c("nrc"), alpha = 0.6)(10)[1]
+)
+
+```
+
+# Adult analysis
+
+```{r}
+
+#Data (csv file) is read in, and initial filtering applied. Small sample-size bias correction is then applied.
+
+adult.data.hedges <- read.csv(file = "raw data/adult_raw_data.csv") %>%
+  filter(Family != "") %>%
+  filter(!is.na(dpHt)) %>%
+  mutate(id = row.names(.)) %>%
+  mutate(correction = (1 - (3/(4*(n*2)-9)))) %>%
+  mutate(corrected_hedges = Hedges.G * correction) %>%
+  mutate(corrected_variance = Variance * (correction^2))
+
+```
+
+## Check for outliers
+
+```{r outlier check}
+
+# Random-effects multi-level model is applied for assessing calcification in adults.
+
+model.full.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+#Cook's Distance is used to assess for outliers. This is tested in parallel, number of CPU cores can be set by 'ncpus'
+
+model.full.adult.hedges.cooks <- 
+cooks.distance.rma.mv(model.full.adult.hedges.id.nested, progbar=TRUE,
+        reestimate=TRUE, parallel="multicore", ncpus=8, cl=NULL)
+
+plot(model.full.adult.hedges.cooks, type="o", pch=19, xlab="Study", ylab="Cook's Distance", xaxt="n")
+axis(side=1, at=seq_along(model.full.adult.hedges.cooks), labels=as.numeric(names(model.full.adult.hedges.cooks)))
+
+#Those studies with a Cook's distance greater than the threshold are removed. Threshold is ascertained by a conservative cut-off threshold of 2√((k+1)/(n - k - 1)). 
+
+adult.outliers <- 
+model.full.adult.hedges.cooks %>% 
+  as_tibble() %>% 
+  mutate(Study = seq(1:nrow(adult.data.hedges))) %>%
+  filter(value > 0.31)
+
+adult.data.hedges <- adult.data.hedges[-c(adult.outliers$Study),]
+
+rm(adult.outliers)
+
+```
+
+## Multi-level meta-analysis
+
+```{r include=FALSE}
+
+# Random-effects multi-level model for assessing calcification in adults is re-run after removing outliers.
+
+model.full.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+```
+
+## Overall Plot - Adults only
+
+```{r, fig.width = 6, fig.height = 8}
+
+#Overall plot of all studies assessing calcification in adults
+
+svg(file = 'output/adult_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.adult.hedges.id.nested, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+```
+
+## Individual plots for each family - Adults Only
+
+```{r}
+
+#Bubble plots for the separate families.
+
+model.full.adult.hedges.id.nested.Corallinaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Corallinaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/adult_Corallinaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.adult.hedges.id.nested.Corallinaceae, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.adult.hedges.id.nested.Lithophyllaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Lithophyllaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/adult_Lithophyllaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.adult.hedges.id.nested.Lithophyllaceae, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.adult.hedges.id.nested.Lithothamniaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Lithothamniaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/adult_Lithothamniaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.adult.hedges.id.nested.Lithothamniaceae, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.adult.hedges.id.nested.Mesophyllumaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Mesophyllumaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/adult_Mesophyllumaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.adult.hedges.id.nested.Mesophyllumaceae, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.adult.hedges.id.nested.Sporolithaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Sporolithaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/adult_Sporolithaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.adult.hedges.id.nested.Sporolithaceae, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+
+```
+
+## Predicted Effect Sizes at RCP Scenarios
+
+```{r}
+
+#Using the predict function, we can estimate the effect size at a particular set of environmental conditions. Here we used the mean value for the other parameters and use a fixed value for dpHt.
+
+summary(model.full.adult.hedges.id.nested)
+
+#First we test, using all environmental values at their mean.
+
+predict(model.full.adult.hedges.id.nested, newmods = colMeans(model.matrix(model.full.adult.hedges.id.nested)), digits=2)
+
+#This shows that calcification rate is -1.41 after accounting for differences between the different dpHt, Temperature and families. 
+
+###################
+
+#Here, we set the dpHt and leave other environmental conditions at their mean value.
+
+#RCP 2.6 (-0.05 by 2050 and -0.03 at 2100 pH)       RCP 4.5 (-0.07 at 2050 and -0.11 at 20100 pH)         RCP 8.5 (-0.11 at 2050 and -0.30 at 2100 pH).
+
+RCP.calc.rates_adult <- rbind(
+as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(0, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(-0.05, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(-0.03, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(-0.07, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(-0.11, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(-0.11, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(-0.30, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2))
+)
+
+```
+
+```{r}
+
+#In order to calculate the tipping point of significant effect, we run the random-effect multi-level model at different increments of dpHt in order to see at what dpHt the confidence interval no longer overlaps with zero.
+
+predict.list <- list()
+
+for(i in 1:400){
+
+j <- (i/1000)-0.401
+  
+predict.list[[i]] <- 
+  bind_cols(data_frame(dpHt = j),
+  as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(j, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2))
+)
+        }
+
+predict.list.combined <- bind_rows(predict.list) %>% 
+  dplyr::filter(ci.ub<0) %>%
+  arrange(-pred)
+
+predict.list.combined
+
+```
+
+
+
+# Juvenile analysis
+
+```{r}
+
+#Data (csv file) is read in, and initial filtering applied. Small sample-size bias correction is then applied.
+
+juvenile.data.hedges <- read.csv(file = "raw data/juvenile_raw_data.csv") %>%
+  filter(Family != "") %>%
+  filter(!is.na(dpHt)) %>%
+  mutate(id = row.names(.)) %>%
+  mutate(correction = (1 - (3/(4*(n*2)-9)))) %>%
+  mutate(corrected_hedges = Hedges.G * correction) %>%
+  mutate(corrected_variance = Variance * (correction^2))
+
+```
+
+## Check for outliers
+
+```{r outlier check}
+
+# Random-effects multi-level model is applied for assessing calcification in juveniles.
+
+model.full.juvenile.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+#Cook's Distance is used to assess for outliers. This is tested in parallel, number of CPU cores can be set by 'ncpus'
+
+model.full.juvenile.hedges.cooks <- 
+cooks.distance.rma.mv(model.full.juvenile.hedges.id.nested, progbar=TRUE,
+        reestimate=TRUE, parallel="multicore", ncpus=8, cl=NULL)
+
+plot(model.full.juvenile.hedges.cooks, type="o", pch=19, xlab="Study", ylab="Cook's Distance", xaxt="n")
+axis(side=1, at=seq_along(model.full.juvenile.hedges.cooks), labels=as.numeric(names(model.full.juvenile.hedges.cooks)))
+
+#Those studies with a Cook's distance greater than the threshold are removed. Threshold is ascertained by a conservative cut-off threshold of 2√((k+1)/(n - k - 1)). 
+
+juvenile.outliers <- 
+model.full.juvenile.hedges.cooks %>% 
+  as_tibble() %>% 
+  mutate(Study = seq(1:nrow(juvenile.data.hedges))) %>%
+  filter(value > 0.69)
+
+juvenile.data.hedges <- juvenile.data.hedges[-c(juvenile.outliers$Study),]
+
+rm(juvenile.outliers)
+
+```
+
+## Multi-level meta-analysis
+
+```{r include=FALSE}
+
+# Random-effects multi-level model for assessing calcification in juveniles is re-run after removing outliers.
+
+model.full.juvenile.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+```
+
+## Overall Plot - Juveniles only
+
+```{r, fig.width = 6, fig.height = 8}
+
+#Overall plot of all studies assessing calcification in juveniles.
+
+svg(file = 'output/juvenile_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.juvenile.hedges.id.nested, mod = "dpHt", refline = 0, xlim = c(-1,0.2), ylim = c(-6,6), predlim = c(-0.6,0),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+```
+
+## Individual plots for each family - Juveniles Only
+
+```{r}
+
+#Bubble plots for the separate families.
+
+model.full.juvenile.hedges.id.nested.Corallinaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Corallinaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/juvenile_Corallinaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.juvenile.hedges.id.nested.Corallinaceae, mod = "dpHt", refline = 0, xlim = c(-0.5,0), ylim = c(-6,6), predlim = c(-0.5,0),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.juvenile.hedges.id.nested.Lithophyllaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Lithophyllaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/juvenile_Lithophyllaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.juvenile.hedges.id.nested.Lithophyllaceae, mod = "dpHt", refline = 0, xlim = c(-0.5,0), ylim = c(-6,6), predlim = c(-0.5,0),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.juvenile.hedges.id.nested.Lithothamniaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Lithothamniaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/juvenile_Lithothamniaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.juvenile.hedges.id.nested.Lithothamniaceae, mod = "dpHt", refline = 0, xlim = c(-0.5,0), ylim = c(-6,6), predlim = c(-0.5,0),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.juvenile.hedges.id.nested.Mesophyllumaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Mesophyllumaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/juvenile_Mesophyllumaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.juvenile.hedges.id.nested.Mesophyllumaceae, mod = "dpHt", refline = 0, xlim = c(-0.5,0), ylim = c(-6,6), predlim = c(-0.5,0),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+model.full.juvenile.hedges.id.nested.Sporolithaceae <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature - 1,
+              test="z",
+              subset = (Family == "Sporolithaceae"),
+              random = list(~ 1| id/Study))
+
+
+svg(file = 'output/juvenile_Sporolithaceae_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.full.juvenile.hedges.id.nested.Sporolithaceae, mod = "dpHt", refline = 0, xlim = c(-0.5,0), ylim = c(-6,6), predlim = c(-0.5,0),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+##########
+
+
+
+```
+
+## Predicted Effect Sizes at RCP Scenarios
+
+```{r}
+#Using the predict function, we can estimate the effect size at a particular set of environmental conditions. Here we used the mean value for the other parameters and use a fixed value for dpHt.
+
+summary(model.full.juvenile.hedges.id.nested)
+
+#First we test, using all environmental values at their mean.
+
+predict(model.full.juvenile.hedges.id.nested, newmods = colMeans(model.matrix(model.full.juvenile.hedges.id.nested)), digits=2)
+
+#This shows that calcification rate is -1.70 after accounting for differences between the different dpHt, Temperature and families. 
+
+###################
+
+#Here, we set the dpHt and leave other environmental conditions at their mean value.
+
+#RCP 2.6 (-0.05 by 2050 and -0.03 at 2100 pH)       RCP 4.5 (-0.07 at 2050 and -0.11 at 20100 pH)         RCP 8.5 (-0.11 at 2050 and -0.30 at 2100 pH).
+
+RCP.calc.rates_juvenile <- rbind(
+as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(0, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(-0.05, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(-0.03, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(-0.07, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(-0.11, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(-0.11, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)),
+as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(-0.30, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2))
+)
+
+
+```
+
+# Final Figure Production
+
+```{r}
+
+# Summary of the Multi-level meta-analysis for Adults.
+summary(model.full.adult.hedges.id.nested)
+
+# Summary of the Multi-level meta-analysis for Juveniles.
+summary(model.full.juvenile.hedges.id.nested)
+
+```
+
+
+## Overall - Adults and Juveniles
+
+```{r overall plot}
+
+#This chunk combines the adult and juvenile plots together. It involves a work around for removing the unnecessary white space, and combining the figures together while maintaining the font size and quality. More efficient approaches undoubtedly exist.
+
+
+adult.overall.plot <- image_read_svg("output/adult_overall_bubble_with_id_nested-resize.svg", width = 4000)
+adult.overall.plot <- image_trim(adult.overall.plot)
+juvenile.overall.plot <- image_read_svg("output/juvenile_overall_bubble_with_id_nested-resize.svg", width = 4000)
+juvenile.overall.plot <- image_trim(juvenile.overall.plot)
+
+titles.coord <- data.frame(group = c("Adults"), x_coord = c(1000), y_coord = c(1000))
+titles.coord2 <- data.frame(group = c("Juveniles"), x_coord = c(1000), y_coord = c(1000))
+
+
+adult_overall_annot.plot <- ggplot()  +
+  annotation_raster(adult.overall.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord$x_coord, y = titles.coord$y_coord, label = titles.coord$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+juvenile_overall_annot.plot <- ggplot()  +
+  annotation_raster(juvenile.overall.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord2$x_coord, y = titles.coord2$y_coord, label = titles.coord2$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+
+adult_overall_annot.plot + juvenile_overall_annot.plot + 
+  plot_annotation(tag_levels = "A")
+
+ggsave(filename = "Final Figures/Figure 5.svg", width = unit(8, "in"), height = unit(4, "in"))
+ggsave(filename = "Final Figures/Figure 5.png", width = unit(8, "in"), height = unit(4, "in"))
+
+```
+
+## Adult - Family Plot
+
+```{r adult family plot}
+
+#As in the above chunk, this chunk of code combines the different families for adults. 
+
+adult.f1.plot <- image_read_svg("output/adult_Corallinaceae_bubble_with_id_nested.svg")
+adult.f1.plot <- image_trim(adult.f1.plot)
+adult.f2.plot <- image_read_svg("output/adult_Lithophyllaceae_bubble_with_id_nested.svg")
+adult.f2.plot <- image_trim(adult.f2.plot)
+adult.f3.plot <- image_read_svg("output/adult_Lithothamniaceae_bubble_with_id_nested.svg")
+adult.f3.plot <- image_trim(adult.f3.plot)
+adult.f4.plot <- image_read_svg("output/adult_Mesophyllumaceae_bubble_with_id_nested.svg")
+adult.f4.plot <- image_trim(adult.f4.plot)
+adult.f5.plot <- image_read_svg("output/adult_Sporolithaceae_bubble_with_id_nested.svg")
+adult.f5.plot <- image_trim(adult.f5.plot)
+
+
+titles.coord <- data.frame(group = c("Corallinaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord2 <- data.frame(group = c("Lithophyllaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord3 <- data.frame(group = c("Lithothamniaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord4 <- data.frame(group = c("Mesophyllumaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord5 <- data.frame(group = c("Sporolithaceae"), x_coord = c(1000), y_coord = c(1000))
+
+
+adult.f1_annot.plot <- ggplot()  +
+  annotation_raster(adult.f1.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord$x_coord, y = titles.coord$y_coord, label = titles.coord$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+adult.f2_annot.plot <- ggplot()  +
+  annotation_raster(adult.f2.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord2$x_coord, y = titles.coord2$y_coord, label = titles.coord2$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+adult.f3_annot.plot <- ggplot()  +
+  annotation_raster(adult.f3.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord3$x_coord, y = titles.coord3$y_coord, label = titles.coord3$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+adult.f4_annot.plot <- ggplot()  +
+  annotation_raster(adult.f4.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord4$x_coord, y = titles.coord4$y_coord, label = titles.coord4$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+adult.f5_annot.plot <- ggplot()  +
+  annotation_raster(adult.f5.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord5$x_coord, y = titles.coord5$y_coord, label = titles.coord5$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+
+adult.f1_annot.plot + adult.f2_annot.plot + adult.f3_annot.plot + adult.f4_annot.plot + adult.f5_annot.plot +
+  plot_layout(ncol = 3) +
+  plot_annotation(tag_levels = "A")
+
+ggsave(filename = "Final Figures/Figure S1.svg", width = unit(12, "in"), height = unit(10, "in"))
+
+```
+
+## Juveniles - Family Plot
+
+```{r juvenile family plot}
+
+#As in the above chunk, this chunk of code combines the different families for juveniles. 
+
+juvenile.f1.plot <- image_read_svg("output/juvenile_Corallinaceae_bubble_with_id_nested.svg")
+juvenile.f1.plot <- image_trim(juvenile.f1.plot)
+juvenile.f2.plot <- image_read_svg("output/juvenile_Lithophyllaceae_bubble_with_id_nested.svg")
+juvenile.f2.plot <- image_trim(juvenile.f2.plot)
+juvenile.f3.plot <- image_read_svg("output/juvenile_Lithothamniaceae_bubble_with_id_nested.svg")
+juvenile.f3.plot <- image_trim(juvenile.f3.plot)
+juvenile.f4.plot <- image_read_svg("output/juvenile_Mesophyllumaceae_bubble_with_id_nested.svg")
+juvenile.f4.plot <- image_trim(juvenile.f4.plot)
+juvenile.f5.plot <- image_read_svg("output/juvenile_Sporolithaceae_bubble_with_id_nested.svg")
+juvenile.f5.plot <- image_trim(juvenile.f5.plot)
+
+
+titles.coord <- data.frame(group = c("Corallinaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord2 <- data.frame(group = c("Lithophyllaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord3 <- data.frame(group = c("Lithothamniaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord4 <- data.frame(group = c("Mesophyllumaceae"), x_coord = c(1000), y_coord = c(1000))
+titles.coord5 <- data.frame(group = c("Sporolithaceae"), x_coord = c(1000), y_coord = c(1000))
+
+
+
+juvenile.f1_annot.plot <- ggplot()  +
+  annotation_raster(juvenile.f1.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord$x_coord, y = titles.coord$y_coord, label = titles.coord$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+juvenile.f2_annot.plot <- ggplot()  +
+  annotation_raster(juvenile.f2.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord2$x_coord, y = titles.coord2$y_coord, label = titles.coord2$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+juvenile.f3_annot.plot <- ggplot()  +
+  annotation_raster(juvenile.f3.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord3$x_coord, y = titles.coord3$y_coord, label = titles.coord3$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+juvenile.f4_annot.plot <- ggplot()  +
+  annotation_raster(juvenile.f4.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord4$x_coord, y = titles.coord4$y_coord, label = titles.coord4$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+juvenile.f5_annot.plot <- ggplot()  +
+  annotation_raster(juvenile.f5.plot, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  annotate(geom = "text", x = titles.coord5$x_coord, y = titles.coord5$y_coord, label = titles.coord5$group, size = 5, hjust = 1) + 
+  theme(legend.position = "none",
+         axis.line = element_blank(),
+         axis.text = element_blank(),
+         axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank()) +
+  coord_fixed(ratio = 1, ylim = c(0,1000), xlim = c(0,1000)) +
+  labs(y = "")
+
+
+juvenile.f1_annot.plot + juvenile.f2_annot.plot + juvenile.f3_annot.plot + juvenile.f4_annot.plot + juvenile.f5_annot.plot +
+  plot_layout(ncol = 3) +
+  plot_annotation(tag_levels = "A")
+
+ggsave(filename = "Final Figures/Figure S2.svg", width = unit(12, "in"), height = unit(10, "in"))
+
+```
+
+#Other excluded variables - Summaries
+
+```{r}
+
+#We additionally tested the model using ‘climate’ (modified from Nybakken, 2001 where we also consider the Mediterranean sea as "warm temperate") with tropical, warm-temperate, cold-temperate and polar, and ‘ocean basin’ (Atlantic, Pacific and Indian Oceans) as categorical moderators. However, these were subsequently dropped from the model due to their non-significant effects on the model. 
+
+
+##Adults
+
+adult.factor.climate.rma <- 
+rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Climate) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+regplot.rma(adult.factor.climate.rma, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+
+adult.factor.ocean.rma <- 
+rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Ocean) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+regplot.rma(adult.factor.ocean.rma, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+
+##Juveniles
+
+juvenile.factor.climate.rma <-
+rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Climate) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+regplot.rma(juvenile.factor.climate.rma, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+
+juvenile.factor.ocean.rma <-
+rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Ocean) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+regplot.rma(juvenile.factor.ocean.rma, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+```
+
+
+```{r}
+
+##########Ocean subsets#######
+
+juvenile.factor.ocean.rma.atlantic <-
+rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. - 1,
+              subset = (Ocean == "Atlantic"), 
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+juvenile.factor.ocean.rma.atlantic
+
+regplot.rma(juvenile.factor.ocean.rma.atlantic, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+
+juvenile.factor.ocean.rma.indian <-
+rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. - 1,
+              subset = (Ocean == "Indian"), 
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+juvenile.factor.ocean.rma.indian
+
+regplot.rma(juvenile.factor.ocean.rma.indian, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+
+juvenile.factor.ocean.rma.pacific <-
+rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = juvenile.data.hedges, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. - 1,
+              subset = (Ocean == "Pacific"), 
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+juvenile.factor.ocean.rma.pacific
+
+regplot.rma(juvenile.factor.ocean.rma.pacific, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+
+
+```
+
+# RCP Scenario Predictions
+
+```{r}
+
+#The results of the multivariate mixed-effects linear model were extrapolated for each of the RCP 2.6, RCP4.5 and RCP8.5 scenarios (function: predict.rma) using yearly global mean surface pHT values from the CanESM2 climate model (Canadian Centre for Climate Modelling and Analysis; CMIP5, ensemble r1i1p1). The CanESM2 climate models were previously downloaded from 'Earth System Grid Federation (ESGF)'  https://esgf-node.llnl.gov/search/cmip5/
+
+#Due to their large size, the raw pH files for the 'ph_Omon_CanESM2' model are not provided and need to be downloaded from ESGF or similar repository.
+
+#Filenames in this chunk will need to be changed to match the filenames in the directory for each RCP scenario.
+
+model_historical <- tidync("raw data/pH Data/ph_Omon_CanESM2_historical_r1i1p1_185001-200512_newtime.nc") %>%
+          hyper_tibble() %>%
+          dplyr::select(lon, lat, time, ph) %>% 
+          dplyr::rename(t = time) %>%
+          mutate(t = strptime(t, format = "%Y%m%d")) %>%
+          mutate(t = as_date(t)) %>%
+          filter(!is.na(t))
+
+model_rcp26 <- tidync("raw data/pH Data/ph_Omon_CanESM2_rcp26_r1i1p1_200601-210012_newtime.nc") %>%
+          hyper_tibble() %>%
+          dplyr::select(lon, lat, time, ph) %>% 
+          dplyr::rename(t = time) %>%
+          mutate(t = strptime(t, format = "%Y%m%d")) %>%
+          mutate(t = as_date(t)) %>%
+          filter(!is.na(t))
+
+model_rcp45 <- tidync("raw data/pH Data/ph_Omon_CanESM2_rcp45_r1i1p1_200601-210012_newtime.nc") %>%
+          hyper_tibble() %>%
+          dplyr::select(lon, lat, time, ph) %>% 
+          dplyr::rename(t = time) %>%
+          mutate(t = strptime(t, format = "%Y%m%d")) %>%
+          mutate(t = as_date(t)) %>%
+          filter(!is.na(t))
+
+model_rcp85 <- tidync("raw data/pH Data/ph_Omon_CanESM2_rcp85_r1i1p1_200601-210012_newtime.nc") %>%
+          hyper_tibble() %>%
+          dplyr::select(lon, lat, time, ph) %>% 
+          dplyr::rename(t = time) %>%
+          mutate(t = strptime(t, format = "%Y%m%d")) %>%
+          mutate(t = as_date(t)) %>%
+          filter(!is.na(t))
+
+```
+
+
+```{r}
+
+#Combine the different RCP model objects (historical, RCP2.6, RCP4.5, RCP8.5) together, to make figure production easier.
+
+model_historical <- model_historical %>% mutate(rcp_scenario = "historical") %>% dplyr::select(lon, lat, t, rcp_scenario, ph)
+
+model_rcp_combined <- left_join(model_rcp26, model_rcp45, by = c("lon", "lat", "t"))
+
+model_rcp_combined <- left_join(model_rcp_combined, model_rcp85, by = c("lon", "lat", "t"))
+
+colnames(model_rcp_combined) <- c("lon", "lat","t","rcp26_ph","rcp45_ph","rcp85_ph")
+
+model_rcp_combined_long <- pivot_longer(model_rcp_combined, cols = 4:6, names_to = "rcp_scenario", values_to = "ph")
+
+model_rcp_combined_long <- bind_rows(model_rcp_combined_long, model_historical)
+
+#As we're working with dpHt for our predictions, we convert the pH to dpHt for delta_ph.
+
+model_rcp_combined_long_summary <-
+model_rcp_combined_long %>%
+  mutate(t = floor_date(t, "year")) %>%
+  group_by(t, rcp_scenario) %>%
+  summarise(mean_ph = mean(ph),
+            sd_ph = sd(ph)) %>%
+  mutate(delta_ph = mean_ph-8.052352)
+
+```
+
+
+```{r}
+
+# Predicted changes in pH from 2005-2100 for each RCP scenario based on the CanESM2 model.
+
+model_rcp_combined_long_summary_ph_plot <-
+model_rcp_combined_long_summary %>%
+  mutate(rcp_scenario = factor(rcp_scenario, levels = c("historical","rcp26_ph","rcp45_ph","rcp85_ph"), labels = c("Historical","RCP2.6", "RCP4.5","RCP8.5"))) %>%
+  ggplot(data = ., aes(y = mean_ph, x = t, colour = rcp_scenario, fill = rcp_scenario, lty = rcp_scenario)) +
+  geom_smooth(method="gam", se = FALSE) + 
+  theme_cca() + 
+  theme(legend.position = "top") +
+  labs(y = expression(pH[T]), x = "Year") +
+  scale_x_date(expand = c(0,0),
+               limits = c(as_date("1950-01-01"),as_date("2105-01-01")),
+               breaks = scales::pretty_breaks(n = 7),
+               date_labels = "%Y"
+               ) +
+   coord_cartesian(ylim = c(7.7,8.2)) +
+  scale_colour_manual(values = colour.scheme) +
+  scale_fill_manual(values = colour.scheme) + 
+  scale_linetype_manual(values = c(1,5,5,5))
+  
+```
+
+```{r}
+
+# The meta-analysis multi-level model predictions for calcification in adults are applied to each of the RCP scenarios. Other variables are kept at their mean values.
+
+model_rcp_combined_long_summary_and_predict_adult <- 
+model_rcp_combined_long_summary %>%
+  rowwise() %>%
+  mutate(calc_pred = (as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)))$pred) %>%
+  mutate(calc_pred_se = (as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)))$se) %>%
+  mutate(calc_pred_ci.lb = (as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)))$ci.lb) %>%
+  mutate(calc_pred_ci.ub = (as_tibble(predict(model.full.adult.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.adult.hedges.id.nested))[-c(1)]), digits=2)))$ci.ub)
+
+model_rcp_combined_long_summary_rcp_plot_adult_historical <-
+model_rcp_combined_long_summary_and_predict_adult %>%
+  mutate(rcp_scenario = factor(rcp_scenario, levels = c("historical","rcp26_ph","rcp45_ph","rcp85_ph"), labels = c("Historical","RCP2.6", "RCP4.5","RCP8.5"))) %>%
+  filter(rcp_scenario == "Historical") %>%
+  ggplot(data = ., aes(y = calc_pred, x = t, fill = rcp_scenario, colour = rcp_scenario)) +
+  geom_smooth(method="gam") + 
+  geom_ribbon(aes(ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub), alpha = 0.3, lty = "dashed") +
+  theme_cca() + 
+  theme(legend.position = "none") +
+  labs(y = "Hedges' g", x = "Year") + 
+  geom_hline(yintercept = 0, size = 0.5) +
+  scale_x_date(expand = c(0,0),
+               limits = c(as_date("1950-01-01"),as_date("2105-01-01")),
+               breaks = scales::pretty_breaks(n = 7),
+               date_labels = "%Y"
+               ) +
+  coord_cartesian(ylim = c(-2,1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 7)) +
+  scale_colour_manual(values = colour.scheme) +
+  scale_fill_manual(values = colour.scheme)
+
+
+model_rcp_combined_long_summary_rcp_plot_adult_rcp26 <- 
+  model_rcp_combined_long_summary_rcp_plot_adult_historical + 
+  geom_smooth(data = subset(model_rcp_combined_long_summary_and_predict_adult, rcp_scenario == "rcp26_ph"), aes(y = calc_pred, x = t, colour = rcp_scenario), method="gam") + 
+  geom_ribbon(data = subset(model_rcp_combined_long_summary_and_predict_adult, rcp_scenario == "rcp26_ph"), aes(y = calc_pred, x = t, ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub, fill = rcp_scenario, colour = rcp_scenario), alpha = 0.3, lty = "dashed") + 
+    scale_colour_manual(values = colour.scheme[c(1,2)]) +
+  scale_fill_manual(values = colour.scheme[c(1,2)]) + 
+  labs(caption = "RCP2.6") + 
+  theme(plot.caption = element_text(face = "bold"))
+
+model_rcp_combined_long_summary_rcp_plot_adult_rcp45 <- 
+  model_rcp_combined_long_summary_rcp_plot_adult_historical + 
+  geom_smooth(data = subset(model_rcp_combined_long_summary_and_predict_adult, rcp_scenario == "rcp45_ph"), aes(y = calc_pred, x = t, colour = rcp_scenario), method="gam") + 
+  geom_ribbon(data = subset(model_rcp_combined_long_summary_and_predict_adult, rcp_scenario == "rcp45_ph"), aes(y = calc_pred, x = t, ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub, fill = rcp_scenario, colour = rcp_scenario), alpha = 0.3, lty = "dashed") + 
+    scale_colour_manual(values = colour.scheme[c(1,3)]) +
+  scale_fill_manual(values = colour.scheme[c(1,3)]) + 
+  labs(caption = "RCP4.5") + 
+  theme(plot.caption = element_text(face = "bold"))
+
+model_rcp_combined_long_summary_rcp_plot_adult_rcp85 <- 
+  model_rcp_combined_long_summary_rcp_plot_adult_historical + 
+  geom_smooth(data = subset(model_rcp_combined_long_summary_and_predict_adult, rcp_scenario == "rcp85_ph"), aes(y = calc_pred, x = t, colour = rcp_scenario), method="gam") + 
+  geom_ribbon(data = subset(model_rcp_combined_long_summary_and_predict_adult, rcp_scenario == "rcp85_ph"), aes(y = calc_pred, x = t, ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub, fill = rcp_scenario, colour = rcp_scenario), alpha = 0.3, lty = "dashed") + 
+    scale_colour_manual(values = colour.scheme[c(1,4)]) +
+  scale_fill_manual(values = colour.scheme[c(1,4)]) + 
+  labs(caption = "RCP8.5") + 
+  theme(plot.caption = element_text(face = "bold"))
+
+```
+
+```{r, fig.height=8, fig.width=12}
+
+(model_rcp_combined_long_summary_ph_plot + 
+model_rcp_combined_long_summary_rcp_plot_adult_rcp26 + 
+model_rcp_combined_long_summary_rcp_plot_adult_rcp45 + 
+model_rcp_combined_long_summary_rcp_plot_adult_rcp85) +
+plot_annotation(tag_levels = 'a', tag_prefix = "(", tag_suffix = ")") +
+plot_layout(ncol = 2, nrow = 2) & 
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        plot.tag = element_text(face = 'bold'))
+  
+ggsave(filename = "Final Figures/Figure 6.pdf")
+ggsave(filename = "Final Figures/Figure 6.png")
+
+```
+
+```{r}
+
+# The meta-analysis multi-level model predictions for calcification in juveniles are applied to each of the RCP scenarios. Other variables are kept at their mean values.
+
+model_rcp_combined_long_summary_and_predict_juvenile <- 
+model_rcp_combined_long_summary %>%
+  rowwise() %>%
+  mutate(calc_pred = (as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)))$pred) %>%
+  mutate(calc_pred_se = (as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)))$se) %>%
+  mutate(calc_pred_ci.lb = (as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)))$ci.lb) %>%
+  mutate(calc_pred_ci.ub = (as_tibble(predict(model.full.juvenile.hedges.id.nested, newmods = c(delta_ph, colMeans(model.matrix(model.full.juvenile.hedges.id.nested))[-c(1)]), digits=2)))$ci.ub)
+
+model_rcp_combined_long_summary_rcp_plot_juvenile_historical <-
+model_rcp_combined_long_summary_and_predict_juvenile %>%
+  mutate(rcp_scenario = factor(rcp_scenario, levels = c("historical","rcp26_ph","rcp45_ph","rcp85_ph"), labels = c("Historical","RCP2.6", "RCP4.5","RCP8.5"))) %>%
+  filter(rcp_scenario == "Historical") %>%
+  ggplot(data = ., aes(y = calc_pred, x = t, fill = rcp_scenario, colour = rcp_scenario)) +
+  geom_smooth(method="gam") + 
+  geom_ribbon(aes(ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub), alpha = 0.3, lty = "dashed") +
+  theme_cca() + 
+  theme(legend.position = "none") +
+  labs(y = "Hedges' g", x = "Year") + 
+  geom_hline(yintercept = 0, size = 0.5) +
+  scale_x_date(expand = c(0,0),
+               limits = c(as_date("1950-01-01"),as_date("2105-01-01")),
+               breaks = scales::pretty_breaks(n = 7),
+               date_labels = "%Y"
+               ) +
+  coord_cartesian(ylim = c(-4,1)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 7)) +
+  scale_colour_manual(values = colour.scheme) +
+  scale_fill_manual(values = colour.scheme)
+
+
+model_rcp_combined_long_summary_rcp_plot_juvenile_rcp26 <- 
+  model_rcp_combined_long_summary_rcp_plot_juvenile_historical + 
+  geom_smooth(data = subset(model_rcp_combined_long_summary_and_predict_juvenile, rcp_scenario == "rcp26_ph"), aes(y = calc_pred, x = t, colour = rcp_scenario), method="gam") + 
+  geom_ribbon(data = subset(model_rcp_combined_long_summary_and_predict_juvenile, rcp_scenario == "rcp26_ph"), aes(y = calc_pred, x = t, ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub, fill = rcp_scenario, colour = rcp_scenario), alpha = 0.3, lty = "dashed") + 
+    scale_colour_manual(values = colour.scheme[c(1,2)]) +
+  scale_fill_manual(values = colour.scheme[c(1,2)]) + 
+  labs(caption = "RCP2.6") + 
+  theme(plot.caption = element_text(face = "bold"))
+
+model_rcp_combined_long_summary_rcp_plot_juvenile_rcp45 <- 
+  model_rcp_combined_long_summary_rcp_plot_juvenile_historical + 
+  geom_smooth(data = subset(model_rcp_combined_long_summary_and_predict_juvenile, rcp_scenario == "rcp45_ph"), aes(y = calc_pred, x = t, colour = rcp_scenario), method="gam") + 
+  geom_ribbon(data = subset(model_rcp_combined_long_summary_and_predict_juvenile, rcp_scenario == "rcp45_ph"), aes(y = calc_pred, x = t, ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub, fill = rcp_scenario, colour = rcp_scenario), alpha = 0.3, lty = "dashed") + 
+    scale_colour_manual(values = colour.scheme[c(1,3)]) +
+  scale_fill_manual(values = colour.scheme[c(1,3)]) + 
+  labs(caption = "RCP4.5") + 
+  theme(plot.caption = element_text(face = "bold"))
+
+model_rcp_combined_long_summary_rcp_plot_juvenile_rcp85 <- 
+  model_rcp_combined_long_summary_rcp_plot_juvenile_historical + 
+  geom_smooth(data = subset(model_rcp_combined_long_summary_and_predict_juvenile, rcp_scenario == "rcp85_ph"), aes(y = calc_pred, x = t, colour = rcp_scenario), method="gam") + 
+  geom_ribbon(data = subset(model_rcp_combined_long_summary_and_predict_juvenile, rcp_scenario == "rcp85_ph"), aes(y = calc_pred, x = t, ymin = calc_pred_ci.lb, ymax = calc_pred_ci.ub, fill = rcp_scenario, colour = rcp_scenario), alpha = 0.3, lty = "dashed") + 
+    scale_colour_manual(values = colour.scheme[c(1,4)]) +
+  scale_fill_manual(values = colour.scheme[c(1,4)]) + 
+  labs(caption = "RCP8.5") + 
+  theme(plot.caption = element_text(face = "bold"))
+
+```
+
+```{r, fig.height=8, fig.width=12}
+
+(model_rcp_combined_long_summary_ph_plot | 
+model_rcp_combined_long_summary_rcp_plot_juvenile_rcp26 | 
+model_rcp_combined_long_summary_rcp_plot_juvenile_rcp45 | 
+model_rcp_combined_long_summary_rcp_plot_juvenile_rcp85) +
+plot_annotation(tag_levels = 'A') +
+plot_layout(ncol = 2, nrow = 2)
+
+ggsave(filename = "Final Figures/rcp_scenarios_juvenile.pdf")
+ggsave(filename = "Final Figures/rcp_scenarios_juvenile.png")
+
+
+```
+
+
+
