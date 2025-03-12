@@ -187,3 +187,6 @@ output/
 
 # yaml config files TODO: include in final repo
 resources/
+
+# ignore specific data files
+cornwall_data.csv
