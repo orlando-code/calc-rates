@@ -11,7 +11,7 @@ import itertools
 import string
 
 # custom
-import utils
+from calcification import utils
 import cbsyst as cb
 from tqdm import tqdm
 import cbsyst.helpers as cbh

@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 # custom
-import utils
+from calcification import utils
 import cbsyst.helpers as cbh
 
 ### core analysis calculations
