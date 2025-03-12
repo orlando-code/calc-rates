@@ -43,7 +43,7 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
         yaml.dump(data, file)
 
 ### processing files
-def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'extractor': 'Orlando', 'include': 'yes'}) -> pd.DataFrame:
+def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
 
     # general processing
@@ -52,11 +52,11 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     df.columns = df.columns.str.replace(' ', '_')   # process columns to replace whitespace with underscore
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
     df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
-
-
+    # fill down necessary repeated metadata values
     df[['doi', 'year', 'authors', 'location', 'species_types']] = df[['doi', 'year', 'authors', 'location', 'species_types']].infer_objects(copy=False).ffill()
-
-    # apply selection
+    
+    df['genus'] = df.species_types.apply(lambda x: binomial_to_genus_species(x)[0])
+    df['species'] = df.species_types.apply(lambda x: binomial_to_genus_species(x)[1])    # apply selection
     if selection_dict:
         for key, value in selection_dict.items():
             df = df[df[key] == value]
@@ -69,13 +69,12 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     
     problem_cols = ['irr', 'ipar']  # some columns have rogue strings when they should all contain numbers: in this case, convert unconvertable values to NaN
     for col in problem_cols:
-        # df.loc[:, df.columns == col] = df.loc[:, df.columns == col].apply(pd.to_numeric, errors='coerce')
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
     df['irr'] = df.apply(lambda row: irradiance_conversion(row['ipar'], 'PAR') if pd.notna(row['ipar']) else row['irr'], axis=1)  # convert irradiance to consistent unit
     
     if require_results:
-        df = df.dropna(subset=['n', 'calcification', 'calcification_units'])    # keep only rows with all the necessary data
+        df = df.dropna(subset=['n', 'calcification'])    # keep only rows with all the necessary data
     
     # calculate calcification standard deviation only when 'calcification_se' and 'n' are not NaN
     df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else row['calcification_sd'], axis=1)
@@ -112,12 +111,56 @@ def safe_to_numeric(col):
         return col  # Return original column if conversion fails
     
     
+def extract_year_from_str(s) -> pd.Timestamp:
+    """Extract year from a string. Useful for cases where 'authors' has been provided with attached year.
+    
+    Args:
+        s (str): String containing year.
+        
+    Returns:
+        pd.Timestamp: Year extracted from string.
+    """
+    try:
+        match = re.search(r'\d{4}', str(s))
+        if match:
+            return pd.to_datetime(match.group(), format='%Y')
+        return pd.NaT
+    except ValueError:
+        return None
+
+
 def irradiance_conversion(irr_val: float, irr_unit: str="PAR") -> float:
     # convert from mol quanta m-2 day-1 to μmol quanta m-2 s-1
     s_in_day = DURATIONS['s']
-    return irr_val / s_in_day * PREFIXES['μ'] if irr_unit == "PAR" else irr_val
+    return irr_val / (s_in_day * PREFIXES['μ']) if irr_unit == "PAR" else irr_val
     
+
+def binomial_to_genus_species(binomial):
+    """
+    Convert a binomial name to genus and species.
     
+    Args:
+        binomial (str): Binomial name.
+        
+    Returns:
+        tuple: Genus and species names.
+    """
+    # strip periods, 'cf' (used to compare with known species)
+    binomial = binomial.replace('.', '')
+    binomial = binomial.replace('cf', '')
+    split = binomial.split(' ')
+    # remove any empty strings (indicative of leading/trailing whitespace)
+    split = [s for s in split if s]
+    
+    if 'spp' in binomial or 'sp' in split:
+        genus = split[0]
+        species = 'spp'
+    else:
+        genus = split[0]
+        species = split[-1] if len(split) > 1 else 'spp'
+    return genus, species
+
+
 def get_highlighted_mask(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") -> pd.DataFrame:
     """
     Creates a boolean mask DataFrame where True indicates a highlighted cell.
@@ -146,9 +189,10 @@ def get_highlighted_mask(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") 
             if cell.fill and cell.fill.fgColor and cell.fill.fgColor.rgb == rgb_color:
                 mask.iat[row_idx, col_idx] = True
                 
-    # set column of 'include' to True   # TODO: hacky, but useful for future processing
-    if 'Include' in mask.columns:
-        mask['Include'] = True
+    # Always mark 'include' and 'n' columns as True for future processing
+    for col in ['Include', 'n', 'Species types']:
+        if col in mask.columns:
+            mask[col] = True
 
     return mask
 
@@ -296,7 +340,6 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data") -> pd.Data
     carb_chem_cols = carb_metadata['carbonate_chemistry_cols']
     out_values = carb_metadata['carbonate_chemistry_params']
     carb_df = measured_df[carb_chem_cols].copy()
-
 
     # apply function row-wise
     tqdm.pandas(desc="Calculating carbonate chemistry")
