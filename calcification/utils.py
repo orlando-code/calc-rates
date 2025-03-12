@@ -45,22 +45,31 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
 ### processing files
 def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
-
     # general processing
     df.rename(columns=read_yaml(config.resources_dir / "mapping.yaml")['sheet_column_map'], inplace=True)    # rename columns to agree with cbsyst output    
     df.columns = df.columns.str.lower() # columns lower case headers for less confusing access later on
     df.columns = df.columns.str.replace(' ', '_')   # process columns to replace whitespace with underscore
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
     df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
-    # fill down necessary repeated metadata values
-    df[['doi', 'year', 'authors', 'location', 'species_types']] = df[['doi', 'year', 'authors', 'location', 'species_types']].infer_objects(copy=False).ffill()
     
-    df['genus'] = df.species_types.apply(lambda x: binomial_to_genus_species(x)[0])
-    df['species'] = df.species_types.apply(lambda x: binomial_to_genus_species(x)[1])    # apply selection
-    if selection_dict:
+    if selection_dict:  # filter for selected values
         for key, value in selection_dict.items():
             df = df[df[key] == value]
+            
+    df = df.assign(
+        genus=df.species_types.apply(lambda x: binomial_to_genus_species(x)[0]),
+        species=df.species_types.apply(lambda x: binomial_to_genus_species(x)[1])
+    )   # separate binomials into genus and species columns
+    
+    # flag up duplicate dois (only if they have also have 'include' as 'yes')
+    inclusion_df = df[df['include'] == 'yes']
+    duplicate_dois = inclusion_df[inclusion_df.duplicated(subset='doi', keep=False)]
+    if not duplicate_dois.empty and not all(pd.isna(duplicate_dois['doi'])):
+        print("\nDuplicate DOIs found, treat with caution:")
+        print([doi for doi in duplicate_dois.doi.unique() if doi is not np.nan])        
         
+    # fill down necessary repeated metadata values
+    df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']] = df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']].infer_objects(copy=False).ffill()
     # missing sample size values
     df = df[~df['n'].str.contains('~', na=False)]   # remove any rows in which 'n' has '~' in the string
     df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
