@@ -11,7 +11,7 @@ import itertools
 import string
 
 # custom
-from calcification import utils
+from calcification import utils, config
 import cbsyst as cb
 from tqdm import tqdm
 import cbsyst.helpers as cbh
@@ -47,7 +47,7 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
 
     # general processing
-    df.rename(columns=read_yaml("data/mapping.yaml")['sheet_column_map'], inplace=True)    # rename columns to agree with cbsyst output    
+    df.rename(columns=read_yaml(config.resources_dir / "mapping.yaml")['sheet_column_map'], inplace=True)    # rename columns to agree with cbsyst output    
     df.columns = df.columns.str.lower() # columns lower case headers for less confusing access later on
     df.columns = df.columns.str.replace(' ', '_')   # process columns to replace whitespace with underscore
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
@@ -336,7 +336,7 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data") -> pd.Data
     
     ### calculate carbonate chemistry
     print("Calculating carbonate chemistry parameters...")
-    carb_metadata = read_yaml("data/mapping.yaml")
+    carb_metadata = read_yaml(config.resources_dir / "mapping.yaml")
     carb_chem_cols = carb_metadata['carbonate_chemistry_cols']
     out_values = carb_metadata['carbonate_chemistry_params']
     carb_df = measured_df[carb_chem_cols].copy()
