@@ -184,3 +184,6 @@ climatology/
 
 # output files/graphs TODO: include in final repo
 output/
+
+# yaml config files TODO: include in final repo
+resources/
