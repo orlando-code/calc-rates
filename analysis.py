@@ -87,6 +87,7 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     d = calc_cohens_d(mu1, mu2, sd_pooled)
     var = calc_cohens_d_var(n1, n2, d)
     bias_correction = calc_bias_correction(n1, n2)
+    hedges_g_var = var * bias_correction ** 2
     
     hedges_g = d * bias_correction
     # calculate 95% confidence intervals
@@ -94,7 +95,7 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     hedges_g_lower = hedges_g - 1.959964 * se_g
     hedges_g_upper = hedges_g + 1.959964 * se_g
     
-    return hedges_g, (hedges_g_lower, hedges_g_upper)
+    return hedges_g, hedges_g_var, (hedges_g_lower, hedges_g_upper)
 
 
 ### determining treatment conditions
@@ -122,6 +123,59 @@ def determine_control_conditions(df) -> dict:
         }
 
     return control_treatments
+
+
+def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: float, t_mapping: dict, ph_mapping: dict, irr_group: float) -> pd.DataFrame:
+    
+    # apply classification to each row in this group
+    for idx in df.index:
+        row = df.loc[idx]
+        
+        # get temperature cluster level (0 is control)
+        t_level = None
+        if not np.isnan(row['t_in']) and control_T is not None:
+            t_cluster_idx = t_mapping.get(row['t_in'])
+            control_cluster_idx = t_mapping.get(control_T)
+            if t_cluster_idx is not None and control_cluster_idx is not None:
+                t_level = t_cluster_idx - control_cluster_idx
+        
+        # get pH cluster level (0 is control)
+        ph_level = None
+        if not np.isnan(row['phtot']) and control_pH is not None:
+            ph_cluster_idx = ph_mapping.get(row['phtot'])
+            control_cluster_idx = ph_mapping.get(control_pH)
+            if ph_cluster_idx is not None and control_cluster_idx is not None:
+                ph_level = control_cluster_idx - ph_cluster_idx  # reverse order since higher pH is control
+        
+        # determine clusters for cases where there is only one of t or ph
+        if t_level is None and ph_level is not None:
+            t_level = 0
+        if ph_level is None and t_level is not None:
+            ph_level = 0
+                    
+        # determine if values are in control clusters   # TODO: not currently capturing rare case when studies have both T and pH varied from control with no intermediary values
+        is_control_T = t_level == 0 if t_level is not None else False
+        is_control_pH = ph_level == 0 if ph_level is not None else False
+        
+        # classify the treatment
+        if is_control_T and is_control_pH:
+            treatment = 'cTcP'
+        elif is_control_T:
+            treatment = 'cTtP'
+        elif is_control_pH:
+            treatment = 'tTcP'
+        elif not (is_control_T or is_control_pH):
+            treatment = 'tTtP'
+        else:
+            treatment = 'uncertain'
+            
+        # Update the treatment info in the result dataframe
+        df.loc[idx, 'treatment_group'] = treatment
+        df.loc[idx, 'treatment_level_t'] = t_level if t_level is not None else np.nan
+        df.loc[idx, 'treatment_level_ph'] = ph_level if ph_level is not None else np.nan
+        df.loc[idx, 'irr_group'] = irr_group
+
+    return df
 
 
 def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.1, irr_atol: float=30) -> pd.DataFrame:
@@ -269,10 +323,10 @@ def hedges_g_for_row(treatment_row: pd.Series, control_data: pd.Series) -> pd.Se
     t_in_c, ph_c = control_data['t_in'], control_data['ph']
     
     if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
-        print(f"Missing data for Hedges' g calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f}")
+        print(f"Missing data for Hedges' g calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]")
     
     # calculate Hedges' g
-    h_g, (h_g_l, h_g_u) = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)
+    h_g, h_g_var, (h_g_l, h_g_u) = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)
     
     row_copy = treatment_row.copy() # create a copy to avoid SettingWithCopyWarning
     
@@ -280,6 +334,7 @@ def hedges_g_for_row(treatment_row: pd.Series, control_data: pd.Series) -> pd.Se
     row_copy['delta_pH'] = row_copy['phtot'] - ph_c
     row_copy['treatment_val'] = row_copy['t_in'] if row_copy['treatment'] == 't_in' else row_copy['phtot']
     row_copy['hedges_g'] = h_g
+    row_copy['hedges_g_var'] = h_g_var
     row_copy['hedges_g_l'] = h_g_l
     row_copy['hedges_g_u'] = h_g_u
     row_copy['control_calcification'] = mu_c
@@ -320,14 +375,13 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pandas.DataFrame: DataFrame with Hedges' g calculations
     """
+    result_dfs = []
     loi = ['phtot', 't_in', 'calcification', 'calcification_sd', 'n']
-    # Extract control data
-    control_df = species_df[species_df['treatment_group'] == 'cTcP']
+    control_df = species_df[species_df['treatment_group'] == 'cTcP']    # extract control data
     if control_df.empty:
-        print(f"Control group not found for {species_df['doi'].iloc[0]}")
+        print(f"Control group not found for {species_df['doi'].iloc[0]}, for \n{species_df[['species_types']+loi].iloc[0]}")
         return None
-    if len(control_df) > 1:
-        # aggregate control data by taking the mean of the rows. Insert the standard deviation of the 'calcification' column in the 'calcification_sd' column
+    if len(control_df) > 1: # if multiple possible controls, aggregate
         control_row = aggregate_by_treatment_group(control_df)
     else:
         control_row = control_df.iloc[0]
@@ -340,18 +394,27 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
         'ph': control_row['phtot']
     }
     
+    # append control_df to result_dfs
+    if not control_df.empty and not pd.isna(control_row).all():
+        control_row_df = pd.DataFrame(control_row).T
+
+        # Explicitly check for all-NA columns and remove them
+        if not control_row_df.dropna(how="all", axis=1).empty:
+            result_dfs.append(control_row_df)
+            
     # process each treatment group
-    result_dfs = []
     for treatment_group, treatment_df in species_df.groupby('treatment_group'):
+        if treatment_group in ['tTtP', 'uncertain', 'cTcP']:
+            # TODO: implement handling for multivariate treatments
+            continue
+                
         # in the case that all n == 1 (individual datapoints), aggregate by treatment_group
         if np.all(treatment_df.n == 1):
             treatment_row = aggregate_by_treatment_group(treatment_df) # hedges_g_for_row requires df input
             result_dfs.append(pd.DataFrame(hedges_g_for_row(treatment_row, control_data)).T)
             continue
-        if treatment_group in ['tTtP', 'uncertain', 'cTcP']:
-            # result_dfs.append(treatment_df)
-            continue                
-                
+        
+        
         # apply hedges_g calculation to each row
         processed_df = treatment_df.apply(
             lambda row: hedges_g_for_row(row, control_data),
@@ -362,7 +425,16 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
         if np.any(processed_df.n == 1):
             print('here')
     
-    return pd.concat(result_dfs, axis=0) if result_dfs else None
+    if result_dfs:
+        # Drop all-NA columns from each DataFrame before concatenation
+        filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
+
+        # Ensure at least one DataFrame is non-empty before concatenation
+        filtered_dfs = [df for df in filtered_dfs if not df.empty]
+
+        return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
+    else:
+        return None
 
 
 def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -394,9 +466,15 @@ def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
                 if df is not None:
                     if np.any(df.n == 1):
                         print('here')
-                grouped_data.append(df)
+                    grouped_data.append(df)
                 
-    return pd.concat(grouped_data)
+    # TODO: fix this: still raising the futurewarning error
+    valid_dfs = [df for df in grouped_data if df is not None and not df.empty and not df.isna().all().all()]
+    if valid_dfs:
+        return pd.concat(valid_dfs)
+    else:
+        # Return empty DataFrame with same columns and dtypes as expected output
+        return pd.DataFrame(columns=df.columns if len(grouped_data) > 0 and grouped_data[0] is not None else None)
 
 
 ### cbsyst sensitivity investigation
@@ -671,55 +749,5 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
 #     return df
 
 
-# def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: float, t_mapping: dict, ph_mapping: dict, irr_group: float) -> pd.DataFrame:
-    
-#     # apply classification to each row in this group
-#     for idx in df.index:
-#         row = df.loc[idx]
-        
-#         # get temperature cluster level (0 is control)
-#         t_level = None
-#         if not np.isnan(row['t_in']) and control_T is not None:
-#             t_cluster_idx = t_mapping.get(row['t_in'])
-#             control_cluster_idx = t_mapping.get(control_T)
-#             if t_cluster_idx is not None and control_cluster_idx is not None:
-#                 t_level = t_cluster_idx - control_cluster_idx
-        
-#         # get pH cluster level (0 is control)
-#         ph_level = None
-#         if not np.isnan(row['phtot']) and control_pH is not None:
-#             ph_cluster_idx = ph_mapping.get(row['phtot'])
-#             control_cluster_idx = ph_mapping.get(control_pH)
-#             if ph_cluster_idx is not None and control_cluster_idx is not None:
-#                 ph_level = control_cluster_idx - ph_cluster_idx  # reverse order since higher pH is control
-        
-#         # determine clusters for cases where there is only one of t or ph
-#         if t_level is None and ph_level is not None:
-#             t_level = 0
-#         if ph_level is None and t_level is not None:
-#             ph_level = 0
-                    
-#         # determine if values are in control clusters   # TODO: not currently capturing rare case when studies have both T and pH varied from control with no intermediary values
-#         is_control_T = t_level == 0 if t_level is not None else False
-#         is_control_pH = ph_level == 0 if ph_level is not None else False
-        
-#         # classify the treatment
-#         if is_control_T and is_control_pH:
-#             treatment = 'cTcP'
-#         elif is_control_T:
-#             treatment = 'cTtP'
-#         elif is_control_pH:
-#             treatment = 'tTcP'
-#         elif not (is_control_T or is_control_pH):
-#             treatment = 'tTtP'
-#         else:
-#             treatment = 'uncertain'
-            
-#         # Update the treatment info in the result dataframe
-#         df.loc[idx, 'treatment_group'] = treatment
-#         df.loc[idx, 'treatment_level_t'] = t_level if t_level is not None else np.nan
-#         df.loc[idx, 'treatment_level_ph'] = ph_level if ph_level is not None else np.nan
-#         df.loc[idx, 'irr_group'] = irr_group
 
-#     return df
 
