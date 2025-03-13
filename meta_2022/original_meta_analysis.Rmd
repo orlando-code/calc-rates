@@ -63,11 +63,11 @@ colour.scheme <- c("black",
 #Data (csv file) is read in, and initial filtering applied. Small sample-size bias correction is then applied.
 
 adult.data.hedges <- read.csv(file = "raw data/adult_raw_data.csv") %>%
-  filter(Family != "") %>%
-  filter(!is.na(dpHt)) %>%
-  mutate(id = row.names(.)) %>%
-  mutate(correction = (1 - (3/(4*(n*2)-9)))) %>%
-  mutate(corrected_hedges = Hedges.G * correction) %>%
+  filter(Family != "") %>%  # remove rows where Family field is empty
+  filter(!is.na(dpHt)) %>%  # remove rows with missing dpHt values
+  mutate(id = row.names(.)) %>% # create an id field
+  mutate(correction = (1 - (3/(4*(n*2)-9)))) %>%  # calculate small-sample bias correction factor. TODO: why is this -9??
+  mutate(corrected_hedges = Hedges.G * correction) %>%  # apply correction
   mutate(corrected_variance = Variance * (correction^2))
 
 ```
@@ -110,7 +110,18 @@ rm(adult.outliers)
 ```
 
 ## Multi-level meta-analysis
+```{r}
+run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 8)) {
 
+
+
+threshold <- function(data, mods_formula) {
+  # Extract the formula term count from the model used in run_meta_analysis
+  k <- length(all.vars(mods_formula))-1 # k is number of parameters in model (doesn't include the intercept removal term)
+  n <- nrow(data)
+  return(2 * sqrt((k + 1) / (n - k - 1))) # Ben's formula: have found various online: including some which suggest just looking at the graph
+}
+```
 ```{r include=FALSE}
 
 # Random-effects multi-level model for assessing calcification in adults is re-run after removing outliers.
