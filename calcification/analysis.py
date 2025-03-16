@@ -383,7 +383,7 @@ def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     return control_row
     
 
-def process_group(species_df: pd.DataFrame, complex_treat=True) -> pd.DataFrame:
+def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
     """
     Process a group of species data to calculate Hedges' g.
     
@@ -393,33 +393,14 @@ def process_group(species_df: pd.DataFrame, complex_treat=True) -> pd.DataFrame:
     Returns:
         pandas.DataFrame: DataFrame with Hedges' g calculations
     """
+    # TODO: implement simple method (single control): see deprecated code
     result_dfs = []
-    loi = ['phtot', 't_in', 'calcification', 'calcification_sd', 'n']
-    control_df = species_df[species_df['treatment_group'] == 'cTcP']    # extract control data
-    if control_df.empty:
-        print(f"Control group not found for {species_df['doi'].iloc[0]}, for \n{species_df[['species_types']+loi].iloc[0]}")
-        return None
-    if len(control_df) > 1: # if multiple possible controls, aggregate
-        control_row = aggregate_by_treatment_group(control_df)
-    else:
-        control_row = control_df.iloc[0]
-    
-    # append control_df to result_dfs
-    if not pd.isna(control_row).all():
-        control_row_df = pd.DataFrame(control_row).T
-
-        # Explicitly check for all-NA columns and remove them
-        if not control_row_df.dropna(how="all", axis=1).empty:
-            result_dfs.append(control_row_df)
-            
-    if complex_treat:
-        result_dfs.extend(process_group_multivar(species_df))
+    result_dfs.extend(process_group_multivar(species_df))
         
     if result_dfs:
-        # Drop all-NA columns from each DataFrame before concatenation
+        # drop all-NA columns from each DataFrame before concatenation (avoids future warning)
         filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
-
-        # Ensure at least one DataFrame is non-empty before concatenation
+        # ensure at least one DataFrame is non-empty before concatenation
         filtered_dfs = [df for df in filtered_dfs if not df.empty]
 
         return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
@@ -427,7 +408,6 @@ def process_group(species_df: pd.DataFrame, complex_treat=True) -> pd.DataFrame:
         return None
     
 
-    
 
 def process_group_multivar(species_df: pd.DataFrame) -> pd.DataFrame:
 
@@ -806,7 +786,23 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
 
 
 ### Previously part of process_group
+    # loi = ['phtot', 't_in', 'calcification', 'calcification_sd', 'n']
+    # control_df = species_df[species_df['treatment_group'] == 'cTcP']    # extract control data
+    # if control_df.empty:
+    #     print(f"Control group not found for {species_df['doi'].iloc[0]}, for \n{species_df[['species_types']+loi].iloc[0]}")
+    #     return None
+    # if len(control_df) > 1: # if multiple possible controls, aggregate
+    #     control_row = aggregate_by_treatment_group(control_df)
+    # else:
+    #     control_row = control_df.iloc[0]
+    
+    # # append control_df to result_dfs
+    # if not pd.isna(control_row).all():
+    #     control_row_df = pd.DataFrame(control_row).T
 
+    #     # Explicitly check for all-NA columns and remove them
+    #     if not control_row_df.dropna(how="all", axis=1).empty:
+    #         result_dfs.append(control_row_df)
     # # process each treatment group for univariate treatments
     # for treatment_group, treatment_df in species_df.groupby('treatment_group'):
     #     if treatment_group in ['uncertain', 'cTcP']:
