@@ -193,7 +193,7 @@ def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: floa
     return df
 
 
-def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.05, irr_atol: float=30) -> pd.DataFrame:
+def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.1, irr_atol: float=30) -> pd.DataFrame:
     """
     Assign treatment groups to each row based on temperature and pH values,
     recognizing multiple levels of treatments.
@@ -339,14 +339,14 @@ def hedges_g_for_row(treatment_row: pd.Series, control_data: pd.Series) -> pd.Se
     
     if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
         print(f"Missing data for Hedges' g calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]")
-    
+        print(treatment_row.index.iloc[0])
     # calculate Hedges' g
     h_g, h_g_var, (h_g_l, h_g_u), sd_pooled, d, bias_correction = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)
     
     row_copy = treatment_row.copy() # create a copy to avoid SettingWithCopyWarning
     
     row_copy['delta_t'] = row_copy['t_in'] - t_in_c
-    row_copy['delta_pH'] = row_copy['phtot'] - ph_c
+    row_copy['delta_ph'] = row_copy['phtot'] - ph_c
     row_copy['treatment_val'] = row_copy['t_in'] if row_copy['treatment'] == 't_in' else row_copy['phtot']
     row_copy['pooled_sd'] = sd_pooled
     row_copy['d'] = d
@@ -383,7 +383,7 @@ def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     return control_row
     
 
-def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
+def process_group(species_df: pd.DataFrame, complex_treat=True) -> pd.DataFrame:
     """
     Process a group of species data to calculate Hedges' g.
     
@@ -403,14 +403,6 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
         control_row = aggregate_by_treatment_group(control_df)
     else:
         control_row = control_df.iloc[0]
-        
-    # control_data = {
-    #     'mu': control_row['calcification'],
-    #     'sd': control_row['calcification_sd'],
-    #     'n': control_row['n'],
-    #     't_in': control_row['t_in'],
-    #     'ph': control_row['phtot']
-    # }
     
     # append control_df to result_dfs
     if not pd.isna(control_row).all():
@@ -420,28 +412,9 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
         if not control_row_df.dropna(how="all", axis=1).empty:
             result_dfs.append(control_row_df)
             
-    # process multivariate treatments        
-    
-    # process each treatment group for univariate treatments
-    for treatment_group, treatment_df in species_df.groupby('treatment_group'):
-        if treatment_group in ['tTtP', 'uncertain', 'cTcP']:
-            # TODO: implement handling for multivariate treatments
-            continue
-                
-        # in the case that all n == 1 (individual datapoints), aggregate by treatment_group
-        if np.all(treatment_df.n == 1):
-            treatment_row = aggregate_by_treatment_group(treatment_df) # hedges_g_for_row requires df input
-            result_dfs.append(pd.DataFrame(hedges_g_for_row(treatment_row, control_row)).T)
-            continue
+    if complex_treat:
+        result_dfs.extend(process_group_multivar(species_df))
         
-        
-        # apply hedges_g calculation to each row
-        processed_df = treatment_df.apply(
-            lambda row: hedges_g_for_row(row, control_row),
-            axis=1
-        )
-        result_dfs.append(processed_df) if not processed_df.empty else None
-    
     if result_dfs:
         # Drop all-NA columns from each DataFrame before concatenation
         filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
@@ -452,13 +425,71 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
         return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
     else:
         return None
-
-
-# def hedges_g_for_multivar(df: pd.DataFrame) -> pd.DataFrame:
-    ### option 1: calculate each relative to single control
-    ### option 2: for each treatment, find closest matching level
     
 
+    
+
+def process_group_multivar(species_df: pd.DataFrame) -> pd.DataFrame:
+
+    grouped_by_ph = species_df.groupby('treatment_level_ph')
+    grouped_by_temp  = species_df.groupby('treatment_level_t')
+    
+    result_dfs = []
+    # compute temperature effects (within each pH level)
+    # if there are multiple temperature levels:
+    if len(grouped_by_temp) > 1:
+        for ph_level, group in grouped_by_ph:
+            if len(group) <= 1:
+                continue
+            temp_control_treatment = group['treatment_level_t'].min()
+            control_df = group[group['treatment_level_t'] == temp_control_treatment]    # select minimum temp rows as controls
+            treatment_df = group[group['treatment_level_t'] != temp_control_treatment]
+            if treatment_df.empty:  # if ph grouping has only single temperature
+                continue
+            if len(control_df) > 1:
+                control_df = aggregate_by_treatment_group(control_df)
+            else:
+                control_df = control_df.iloc[0]
+            # select everything other than control rows
+
+            if np.all(treatment_df.n == 1) and not treatment_df.empty:
+                treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T # hedges_g_for_row requires df input            
+                
+            if not control_df.empty:
+                out = pd.DataFrame(treatment_df.apply(
+                    lambda row: hedges_g_for_row(row, control_df),
+                    axis=1
+                ))
+                result_dfs.append(out) if not out.empty else None
+    
+    # if there are multiple pH levels:
+    if len(grouped_by_ph) > 1:
+        # compute pH effects (within each temperature level)
+        for t_level, group in grouped_by_temp:
+            if len(group) <= 1:
+                continue
+            ph_control_treatment = group['treatment_level_ph'].min()
+            control_df = group[group['treatment_level_ph'] == ph_control_treatment]
+            treatment_df = group[group['treatment_level_ph'] != ph_control_treatment]
+            # select everything other than control rows
+            if treatment_df.empty:  # if temperature grouping has only single ph.
+                continue
+            if len(control_df) > 1:
+                control_row = aggregate_by_treatment_group(control_df)
+            else:
+                control_row = control_df.iloc[0]
+
+            if np.all(treatment_df.n == 1) and not treatment_df.empty:
+                treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T
+
+            if not control_row.empty:
+                out = pd.DataFrame(treatment_df.apply(
+                    lambda row: hedges_g_for_row(row, control_row),
+                    axis=1
+                ))
+                result_dfs.append(out) if not out.empty else None
+
+    return result_dfs
 
 def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -473,7 +504,7 @@ def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
     # copy to avoid modifying original
     result_df = df.copy()
     
-    hedges_cols = ['delta_t', 'delta_pH', 'hedges_g', 'hedges_g_l', 'hedges_g_u']
+    hedges_cols = ['delta_t', 'delta_ph', 'hedges_g', 'hedges_g_l', 'hedges_g_u']
     for col in hedges_cols:
         result_df[col] = np.nan
     
@@ -485,6 +516,7 @@ def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
         study_df = result_df[result_df['doi'] == doi]
         for irr_group, irr_df in study_df.groupby('irr_group'):
             for species, species_df in irr_df.groupby('species_types'):
+                # print(species)
                 df = process_group(species_df)
                 if df is not None:
                     # if np.any(df.n == 1):
@@ -773,4 +805,50 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
 
 
 
+### Previously part of process_group
 
+    # # process each treatment group for univariate treatments
+    # for treatment_group, treatment_df in species_df.groupby('treatment_group'):
+    #     if treatment_group in ['uncertain', 'cTcP']:
+    #         # doesn't make sense to process
+    #         continue
+        
+    #     # in the case that all n == 1 (individual datapoints), aggregate by treatment_group
+    #     if np.all(treatment_df.n == 1):
+    #         treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T # hedges_g_for_row requires df input
+
+            
+    #     if treatment_group == 'tTtP':
+    #         ### option 1: calculate each relative to single control (simple) – the max pH and min T for species
+    #         # for each row in treatment_Group, calculate hedges_g_for_row and append to result_dfs
+    #         if np.any(treatment_df.n == 1):
+    #             print('will need to cluster by treatment level')
+    #         out = pd.DataFrame(treatment_df.apply(
+    #             lambda row: hedges_g_for_row(row, control_row),
+    #             axis=1
+    #         ))
+    #         result_dfs.append(out) if not out.empty else None
+    #         ### option 2: for each treatment, calculate each relative to all other treatments (complex)
+            
+            
+    #         # e.g. for pHs at higher T, determine highest pH and calculate effects wrt that
+    #         # and for Ts, determine pH closest at a different T and calculate effect wrt that
+    #         continue
+    
+    #     # apply hedges_g calculation to each row
+    #     processed_df = treatment_df.apply(
+    #         lambda row: hedges_g_for_row(row, control_row),
+    #         axis=1
+    #     )
+    #     result_dfs.append(processed_df) if not processed_df.empty else None
+    
+    # if result_dfs:
+    #     # Drop all-NA columns from each DataFrame before concatenation
+    #     filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
+
+    #     # Ensure at least one DataFrame is non-empty before concatenation
+    #     filtered_dfs = [df for df in filtered_dfs if not df.empty]
+
+    #     return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
+    # else:
+    #     return None
