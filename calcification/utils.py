@@ -54,6 +54,12 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
     df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
     
+    # TODO: perhaps this would be a good step to make all same case
+    # make all string values in the dataframe (excluding 'species_types') lowercase
+    # for col in df.select_dtypes(include=['object']).columns:
+    #     if col not in ['species_types', 'doi', 'coords', 'cleaned_coords', 'location']:
+    #         df[col] = df[col].str.lower()    
+    
     if selection_dict:  # filter for selected values
         for key, value in selection_dict.items():
             df = df[df[key] == value]
@@ -71,7 +77,6 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     # Extract nested dictionary values for each species
     df['family'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('family', 'Unknown'))
     df['functional_group'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('functional_group', 'Unknown'))
-    
     
     # flag up duplicate dois (only if they have also have 'include' as 'yes')
     inclusion_df = df[df['include'] == 'yes']
@@ -442,14 +447,15 @@ def standardize_coordinates(coord_string):
     # check if not string (already decimal degrees)
     if not isinstance(coord_string, str):
         return coord_string
-    # already decimal degrees (most likely)
-    if '°' not in coord_string:
-        return coord_string
+    if coord_string == ' ':
+        return None
+    # already decimal degrees
+    if '°' not in coord_string and not any(direction in coord_string for direction in ['N', 'S', 'E', 'W']):
+        return tuple([float(coord) for coord in coord_string.split(',')])
+
     
-    # if coord_string == "14°41′17.4″ S 145°28′03.6″ E / 14°41′47.0″ S 145°27′02.9″ E":
-    #     print(coord_string)
     coord_string = coord_string.replace("′′", '″')
-    # coord_string = coord_string.replace("′′", '"')
+    coord_string = coord_string.replace("’’", '"')
     parts = re.split(r'\s*/\s*', coord_string)  # Split at '/' if present
     decimal_coords = []
 
@@ -483,6 +489,7 @@ def standardize_coordinates(coord_string):
                 lng = decimal
         if not lat and not lng:
             print('Failed to parse:', part)
+            return None
         decimal_coords.append((lat, lng))
 
     if len(decimal_coords) == 0:
