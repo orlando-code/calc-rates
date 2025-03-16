@@ -27,9 +27,24 @@ def calc_cohens_d(mu1: float, mu2: float, sd_pooled: float) -> float:
     return (mu1 - mu2) / sd_pooled
 
 
+# def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
+#     """Calculate pooled standard deviation: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
+    
+#     Args:
+#         n1 (int): number of samples in group 1
+#         n2 (int): number of samples in group 2
+#         sd1 (float): standard deviation of group 1
+#         sd2 (float): standard deviation of group 2
+        
+#     Returns:
+#         float: pooled standard deviation
+#     """
+#     return np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))
+
+
 def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
     """Calculate pooled standard deviation: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
-    
+    NB the simpler version (as used by Ben). Doesn't weight by sample size (although this slightly captured by sd) 
     Args:
         n1 (int): number of samples in group 1
         n2 (int): number of samples in group 2
@@ -39,7 +54,7 @@ def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
     Returns:
         float: pooled standard deviation
     """
-    return np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))
+    return np.sqrt((sd1 ** 2 + sd2 ** 2) / 2)
 
 
 def calc_cohens_d_var(n1: int, n2: int, d: float) -> float:
@@ -95,7 +110,7 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     hedges_g_lower = hedges_g - 1.959964 * se_g
     hedges_g_upper = hedges_g + 1.959964 * se_g
     
-    return hedges_g, hedges_g_var, (hedges_g_lower, hedges_g_upper)
+    return hedges_g, hedges_g_var, (hedges_g_lower, hedges_g_upper), sd_pooled, d, bias_correction
 
 
 ### determining treatment conditions
@@ -178,7 +193,7 @@ def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: floa
     return df
 
 
-def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.1, irr_atol: float=30) -> pd.DataFrame:
+def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.05, irr_atol: float=30) -> pd.DataFrame:
     """
     Assign treatment groups to each row based on temperature and pH values,
     recognizing multiple levels of treatments.
@@ -319,20 +334,23 @@ def hedges_g_for_row(treatment_row: pd.Series, control_data: pd.Series) -> pd.Se
         pandas.Series: Modified row with Hedges' g calculations
     """
     mu_t, sd_t, n_t = treatment_row['calcification'], treatment_row['calcification_sd'], treatment_row['n']
-    mu_c, sd_c, n_c = control_data['mu'], control_data['sd'], control_data['n']
-    t_in_c, ph_c = control_data['t_in'], control_data['ph']
+    mu_c, sd_c, n_c = control_data['calcification'], control_data['calcification_sd'], control_data['n']
+    t_in_c, ph_c = control_data['t_in'], control_data['phtot']
     
     if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
         print(f"Missing data for Hedges' g calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]")
     
     # calculate Hedges' g
-    h_g, h_g_var, (h_g_l, h_g_u) = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)
+    h_g, h_g_var, (h_g_l, h_g_u), sd_pooled, d, bias_correction = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)
     
     row_copy = treatment_row.copy() # create a copy to avoid SettingWithCopyWarning
     
     row_copy['delta_t'] = row_copy['t_in'] - t_in_c
     row_copy['delta_pH'] = row_copy['phtot'] - ph_c
     row_copy['treatment_val'] = row_copy['t_in'] if row_copy['treatment'] == 't_in' else row_copy['phtot']
+    row_copy['pooled_sd'] = sd_pooled
+    row_copy['d'] = d
+    row_copy['bias_correction'] = bias_correction
     row_copy['hedges_g'] = h_g
     row_copy['hedges_g_var'] = h_g_var
     row_copy['hedges_g_l'] = h_g_l
@@ -363,7 +381,7 @@ def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     control_row['calcification_sd'] = aggregation['calcification']['std']
     control_row['n'] = aggregation['n']['count']
     return control_row
-
+    
 
 def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -386,23 +404,25 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
     else:
         control_row = control_df.iloc[0]
         
-    control_data = {
-        'mu': control_row['calcification'],
-        'sd': control_row['calcification_sd'],
-        'n': control_row['n'],
-        't_in': control_row['t_in'],
-        'ph': control_row['phtot']
-    }
+    # control_data = {
+    #     'mu': control_row['calcification'],
+    #     'sd': control_row['calcification_sd'],
+    #     'n': control_row['n'],
+    #     't_in': control_row['t_in'],
+    #     'ph': control_row['phtot']
+    # }
     
     # append control_df to result_dfs
-    if not control_df.empty and not pd.isna(control_row).all():
+    if not pd.isna(control_row).all():
         control_row_df = pd.DataFrame(control_row).T
 
         # Explicitly check for all-NA columns and remove them
         if not control_row_df.dropna(how="all", axis=1).empty:
             result_dfs.append(control_row_df)
             
-    # process each treatment group
+    # process multivariate treatments        
+    
+    # process each treatment group for univariate treatments
     for treatment_group, treatment_df in species_df.groupby('treatment_group'):
         if treatment_group in ['tTtP', 'uncertain', 'cTcP']:
             # TODO: implement handling for multivariate treatments
@@ -411,19 +431,16 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
         # in the case that all n == 1 (individual datapoints), aggregate by treatment_group
         if np.all(treatment_df.n == 1):
             treatment_row = aggregate_by_treatment_group(treatment_df) # hedges_g_for_row requires df input
-            result_dfs.append(pd.DataFrame(hedges_g_for_row(treatment_row, control_data)).T)
+            result_dfs.append(pd.DataFrame(hedges_g_for_row(treatment_row, control_row)).T)
             continue
         
         
         # apply hedges_g calculation to each row
         processed_df = treatment_df.apply(
-            lambda row: hedges_g_for_row(row, control_data),
+            lambda row: hedges_g_for_row(row, control_row),
             axis=1
         )
         result_dfs.append(processed_df) if not processed_df.empty else None
-        
-        if np.any(processed_df.n == 1):
-            print('here')
     
     if result_dfs:
         # Drop all-NA columns from each DataFrame before concatenation
@@ -435,6 +452,12 @@ def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
         return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
     else:
         return None
+
+
+# def hedges_g_for_multivar(df: pd.DataFrame) -> pd.DataFrame:
+    ### option 1: calculate each relative to single control
+    ### option 2: for each treatment, find closest matching level
+    
 
 
 def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -464,8 +487,8 @@ def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
             for species, species_df in irr_df.groupby('species_types'):
                 df = process_group(species_df)
                 if df is not None:
-                    if np.any(df.n == 1):
-                        print('here')
+                    # if np.any(df.n == 1):
+                    #     print('here')
                     grouped_data.append(df)
                 
     # TODO: fix this: still raising the futurewarning error

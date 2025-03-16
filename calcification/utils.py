@@ -1,6 +1,7 @@
 # files
 import yaml
 from openpyxl import load_workbook
+import requests
 
 # general
 import numpy as np
@@ -13,7 +14,7 @@ import string
 # custom
 from calcification import utils, config
 import cbsyst as cb
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import cbsyst.helpers as cbh
 
 ### global constants
@@ -45,6 +46,7 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
 ### processing files
 def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
+    df = df.map(lambda x: unicodedata.normalize("NFKD", str(x)).replace('\xa0', ' ') if isinstance(x, str) else x)  # clean non-breaking spaces from string cells
     # general processing
     df.rename(columns=read_yaml(config.resources_dir / "mapping.yaml")['sheet_column_map'], inplace=True)    # rename columns to agree with cbsyst output    
     df.columns = df.columns.str.lower() # columns lower case headers for less confusing access later on
@@ -60,6 +62,16 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
         genus=df.species_types.apply(lambda x: binomial_to_genus_species(x)[0]),
         species=df.species_types.apply(lambda x: binomial_to_genus_species(x)[1])
     )   # separate binomials into genus and species columns
+    # append family column: if no species_mapping file, generate
+    if not (config.resources_dir / 'species_mapping.yaml').exists():
+        create_species_mapping_yaml(df.species_types.unique())
+    else:
+        print(f'Using species mapping in {config.resources_dir / 'species_mapping.yaml'}.')
+    species_mapping = read_yaml(config.resources_dir / 'species_mapping.yaml')
+    # Extract nested dictionary values for each species
+    df['family'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('family', 'Unknown'))
+    df['functional_group'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('functional_group', 'Unknown'))
+    
     
     # flag up duplicate dois (only if they have also have 'include' as 'yes')
     inclusion_df = df[df['include'] == 'yes']
@@ -89,6 +101,151 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else row['calcification_sd'], axis=1)
     
     return df
+
+
+def get_species_info_from_worms(species_binomial: str) -> dict:
+    """Query WoRMS API to get the family name of a coral species.
+    
+    Args:
+        species_binomial (str): Scientific name in 'Genus species' format
+    
+    Returns:
+        dict: Dictionary with family name and additional taxonomic information
+    """
+    
+    # clean species name
+    if any(x in species_binomial.replace('.', '').split() for x in ['sp', 'spp', 'cf']): # remove general indication from species, leaving just genus
+        species_binomial = species_binomial.split()[0]  # take the first word as the genus
+    if species_binomial in ['Massive porites', 'Porites lutea/lobata']:
+        species_binomial = 'Porites'
+    if 'CCA' in species_binomial:
+        return {'species': species_binomial, 'family': 'Corallinaceae-Sporolithaceae', 'status': 'Best guess', 'functional_group': 'Crustose coralline algae'}
+        
+    # URL encode the species name to handle spaces properly
+    encoded_species = requests.utils.quote(species_binomial)
+    base_url = f"https://www.marinespecies.org/rest/AphiaRecordsByName/{encoded_species}?like=false&marine_only=true"
+    
+    try:
+        response = requests.get(base_url)
+        response.raise_for_status()  # raise exception for 4XX/5XX status codes
+        data = response.json()
+        
+        if data and isinstance(data, list) and len(data) > 0:   # assign response to dictionary if data found
+            if len(data) > 1:   # if more than one record, take the most recent one which is 'accepted' in the 'status' field
+                data = [record for record in data if record.get('status', '') == 'accepted'][0]
+                if not data:    # if technically none accepted, take the first record (haven't seen this happen yet)
+                    data = data[0]
+            else:
+                data = data[0]  # list containing single record dictionary: take the dictionary
+
+            result = {
+                'species': species_binomial,
+                'family': data.get('family', 'Not Found'),
+                'status': 'Found',
+                'rank': data.get('rank', 'Not Found'),
+                'aphia_id': data.get('AphiaID', 'Not Found'),
+                'accepted_name': data.get('valid_name', species_binomial),
+                'kingdom': data.get('kingdom', 'Not Found'),
+                'phylum': data.get('phylum', 'Not Found'),
+                'class': data.get('class', 'Not Found'),
+                'order': data.get('order', 'Not Found')
+            }
+            result['functional_group'] = assign_functional_group(result)
+
+            return result
+        else:
+            return {'species': species_binomial, 'family': 'Not Found', 'status': 'No Data', 'functional_group': 'Unknown'}
+    
+    except requests.exceptions.RequestException as e:
+        print(f"API Request Error for {species_binomial}: {e}")
+        return {'species': species_binomial, 'family': 'Error', 'status': str(e)}
+
+
+def create_species_mapping_yaml(species_list) -> None:
+    """Create a YAML file with species-family mapping for a list of species.
+    
+    Args:
+        species_list (list): List of coral species names in 'Genus species' format
+    """
+    import yaml
+    species_mapping = {}
+    for species in tqdm(species_list, desc='Querying WoRMS API to retrieve organism taxonomic data'):
+        species_info = get_species_info_from_worms(species)
+        species_mapping[species] = {
+            'family': species_info['family'],
+            'functional_group': species_info['functional_group']}
+    # save family: genus, species mapping to YAML file
+    with open(config.resources_dir / 'species_mapping.yaml', 'w') as file:
+        yaml.dump(species_mapping, file)
+    print(f'Species mapping saved to {config.resources_dir / "species_mapping.yaml"}')
+    
+    
+def assign_functional_group(taxon_info):
+    """
+    Assign a functional group based on taxonomic information.
+    N.B. this mapping is not exhaustive: only checked with ~130 species.
+    There is also likely subjectivity in assignment.
+
+    Args:
+        taxon_info (dict): Dictionary containing taxonomic information
+    
+    Returns:
+        str: Functional group name
+    """
+    family = taxon_info.get('family', '').lower()
+    order = taxon_info.get('order', '').lower()
+    class_name = taxon_info.get('class', '').lower()
+    phylum = taxon_info.get('phylum', '').lower()
+    genus = taxon_info.get('species', '').split()[0].lower()  # Extract genus from species name
+    binomial = taxon_info.get('species', '').lower()
+
+    if genus in ['jania', 'amphiroa']:
+        return 'Articulate coralline algae'
+    
+    # Crustose coralline algae
+    if family in ['corallinaceae', 'sporolithaceae', 'hapalidiaceae', 'hydrolithaceae', 'lithophyllaceae', 'mesophyllumaceae', 'spongitidaceae', 'porolithaceae']:
+        return 'Crustose coralline algae'
+    
+    # Fleshy algae
+    if (phylum in ['chlorophyta', 'ochrophyta', 'rhodophyta'] or 
+        order in ['dictyotales', 'ectocarpales', 'fucales', 'gigartinales'] or
+        class_name in ['phaeophyceae', 'ulvophyceae', 'florideophyceae']):
+        # Special check for calcareous algae that aren't CCA
+        if genus in ['galaxaura', 'padina']:
+            return 'Calcareous algae'
+        if genus in ['peyssonnelia']:
+            return 'Calcareous red algae'
+        if family in ['halimedaceae']:
+            return 'Calcareous green algae'
+        return 'Fleshy algae'
+    
+    # Hard corals (scleractinian)
+    if order == 'scleractinia' or family in ['pocilloporidae', 'acroporidae', 'poritidae', 'faviidae', 'fungiidae', 'agariciidae']:
+        return 'Hard coral'
+    
+    # Soft corals
+    if order in ['alcyonacea', 'gorgonacea'] or 'alcyoniidae' in family:
+        return 'Soft coral'
+    
+    # Sponges
+    if phylum == 'porifera':
+        return 'Sponge'
+    
+    # Foraminifera
+    if phylum in ['foraminifera', 'retaria'] or class_name == 'foraminifera':
+        return 'Foraminifera'
+    
+    # Turf algae - often identified by growth form rather than taxonomy
+    if 'turf' in taxon_info.get('species', ''):
+        return 'Turf algae'
+    
+    # Bryozoans
+    if phylum == 'bryozoa':
+        return 'Bryozoan'
+    
+    # catch-all case
+    return 'Other benthic organism'
+
 
 
 def aggregate_df(df, method: str='mean') -> pd.DataFrame:
@@ -272,6 +429,7 @@ def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
             raise ValueError("Invalid minutes or seconds range.")
         decimal = degrees + minutes / 60 + seconds / 3600
         if direction in ['S', 'W']:
+            decimal = abs(decimal)  # for the rare cases that stated as e.g. -3ºW
             decimal *= -1
         return decimal
     except Exception as e:
@@ -281,24 +439,38 @@ def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
 
 def standardize_coordinates(coord_string):
     """Convert various coordinate formats into decimal degrees."""
+    # check if not string (already decimal degrees)
+    if not isinstance(coord_string, str):
+        return coord_string
+    # already decimal degrees (most likely)
+    if '°' not in coord_string:
+        return coord_string
+    
+    # if coord_string == "14°41′17.4″ S 145°28′03.6″ E / 14°41′47.0″ S 145°27′02.9″ E":
+    #     print(coord_string)
     coord_string = coord_string.replace("′′", '″')
+    # coord_string = coord_string.replace("′′", '"')
     parts = re.split(r'\s*/\s*', coord_string)  # Split at '/' if present
     decimal_coords = []
 
+    # lat_lng_pattern = re.compile(r'''([NSEW])?\s*(-?\d+(?:\.\d+)?)\s*[° ]?\s*?(?:(\d+(?:\.\d+)?)\s*[′'’]\s*)?(?:(\d+(?:\.\d+)?)\s*[″"]\s*)?([NSEW])?''', re.VERBOSE)
     lat_lng_pattern = re.compile(r'''
-        ([NSEW])?\s*  # optional leading direction
+        ([ NSEW])?\s*  # optional leading direction
         (\d+(?:\.\d+)?)\s*[° ]\s*  # degrees (mandatory)
         (?:(\d+(?:\.\d+)?)\s*[′'’]\s*)?  # optional Minutes
         (?:(\d+(?:\.\d+)?)\s*[″"]\s*)?  # optional Seconds
-        ([NSEW])?  # optional trailing direction
+        ([ NSEW])?  # optional trailing direction
     ''', re.VERBOSE)
     for part in parts:
         lat_lng = lat_lng_pattern.findall(part)
+        # drop any empty strings from the list
+        # lat_lng = [list(filter(None, coord)) for coord in lat_lng]
         
         if len(lat_lng) != 2:
             print(f"Invalid coordinate pair: {part}")
             continue
         
+        lat, lng = None, None  # Initialize variables
         for coord in lat_lng:
             dir1, deg, mins, secs, dir2 = coord
             if dir1 is None and dir2 is None:
@@ -309,6 +481,8 @@ def standardize_coordinates(coord_string):
                 lat = decimal
             elif "E" in coord or "W" in coord:
                 lng = decimal
+        if not lat and not lng:
+            print('Failed to parse:', part)
         decimal_coords.append((lat, lng))
 
     if len(decimal_coords) == 0:

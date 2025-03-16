@@ -62,11 +62,11 @@ colour.scheme <- c("black",
 
 #Data (csv file) is read in, and initial filtering applied. Small sample-size bias correction is then applied.
 
-adult.data.hedges <- read.csv(file = "raw data/adult_raw_data.csv") %>%
+adult.data.hedges <- read.csv(file = "meta_2022/adult_raw_data(in).csv") %>%
   filter(Family != "") %>%  # remove rows where Family field is empty
   filter(!is.na(dpHt)) %>%  # remove rows with missing dpHt values
   mutate(id = row.names(.)) %>% # create an id field
-  mutate(correction = (1 - (3/(4*(n*2)-9)))) %>%  # calculate small-sample bias correction factor. TODO: why is this -9??
+  mutate(correction = (1 - (3/(4*(n*2)-9)))) %>%  # calculate small-sample bias correction factor
   mutate(corrected_hedges = Hedges.G * correction) %>%  # apply correction
   mutate(corrected_variance = Variance * (correction^2))
 
@@ -81,27 +81,25 @@ adult.data.hedges <- read.csv(file = "raw data/adult_raw_data.csv") %>%
 model.full.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
               V = corrected_variance, 
               data = adult.data.hedges, 
-              method = "REML", 
+              method = "REML",
               mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
               test="z",
               random = list(~ 1| (id/Study)))
 
 #Cook's Distance is used to assess for outliers. This is tested in parallel, number of CPU cores can be set by 'ncpus'
 
-model.full.adult.hedges.cooks <- 
-cooks.distance.rma.mv(model.full.adult.hedges.id.nested, progbar=TRUE,
-        reestimate=TRUE, parallel="multicore", ncpus=8, cl=NULL)
+model.full.adult.hedges.cooks <- cooks.distance.rma.mv(model.full.adult.hedges.id.nested, progbar=TRUE,
+        reestimate=TRUE, parallel="multicore", ncpus=1, cl=NULL)
 
 plot(model.full.adult.hedges.cooks, type="o", pch=19, xlab="Study", ylab="Cook's Distance", xaxt="n")
 axis(side=1, at=seq_along(model.full.adult.hedges.cooks), labels=as.numeric(names(model.full.adult.hedges.cooks)))
 
 #Those studies with a Cook's distance greater than the threshold are removed. Threshold is ascertained by a conservative cut-off threshold of 2√((k+1)/(n - k - 1)). 
 
-adult.outliers <- 
-model.full.adult.hedges.cooks %>% 
+adult.outliers <- model.full.adult.hedges.cooks %>% 
   as_tibble() %>% 
   mutate(Study = seq(1:nrow(adult.data.hedges))) %>%
-  filter(value > 0.31)
+  filter(value > 0.31)  # hardcoded threshold
 
 adult.data.hedges <- adult.data.hedges[-c(adult.outliers$Study),]
 
@@ -112,14 +110,6 @@ rm(adult.outliers)
 ## Multi-level meta-analysis
 ```{r}
 run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 8)) {
-
-
-
-threshold <- function(data, mods_formula) {
-  # Extract the formula term count from the model used in run_meta_analysis
-  k <- length(all.vars(mods_formula))-1 # k is number of parameters in model (doesn't include the intercept removal term)
-  n <- nrow(data)
-  return(2 * sqrt((k + 1) / (n - k - 1))) # Ben's formula: have found various online: including some which suggest just looking at the graph
 }
 ```
 ```{r include=FALSE}
@@ -142,12 +132,75 @@ model.full.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges,
 
 #Overall plot of all studies assessing calcification in adults
 
-svg(file = 'output/adult_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
+svg(file = 'output/ben_adult_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
 regplot.rma(model.full.adult.hedges.id.nested, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
             ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
 dev.off() 
 
 ```
+
+```{r}
+# filter adult data for climate == "tropical" and re-run
+adult.data.hedges.tropical <- adult.data.hedges %>% filter(Climate == "Tropical")
+
+
+model.tropical.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges.tropical, 
+              method = "REML",
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+#Cook's Distance is used to assess for outliers. This is tested in parallel, number of CPU cores can be set by 'ncpus'
+
+model.tropical.adult.hedges.cooks <- cooks.distance.rma.mv(model.tropical.adult.hedges.id.nested, progbar=TRUE,
+        reestimate=TRUE, parallel="multicore", ncpus=1, cl=NULL)
+
+plot(model.tropical.adult.hedges.cooks, type="o", pch=19, xlab="Study", ylab="Cook's Distance", xaxt="n")
+axis(side=1, at=seq_along(model.tropical.adult.hedges.cooks), labels=as.numeric(names(model.tropical.adult.hedges.cooks)))
+
+#Those studies with a Cook's distance greater than the threshold are removed. Threshold is ascertained by a conservative cut-off threshold of 2√((k+1)/(n - k - 1)). 
+
+adult.outliers.tropical <- model.tropical.adult.hedges.cooks %>% 
+  as_tibble() %>% 
+  mutate(Study = seq(1:nrow(adult.data.hedges.tropical))) %>%
+  filter(value > 0.31)  # hardcoded threshold
+
+adult.data.hedges.tropical <- adult.data.hedges.tropical[-c(adult.outliers.tropical$Study),]
+
+rm(adult.outliers.tropical)
+```
+
+```{r include=FALSE}
+
+# Random-effects multi-level model for assessing calcification in adults is re-run after removing outliers.
+
+model.tropical.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+              V = corrected_variance, 
+              data = adult.data.hedges.tropical, 
+              method = "REML", 
+              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              test="z",
+              random = list(~ 1| (id/Study)))
+
+```
+
+## Overall Plot - Adults only
+
+```{r, fig.width = 6, fig.height = 8}
+
+#Overall plot of all studies assessing calcification in adults
+
+svg(file = 'output/ben_tropical_adult_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
+regplot.rma(model.tropical.adult.hedges.id.nested, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
+            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
+dev.off() 
+
+```
+
+
+
 
 ## Individual plots for each family - Adults Only
 
