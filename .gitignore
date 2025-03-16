@@ -193,3 +193,7 @@ cornwall_data.csv
 
 # pictures (graphs)
 *.png
+
+# graphics
+graphics/
+*.afdesign*
