@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import re
 
+# from calcification import utils
+
 ### spatial
 def get_coordinates_from_gmaps(location_name: str, gmaps_client) -> pd.Series:
     """
@@ -38,6 +40,9 @@ def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
     except Exception as e:
         print(f"Error converting DMS: {degrees}° {minutes}′ {seconds}″ {direction} → {e}")
         return None
+    
+    
+
         
 
 def standardize_coordinates(coord_string):
@@ -49,26 +54,27 @@ def standardize_coordinates(coord_string):
         return None
     # already decimal degrees
     if '°' not in coord_string and not any(direction in coord_string for direction in ['N', 'S', 'E', 'W']):
-        return tuple([float(coord) for coord in coord_string.split(',')])
+        return tuple([float(coord.replace("−", "-")) for coord in coord_string.split(',')])
 
-    
-    coord_string = coord_string.replace("′′", '″')
-    coord_string = coord_string.replace("’’", '"')
+    # Standardize quotes for minutes and seconds
+    coord_string = coord_string.replace("`", "'").replace("′", "'").replace("’", "'").replace("ʹ", "'")
+    coord_string = coord_string.replace("″", '"').replace("''", '"').replace("”", '"')
     parts = re.split(r'\s*/\s*', coord_string)  # Split at '/' if present
     decimal_coords = []
 
     lat_lng_pattern = re.compile(r'''
         ([ NSEW])?\s*  # optional leading direction
-        (\d+(?:\.\d+)?)\s*[° ]\s*  # degrees (mandatory)
+        (\d+(?:\.\d+)?)\s*[° ]?\s*  # degrees (mandatory)
         (?:(\d+(?:\.\d+)?)\s*[′'’]\s*)?  # optional Minutes
         (?:(\d+(?:\.\d+)?)\s*[″"]\s*)?  # optional Seconds
         ([ NSEW])?  # optional trailing direction
     ''', re.VERBOSE)
+
     for part in parts:
         lat_lng = lat_lng_pattern.findall(part)
         # drop any empty strings from the list
         
-        if len(lat_lng) != 2:
+        if len(lat_lng) < 2:
             print(f"Invalid coordinate pair: {part}")
             continue
         
