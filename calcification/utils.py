@@ -407,8 +407,6 @@ def uniquify_repeated_values(vals: list) -> list:
     return [j for _, i in itertools.groupby(vals) for j in zip_letters(list(i))]
 
 
-
-
 ### carbonate chemistry
 def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     # df = pd.read_excel(fp, sheet_name=sheet_name)
@@ -421,12 +419,20 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
     measured_df = process_df(measured_df, require_results=False, selection_dict=selection_dict)
     
     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
-    print("Converting pH values to total scale...")
+    print("Calculating total pH values...")
     measured_df.loc[:, 'phtot'] = measured_df.apply(
         lambda row: cbh.pH_scale_converter(
-            pH=row['phnbs'], scale='NBS', Temp=row['t_in'], Sal=row['s_in'] if pd.notna(row['s_in']) else 35
-        ).get('pHtot', None) if pd.notna(row['phnbs']) and pd.notna(row['t_in'])
+            pH=row['phnbs'], scale='NBS', Temp=row['temp'], Sal=row['sal'] if pd.notna(row['sal']) else 35
+        ).get('pHtot', None) if pd.notna(row['phnbs']) and pd.notna(row['temp'])
         else row['phtot'],
+        axis=1
+    )
+    # if phtot and phnbs are both nan, calculate phtot from temp, salinity, dic, and ta
+    measured_df.loc[:, 'phtot'] = measured_df.apply(
+        lambda row: cb.cbsyst.Csys(
+            TA=row['ta'], DIC=row['dic'], T_in=row['temp'], S_in=row['sal'] if pd.notna(row['sal']) else 35,
+        ).get('pHtot', None) if pd.isna(row['phnbs']) and pd.isna(row['phtot']) and pd.notna(row['temp']) and pd.notna(row['dic']) and pd.notna(row['ta'])
+        else np.nan,
         axis=1
     )
     
@@ -449,8 +455,8 @@ def calculate_carb_chem(row, out_values: list) -> dict:
         out_dict = cb.Csys(
             pHtot=row['phtot'],
             TA=row['ta'],
-            T_in=row['t_in'],
-            S_in=row['s_in'],
+            T_in=row['temp'],
+            S_in=row['sal'],
         )
         out_dict = {key.lower(): value for key, value in out_dict.items()}  # lower the keys of the dictionary to ensure case-insensitivity
 
