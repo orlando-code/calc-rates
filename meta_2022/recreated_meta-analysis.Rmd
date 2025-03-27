@@ -55,27 +55,6 @@ colour.scheme <- c("black",
 dir.create("output", showWarnings = FALSE)
 ```
 
-```{r plot-chunk, fig.show='asis', fig.width=7, fig.height=5}
-# Your plot code here
-plot(cars)
-```
-```{r plot-ggplot, fig.show='asis', fig.width=7, fig.height=5}
-library(ggplot2)
-ggplot(cars, aes(speed, dist)) + 
-  geom_point() + 
-  theme_minimal()
-```
-
-```{r}
-# plot(out$cooks_dist, type = "o", pch = 19,
-plot(1:4, c(1,2,3,4), type = "o", pch = 19,
-  xlab = "ID", ylab = "Cook's Distance (logarithmic scale)", xaxt = "n",
-)
-axis(1, at = 1:4, labels = 1:4)  # Manually add x-axis labels
-
-```
-
-
 ```{r Helper functions}
 
 # calculate the cooks distance threshold via 2√((k+1)/(n - k - 1))
@@ -164,7 +143,7 @@ subset_data <- function(data, investigation, yi, V, filter_functional_group = NU
 
 ```{r Model results}
 ### save graphs to file
-save_figures <- function(model, data, mods_formula, save_dir = "output/", variable, run_id) {
+save_figures <- function(model, yi, data, mods_formula, save_dir = "output/", variable, run_id) {
   save_dir <- paste0(save_dir, variable, "/")
   if (!dir.exists(save_dir)) {
     dir.create(save_dir, recursive = TRUE, showWarnings = FALSE)
@@ -176,6 +155,13 @@ save_figures <- function(model, data, mods_formula, save_dir = "output/", variab
   # plot(influence(model), main = paste(variable, "\n", as.character(mods_formula)))
   # dev.off()
 
+  print(paste(yi))
+  if (str_detect(yi, "raw")) {
+    effect_type <- "% change in calcification rate"
+  } else {
+    effect_type <- "Hedges' g"
+  }
+  
   # forest
   forest_fp <- paste0(save_dir, gsub(" ", "", sprintf("forest_%s.svg", run_id)))
   svg(file = paste0(forest_fp), width = 10, height = max(30, length(unique(data$original_doi)) * .01))
@@ -184,7 +170,7 @@ save_figures <- function(model, data, mods_formula, save_dir = "output/", variab
   forest(model, addpred = TRUE, header = TRUE,
     ilab = paste(data$original_doi),
     main = paste(as.character(mods_formula)),
-    xlab = "Hedges' g",
+    xlab = effect_type,
     refline = NA  # temporarily disable the reference line
   )
   # add the reference line manually on top (otherwise gets buried behind)
@@ -200,7 +186,7 @@ save_figures <- function(model, data, mods_formula, save_dir = "output/", variab
          shade = c("white", "gray55", "gray75"),
          yaxs = "i", xaxs = "i",
          legend = TRUE, back = "gray90", hlines = NULL,
-         xlab = "Hedges' g",
+         xlab = effect_type,
          #  yaxis = "seinv",
          level = c(.1, .05, .01),
          las = 1, digits = list(1L, 3))
@@ -220,12 +206,21 @@ save_figures <- function(model, data, mods_formula, save_dir = "output/", variab
   } else {
     "Variable"
   }
+  # set y-axis limits to +- 500 if effect size is raw, else +- 10
+  if (str_detect(yi, "raw")) {
+    ylim <- c(-500, 500)
+  } else {
+    ylim <- c(-10, 10)
+  }
+
   regplot.rma(model, mod = mod_var, refline = 0,
-    ylab = "Hedges' g",
+    ylab = effect_type,
     xlab = xlab_text,
     main = bquote(.(as.character(mods_formula))),
-    fig = TRUE
+    fig = TRUE,
+    ylim = ylim
   )
+  # set y axis limits
   dev.off()
 }
 
@@ -288,25 +283,32 @@ run_meta_analysis <- function(data, yi, V, mods_formula, threshold_val = NULL, p
   axis(side = 1, at = seq_along(cooks_dist),
        labels = as.numeric(names(cooks_dist)))
 
+
   # determine outliers
   outliers <- cooks_dist %>%
     as_tibble() %>%
-    mutate(ID = seq_len(nrow(data))) %>%
+    # mutate(ID = seq_len(nrow(data))) %>%
     filter(value > threshold_val)
 
   # remove outliers if any were found
   cleaned_data <- data
+  # print(cleaned_data)
+  print(data[-c(outliers$ID), ])
+
   if (nrow(outliers) > 0) {
+    # Remove rows identified as outliers based on Cook's distance
     cleaned_data <- data[-c(outliers$ID), ]
     cat(sprintf("Removed %d outlier(s) out of %d samples\n", nrow(outliers), nrow(data)))
   } else {
     cat("No outliers detected\n")
   }
 
+  # print(cleaned_data)
+
   # try to re-run model with cleaned data. if nlminb optimizer fails, stop execution
   final_model <- tryCatch({
-    rma.mv(yi = data[[yi]],
-      V = data[[V]],
+    rma.mv(yi = cleaned_data[[yi]],
+      V = cleaned_data[[V]],
       data = cleaned_data,
       method = "REML",
       mods = mods_formula,
@@ -365,11 +367,17 @@ meta_analysis_end_to_end <- function(data, variable, yi, V, mods_formula, run_id
   } else {
     run_id <- paste0(run_id, "_all_data")
   }
-
+  # print(paste(yi))
   # save plots to file
-  save_figures(model, data, mods_formula, save_dir, variable, run_id)
+  save_figures(model, yi, data, mods_formula, save_dir, variable, run_id)
   # save model summary to file
   print_model_summary(model, variable, run_id, save_dir)
+
+  return (list(
+    model = model,
+    data = data,
+    run_id = run_id
+    ))
 }
 ```
 
@@ -383,13 +391,18 @@ all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
 # all_data <- all_data[order(all_data$hedges_g), ]
 
 # select first 50 rows for debugging
-all_data <- all_data[0:50, ]
+all_data <- all_data[0:100, ]
+
+# remove rows for which effect_size_raw is > 500
+# all_data <- all_data %>% filter(effect_size_raw < 500)
 
 # ph_mods_formula <- ~ delta_ph + factor(family) - 1
 # results <- meta_analysis_end_to_end(all_data, "phtot", ph_mods_formula, "phtot_naive")
 
-temp_mods_formula <- ~ delta_ph + factor(family) - 1
-results <- meta_analysis_end_to_end(all_data, "phtot", "effect_size", "effect_var", mods_formula=temp_mods_formula, run_id="temp_naive")
+ph_mods_formula <- ~ delta_ph + temp + factor(family) - 1
+temp_mods_formula <- ~ delta_t + phtot + factor(family) - 1
+# results <- meta_analysis_end_to_end(all_data, "phtot", "effect_size_raw", "effect_var_raw", mods_formula=ph_mods_formula, run_id="ph_naive_raw")
+results <- meta_analysis_end_to_end(all_data, "temp", "effect_size_raw", "effect_var_raw", mods_formula=temp_mods_formula, run_id="temp_naive_raw")
 # results <- meta_analysis_end_to_end(all_data, "phtot", "hedges_g", "hedges_g_var", mods_formula=temp_mods_formula, run_id="temp_naive")
 
 ```
@@ -436,7 +449,7 @@ run_meta <- function(data, yi, V, mods_formula, threshold_val = NULL, parallel_o
 }
 
 all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
-all_data <- all_data[1:50, ]
+all_data <- all_data[1:20, ]
 # assign ID column
 all_data <- all_data %>% mutate(ID = seq_len(nrow(all_data)))
 subset <- subset_data(all_data, "phtot", "effect_size", "effect_var", filter_functional_group = NULL, filter_family = NULL, filter_genus = NULL, filter_taxa = NULL)
@@ -446,15 +459,15 @@ out <- run_meta(subset, "effect_size", "effect_var", temp_mods_formula)
 
 
 ```
+```{r}
+  if (str_detect("effect_size", "raw")) {
+    effect_type <- "% change in calcification rate"
+  } else {
+    effect_type <- "Hedges' g"
+  }
 
-```{r, echo=TRUE, fig.show='hold'}
-plot(1:4, c(1,2,3,4), type = "o", pch = 19,
-     xlab = "ID", ylab = "Cook's Distance (logarithmic scale)", xaxt = "n")
-
-axis(1, at = 1:4, labels = 1:4)  # Manually add x-axis labels
-
+  print(paste("Effect type:", effect_type))
 ```
-
 
 
 ```{r}
