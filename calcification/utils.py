@@ -61,34 +61,22 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     # make all string values in the dataframe (excluding 'species_types') lowercase
     # for col in df.select_dtypes(include=['object']).columns:
     #     if col not in ['species_types', 'doi', 'coords', 'cleaned_coords', 'location']:
-    #         df[col] = df[col].str.lower()    
-    
-            
-    df = df.assign(
-        genus=df.species_types.apply(lambda x: binomial_to_genus_species(x)[0]),
-        species=df.species_types.apply(lambda x: binomial_to_genus_species(x)[1])
-    )   # separate binomials into genus and species columns
-    # append family column: if no species_mapping file, generate
-    if not (config.resources_dir / 'species_mapping.yaml').exists():
-        create_species_mapping_yaml(df.species_types.unique())
-    else:
-        print(f'Using species mapping in {config.resources_dir / 'species_mapping.yaml'}.')
-    species_mapping = read_yaml(config.resources_dir / 'species_mapping.yaml')
-    # Extract nested dictionary values for each species
-    df['family'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('family', 'Unknown'))
-    df['functional_group'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('functional_group', 'Unknown'))
+    #         df[col] = df[col].str.lower()  
     
     # flag up duplicate dois (only if they have also have 'include' as 'yes')
     inclusion_df = df[df['include'] == 'yes']
     duplicate_dois = inclusion_df[inclusion_df.duplicated(subset='doi', keep=False)]
     if not duplicate_dois.empty and not all(pd.isna(duplicate_dois['doi'])):
         print("\nDuplicate DOIs found, treat with caution:")
-        print([doi for doi in duplicate_dois.doi.unique() if doi is not np.nan])        
-        
+        print([doi for doi in duplicate_dois.doi.unique() if doi is not np.nan])  
+    
     # fill down necessary repeated metadata values
     df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']] = df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']].infer_objects(copy=False).ffill()
     df[['coords', 'cleaned_coords']] = df.groupby('doi')[['coords', 'cleaned_coords']].ffill()  # fill only as far as the next DOI
-
+    
+    # create family, genus, species, and functional group columns
+    df = assign_taxonomical_info(df)
+    
     # missing sample size values
     if df['n'].dtype == 'object':  # Only perform string operations if column contains strings
         df = df[~df['n'].str.contains('~', na=False)]   # remove any rows in which 'n' has '~' in the string
@@ -108,6 +96,22 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     # calculate calcification standard deviation only when 'calcification_se' and 'n' are not NaN
     df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else row['calcification_sd'], axis=1)
     
+    return df
+
+def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.assign(
+        genus=df.species_types.apply(lambda x: binomial_to_genus_species(x)[0]),
+        species=df.species_types.apply(lambda x: binomial_to_genus_species(x)[1])
+    )   # separate binomials into genus and species columns
+    # append family column: if no species_mapping file, generate
+    if not (config.resources_dir / 'species_mapping.yaml').exists():
+        create_species_mapping_yaml(df.species_types.unique())
+    else:
+        print(f'Using species mapping in {config.resources_dir / 'species_mapping.yaml'}.')
+    species_mapping = read_yaml(config.resources_dir / 'species_mapping.yaml')
+    # extract nested dictionary values for each species
+    df['family'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('family', 'Unknown'))
+    df['functional_group'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('functional_group', 'Unknown'))
     return df
 
 
@@ -409,9 +413,7 @@ def uniquify_repeated_values(vals: list) -> list:
 
 ### carbonate chemistry
 def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
-    # df = pd.read_excel(fp, sheet_name=sheet_name)
     df = process_df(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict=selection_dict)
-    # return df
     ### load measured values
     print("Loading measured values...")
     measured_df = get_highlighted(fp, sheet_name=sheet_name)    # keeping all cols
@@ -420,13 +422,6 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
     
     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
     print("Calculating total pH values...")
-    measured_df.loc[:, 'phtot'] = measured_df.apply(
-        lambda row: cbh.pH_scale_converter(
-            pH=row['phnbs'], scale='NBS', Temp=row['temp'], Sal=row['sal'] if pd.notna(row['sal']) else 35
-        ).get('pHtot', None) if pd.notna(row['phnbs']) and pd.notna(row['temp'])
-        else row['phtot'],
-        axis=1
-    )
     # if phtot and phnbs are both nan, calculate phtot from temp, salinity, dic, and ta
     measured_df.loc[:, 'phtot'] = measured_df.apply(
         lambda row: cb.cbsyst.Csys(
@@ -435,6 +430,17 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
         else np.nan,
         axis=1
     )
+    # if one of ph is provided, ensure total ph is calculated
+    measured_df.loc[:, 'phtot'] = measured_df.apply(
+        lambda row: cbh.pH_scale_converter(
+            pH=row['phnbs'], scale='NBS', Temp=row['temp'], Sal=row['sal'] if pd.notna(row['sal']) else 35
+        ).get('pHtot', None) if pd.notna(row['phnbs']) and pd.notna(row['temp'])
+        else row['phtot'],
+        axis=1
+    )
+    # count number of non-nan phtot values
+    # print(f"\nTotal number of total pH values: {measured_df['phtot'].count()}")
+
     
     ### calculate carbonate chemistry
     carb_metadata = read_yaml(config.resources_dir / "mapping.yaml")

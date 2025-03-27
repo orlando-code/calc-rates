@@ -57,6 +57,89 @@ def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
     return np.sqrt((sd1 ** 2 + sd2 ** 2) / 2)
 
 
+def calculate_raw_effect_size(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None, epsilon=1e-6):
+    """
+    Calculate percent change between two means with error propagation.
+    
+    For different scenarios:
+    - 10 to 20: +100%
+    - 10 to 0: -100%
+    - 10 to -10: -200%
+    
+    Parameters:
+    -----------
+    mu1, mu2 : float
+        Mean values to compare (mu1=reference/baseline, mu2=new value)
+    se1, se2 : float, optional
+        Standard errors of mu1 and mu2
+    epsilon : float, optional
+        Small value to stabilize calculations when means are close to zero
+        
+    Returns:
+    --------
+    pc : float
+        Percent change
+    se_pc : float or None
+        Standard error of the percent change
+    """
+    se1, se2 = sd1/np.sqrt(n1), sd2/np.sqrt(n2)
+    # Special case: both means are exactly zero
+    if mu1 == 0 and mu2 == 0:
+        pc = 0  # No change between the means
+        
+        # If SEs are provided, calculate the uncertainty
+        if se1 is not None and se2 is not None:
+            # When both means are zero, consider the ratio of SEs to estimate uncertainty
+            # This represents how much percentage change we would expect if the values 
+            # fluctuated by ±1 SE from zero
+            if se1 > 0:
+                # Scale based on the potential percentage fluctuations around zero
+                se_pc = 100 * se2 / se1
+            else:
+                # If se1 is zero but se2 is not, technically infinite uncertainty
+                se_pc = float('inf') if se2 > 0 else 0
+            return pc, se_pc
+        return pc
+    
+    # Special case: baseline is zero
+    if mu1 == 0:
+        # Handle the zero baseline case
+        # Return signed 100% change
+        pc = np.sign(mu2) * 100
+        
+        # If SE is provided, calculate the uncertainty
+        if se1 is not None and se2 is not None:
+            # When baseline is zero, use the ratio of SEs to treatment
+            if abs(mu2) > epsilon:
+                # Error in baseline causes very large fluctuations in percent change
+                se_pc = 100 * se1 / abs(mu2)
+                
+                # Also consider uncertainty in the treatment
+                se_pc = np.sqrt(se_pc**2 + (100 * se2 / abs(mu2))**2)
+            else:
+                # If both are essentially zero, high uncertainty
+                se_pc = float('inf') if (se1 > 0 or se2 > 0) else 0
+            return pc, se_pc
+        return pc
+    
+    # Standard percent change calculation
+    pc = ((mu2 - mu1) / abs(mu1)) * 100
+    
+    # Return only PC if no standard errors provided
+    if se1 is None or se2 is None:
+        return pc
+    
+    # Error propagation - calculate partial derivatives
+    dpc_dmu1 = (-mu2 / (mu1**2)) * 100
+    dpc_dmu2 = (1 / abs(mu1)) * 100
+    
+    # Calculate standard error using error propagation
+    var_pc = (dpc_dmu1**2 * se1**2) + (dpc_dmu2**2 * se2**2)
+    
+    return pc, var_pc
+    
+    
+
 def calc_cohens_d_var(n1: int, n2: int, d: float) -> float:
     """Calculate variance of Cohen's d metric: https://www.campbellcollaboration.org/calculator/equations
     
@@ -118,7 +201,7 @@ def determine_control_conditions(df) -> dict:
     """Identify the rows corresponding to min temperature and/or max pH.
     
     Args:
-        df (pd.DataFrame): Input dataframe with columns 'doi', 't_in', 'phtot', etc.
+        df (pd.DataFrame): Input dataframe with columns 'doi', 'temp', 'phtot', etc.
         
     Returns:
         dict: Dictionary with control conditions for each treatment group.
@@ -129,7 +212,7 @@ def determine_control_conditions(df) -> dict:
 
     for group, sub_df in grouped:
         group = int(group)  # convert group to integer for semantics
-        min_temp = sub_df.loc[sub_df['t_in'].idxmin()]['t_in'] if not any(sub_df['phtot'].isna()) else None # Row with minimum temperature
+        min_temp = sub_df.loc[sub_df['temp'].idxmin()]['temp'] if not any(sub_df['phtot'].isna()) else None # Row with minimum temperature
         max_pH = sub_df.loc[sub_df['phtot'].idxmax()]['phtot'] if not any(sub_df['phtot'].isna()) else None # Row with maximum pH
 
         control_treatments[group] = {
@@ -148,8 +231,8 @@ def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: floa
         
         # get temperature cluster level (0 is control)
         t_level = None
-        if not np.isnan(row['t_in']) and control_T is not None:
-            t_cluster_idx = t_mapping.get(row['t_in'])
+        if not np.isnan(row['temp']) and control_T is not None:
+            t_cluster_idx = t_mapping.get(row['temp'])
             control_cluster_idx = t_mapping.get(control_T)
             if t_cluster_idx is not None and control_cluster_idx is not None:
                 t_level = t_cluster_idx - control_cluster_idx
@@ -199,7 +282,7 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
     recognizing multiple levels of treatments.
     
     Args:
-        df (pd.DataFrame): Input dataframe with columns 'doi', 't_in', 'phtot', etc.
+        df (pd.DataFrame): Input dataframe with columns 'doi', 'temp', 'phtot', etc.
         t_atol (float): Absolute tolerance for temperature comparison.
         pH_atol (float): Absolute tolerance for pH comparison.
         irr_rtol (float): Relative tolerance for irradiance grouping.
@@ -224,11 +307,11 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
                 continue
                 
             # find control values (min T, max pH)
-            control_T = group_df['t_in'].min() if not group_df['t_in'].isna().all() else None
+            control_T = group_df['temp'].min() if not group_df['temp'].isna().all() else None
             control_pH = group_df['phtot'].max() if not group_df['phtot'].isna().all() else None
             
             # cluster temperature values
-            t_values = group_df['t_in'].dropna().unique()
+            t_values = group_df['temp'].dropna().unique()
             t_clusters = cluster_values(t_values, t_atol)
             
             # cluster pH values
@@ -245,8 +328,8 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
             result_df = result_df.combine_first(treatments_df)
             
     result_df['treatment'] = result_df['treatment_group'].apply(
-        lambda x: 't_in-phtot' if isinstance(x, str) and 'tT' in x and 'tP' in x else 
-                 't_in' if isinstance(x, str) and 'tT' in x else 
+        lambda x: 'temp_phtot' if isinstance(x, str) and 'tT' in x and 'tP' in x else 
+                 'temp' if isinstance(x, str) and 'tT' in x else 
                  'phtot' if isinstance(x, str) and 'tP' in x else 
                  'control' if isinstance(x, str) and x == 'cTcP' else np.nan
     )
@@ -322,9 +405,9 @@ def cluster_values(values, tolerance: float) -> list:
     return clusters
 
 
-def hedges_g_for_row(treatment_row: pd.Series, control_data: pd.Series) -> pd.Series:
+def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Series, effect_type: str = 'hedges_g') -> pd.Series:
     """
-    Calculate Hedges' g and append additional columns for a treatment row.
+    Calculate the effect size (Hedges' g or relative calcification) and append additional columns for a treatment row.
     
     Args:
         treatment_row: Row containing treatment data
@@ -333,30 +416,39 @@ def hedges_g_for_row(treatment_row: pd.Series, control_data: pd.Series) -> pd.Se
     Returns:
         pandas.Series: Modified row with Hedges' g calculations
     """
+    # if treatment_row.doi == "10.1016/j.envpol.2020.115344":
+    #     print("here"
     mu_t, sd_t, n_t = treatment_row['calcification'], treatment_row['calcification_sd'], treatment_row['n']
     mu_c, sd_c, n_c = control_data['calcification'], control_data['calcification_sd'], control_data['n']
-    t_in_c, ph_c = control_data['t_in'], control_data['phtot']
+    t_in_c, ph_c = control_data['temp'], control_data['phtot']
     
     if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
-        print(f"Missing data for Hedges' g calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]")
-        print(treatment_row.index.iloc[0])
-    # calculate Hedges' g
-    h_g, h_g_var, (h_g_l, h_g_u), sd_pooled, d, bias_correction = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)
-    
+        print(f"Missing data for {effect_type} calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]")
+        print(treatment_row.doi)
+
     row_copy = treatment_row.copy() # create a copy to avoid SettingWithCopyWarning
     
-    row_copy['delta_t'] = row_copy['t_in'] - t_in_c
+    if effect_type == 'hedges_g':
+        effect_size, effect_var, (_, _), sd_pooled, d, bias_correction = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)   # TODO: reverse these
+        # leaving these in for debugging
+        row_copy['pooled_sd'] = sd_pooled
+        row_copy['d'] = d
+        row_copy['bias_correction'] = bias_correction
+    elif effect_type == 'relative_calcification':
+        effect_size, effect_var = calculate_raw_effect_size(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
+    else:
+        raise ValueError(f"Effect type {effect_type} not recognized. Please choose 'hedges_g' or 'relative_calcification'")
+    
+    row_copy['effect_size'] = effect_size
+    row_copy['effect_var'] = effect_var
+    # general metadata
+    row_copy['delta_t'] = row_copy['temp'] - t_in_c
     row_copy['delta_ph'] = row_copy['phtot'] - ph_c
-    row_copy['treatment_val'] = row_copy['t_in'] if row_copy['treatment'] == 't_in' else row_copy['phtot']
-    row_copy['pooled_sd'] = sd_pooled
-    row_copy['d'] = d
-    row_copy['bias_correction'] = bias_correction
-    row_copy['hedges_g'] = h_g
-    row_copy['hedges_g_var'] = h_g_var
-    row_copy['hedges_g_l'] = h_g_l
-    row_copy['hedges_g_u'] = h_g_u
+    row_copy['treatment_val'] = row_copy['temp'] if row_copy['treatment'] == 'temp' else row_copy['phtot']
     row_copy['control_calcification'] = mu_c
+    row_copy['control_calcification_sd'] = sd_c
     row_copy['treatment_calcification'] = mu_t
+    row_copy['treatment_calcification_sd'] = sd_t
     
     return row_copy
 
@@ -383,95 +475,94 @@ def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     return control_row
     
 
-def process_group(species_df: pd.DataFrame) -> pd.DataFrame:
+# def process_group(species_df: pd.DataFrame, effect_type: str = 'hedges_g') -> pd.DataFrame:
+#     """
+#     Process a group of species data to calculate Hedges' g.
+    
+#     Args:
+#         species_df: DataFrame containing data for a specific species
+        
+#     Returns:
+#         pandas.DataFrame: DataFrame with Hedges' g calculations
+#     """
+#     # TODO: implement simple method (single control): see deprecated code
+#     result_dfs = []
+#     result_dfs.extend(process_group_multivar(species_df, effect_type=effect_type))
+        
+#     # suppress futurewarning
+#     import warnings
+#     warnings.simplefilter(action='ignore', category=FutureWarning)
+    
+#     if result_dfs:  # TODO: fix future warning without dropping all-nan columns
+#         # Identify all column names across all DataFrames
+#         all_columns = set().union(*(df.columns for df in result_dfs))
+        
+#         # Ensure all DataFrames contain the same columns with consistent dtypes
+#         for i, df in enumerate(result_dfs):
+#             missing_cols = all_columns - set(df.columns)
+#             for col in missing_cols:
+#                 df[col] = pd.NA  # Retain columns but explicitly mark as NA
+#             result_dfs[i] = df.astype({col: "object" for col in missing_cols})  # Set dtype to avoid dtype inference issues
+    
+#     # Concatenate DataFrames without dropping NaN-only columns
+#         result_df = pd.concat(result_dfs, axis=0, ignore_index=True)
+#         # # drop all-NA columns from each DataFrame before concatenation (avoids future warning)
+#         # filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
+#         # # ensure at least one DataFrame is non-empty before concatenation
+#         # filtered_dfs = [df for df in filtered_dfs if not df.empty]
+#         return result_df
+#         # return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
+#     else:
+#         return None
+
+def process_group_multivar(df, effect_type='hedges_g'):
     """
-    Process a group of species data to calculate Hedges' g.
+    Process a group of species data to calculate effect size.
     
     Args:
-        species_df: DataFrame containing data for a specific species
-        
+        df: DataFrame containing data for a specific species
+        effect_type: Type of effect size to calculate
+    
     Returns:
-        pandas.DataFrame: DataFrame with Hedges' g calculations
+        pandas.DataFrame: DataFrame with effect size calculations
     """
-    # TODO: implement simple method (single control): see deprecated code
-    result_dfs = []
-    result_dfs.extend(process_group_multivar(species_df))
+    
+    results_df = []
+    # for each treatment value in pH, calculate effect size varying temperature
+    grouped_by_ph = df.groupby('treatment_level_ph')
+    grouped_by_t = df.groupby('treatment_level_t')
+    
+    def process_group(group, control_level_col):
+        control_level = min(group[control_level_col])
+        control_df = group[group[control_level_col] == control_level]
+        treatment_df = group[group[control_level_col] > control_level]
         
-    if result_dfs:
-        # drop all-NA columns from each DataFrame before concatenation (avoids future warning)
-        filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
-        # ensure at least one DataFrame is non-empty before concatenation
-        filtered_dfs = [df for df in filtered_dfs if not df.empty]
-
-        return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
-    else:
-        return None
+        if treatment_df.empty:  # skip if there's no treatment data
+            return
+        
+        # aggregate control data if n > 1 (more precise than just taking first row)
+        control_data = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
+        # Aggregate treatment data if all n=1
+        if np.all(treatment_df.n == 1):
+            treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T
+            
+        # update treatment label
+        if control_level_col == "treatment_level_t":
+            treatment_df.loc[:, 'treatment'] = 'temp'
+        elif control_level_col == "treatment_level_ph":
+            treatment_df.loc[:, 'treatment'] = 'phtot'
+            
+        # calculate effect size varying temperature
+        effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_data, effect_type=effect_type), axis=1)
+        return effect_size
     
-
-
-def process_group_multivar(species_df: pd.DataFrame) -> pd.DataFrame:
-
-    grouped_by_ph = species_df.groupby('treatment_level_ph')
-    grouped_by_temp  = species_df.groupby('treatment_level_t')
+    results_df.append(grouped_by_ph.apply(process_group, control_level_col='treatment_level_t', include_groups=False))
+    results_df.append(grouped_by_t.apply(process_group, control_level_col='treatment_level_ph', include_groups=False))
     
-    result_dfs = []
-    # compute temperature effects (within each pH level)
-    # if there are multiple temperature levels:
-    if len(grouped_by_temp) > 1:
-        for ph_level, group in grouped_by_ph:
-            if len(group) <= 1:
-                continue
-            temp_control_treatment = group['treatment_level_t'].min()
-            control_df = group[group['treatment_level_t'] == temp_control_treatment]    # select minimum temp rows as controls
-            treatment_df = group[group['treatment_level_t'] != temp_control_treatment]
-            if treatment_df.empty:  # if ph grouping has only single temperature
-                continue
-            if len(control_df) > 1:
-                control_df = aggregate_by_treatment_group(control_df)
-            else:
-                control_df = control_df.iloc[0]
-            # select everything other than control rows
+    return pd.concat(results_df).reset_index(drop=True)
 
-            if np.all(treatment_df.n == 1) and not treatment_df.empty:
-                treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T # hedges_g_for_row requires df input            
-                
-            if not control_df.empty:
-                out = pd.DataFrame(treatment_df.apply(
-                    lambda row: hedges_g_for_row(row, control_df),
-                    axis=1
-                ))
-                result_dfs.append(out) if not out.empty else None
-    
-    # if there are multiple pH levels:
-    if len(grouped_by_ph) > 1:
-        # compute pH effects (within each temperature level)
-        for t_level, group in grouped_by_temp:
-            if len(group) <= 1:
-                continue
-            ph_control_treatment = group['treatment_level_ph'].min()
-            control_df = group[group['treatment_level_ph'] == ph_control_treatment]
-            treatment_df = group[group['treatment_level_ph'] != ph_control_treatment]
-            # select everything other than control rows
-            if treatment_df.empty:  # if temperature grouping has only single ph.
-                continue
-            if len(control_df) > 1:
-                control_row = aggregate_by_treatment_group(control_df)
-            else:
-                control_row = control_df.iloc[0]
 
-            if np.all(treatment_df.n == 1) and not treatment_df.empty:
-                treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T
-
-            if not control_row.empty:
-                out = pd.DataFrame(treatment_df.apply(
-                    lambda row: hedges_g_for_row(row, control_row),
-                    axis=1
-                ))
-                result_dfs.append(out) if not out.empty else None
-
-    return result_dfs
-
-def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_effect_for_df(df: pd.DataFrame, effect_type: str = 'hedges_g') -> pd.DataFrame:
     """
     Calculate Hedges' g for a DataFrame of experimental results.
     
@@ -484,8 +575,8 @@ def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
     # copy to avoid modifying original
     result_df = df.copy()
     
-    hedges_cols = ['delta_t', 'delta_ph', 'hedges_g', 'hedges_g_l', 'hedges_g_u']
-    for col in hedges_cols:
+    effect_cols = ['delta_t', 'delta_ph', 'effect_size', 'effect_var']
+    for col in effect_cols:
         result_df[col] = np.nan
     
     # group by relevant factors and apply processing
@@ -496,11 +587,9 @@ def hedges_g_for_df(df: pd.DataFrame) -> pd.DataFrame:
         study_df = result_df[result_df['doi'] == doi]
         for irr_group, irr_df in study_df.groupby('irr_group'):
             for species, species_df in irr_df.groupby('species_types'):
-                # print(species)
-                df = process_group(species_df)
+                # df = process_group(species_df, effect_type=effect_type)
+                df = process_group_multivar(species_df, effect_type=effect_type)
                 if df is not None:
-                    # if np.any(df.n == 1):
-                    #     print('here')
                     grouped_data.append(df)
                 
     # TODO: fix this: still raising the futurewarning error
@@ -567,9 +656,9 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
 
 # def compute_heds
     # def calculate_effect_size(df1_sample, df2_sample, var, group1, group2):
-    #     other_var = 't_in' if var == 'phtot' else 'phtot'
+    #     other_var = 'temp' if var == 'phtot' else 'phtot'
     #     if np.isclose(df1_sample[other_var], df2_sample[other_var], atol=0.1):
-    #         if (var == 'phtot' and df1_sample[var] < df2_sample[var]) or (var == 't_in' and df1_sample[var] > df2_sample[var]):
+    #         if (var == 'phtot' and df1_sample[var] < df2_sample[var]) or (var == 'temp' and df1_sample[var] > df2_sample[var]):
     #             group1, group2 = group2, group1
     #             df1_sample, df2_sample = df2_sample, df1_sample
     #         delta_var = abs(df2_sample[var] - df1_sample[var])
@@ -618,7 +707,7 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
     # return results
 
 
-# def compute_hedges_g(df, vars_to_compare=['t_in', 'phtot', 'irr']):
+# def compute_hedges_g(df, vars_to_compare=['temp', 'phtot', 'irr']):
 #     """
 #     Compute Hedges' g effect size for each treatment compared to the control within each species.
 
@@ -665,10 +754,10 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
 #                 df1_sample = df1.iloc[sample] if isinstance(df1, pd.DataFrame) else df1
 #                 df2_sample = df2.iloc[sample] if isinstance(df2, pd.DataFrame) else df2
 #                 for var in specific_vars_to_compare:
-#                     other_var = 't_in' if var == 'phtot' else 'phtot'
+#                     other_var = 'temp' if var == 'phtot' else 'phtot'
 #                     if np.isclose(df1_sample[other_var], df2_sample[other_var], atol=0.1):  # if agree within 0.1, likely control variable
 #                         # ensure that df1_sample is control group (smaller value for t_in, larger value for phtot). # TODO: allow switching for deltavar relative to climatology
-#                         if (var == 'phtot' and df1_sample[var] < df2_sample[var]) or (var == 't_in' and df1_sample[var] > df2_sample[var]):
+#                         if (var == 'phtot' and df1_sample[var] < df2_sample[var]) or (var == 'temp' and df1_sample[var] > df2_sample[var]):
 #                             tg1, tg2 = tg2, tg1
 #                             df1_sample, df2_sample = df2_sample, df1_sample
 #                         delta_var = abs(df2_sample[var] - df1_sample[var])
@@ -786,7 +875,7 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
 
 
 ### Previously part of process_group
-    # loi = ['phtot', 't_in', 'calcification', 'calcification_sd', 'n']
+    # loi = ['phtot', 'temp', 'calcification', 'calcification_sd', 'n']
     # control_df = species_df[species_df['treatment_group'] == 'cTcP']    # extract control data
     # if control_df.empty:
     #     print(f"Control group not found for {species_df['doi'].iloc[0]}, for \n{species_df[['species_types']+loi].iloc[0]}")

@@ -3,6 +3,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(metafor) # need version 3.0 or higher (else 'regplot' function missing)
 library(tidyverse)
+library(tidyr)      # Explicitly load for drop_na function
+library(dplyr)      # Explicitly load for pipe operator %>%
+library(tidyselect) # Explicitly load for any_of function
 library(MASS)
 library(viridis)
 library(patchwork)
@@ -14,6 +17,9 @@ library(lubridate)
 library(rsvg)
 library(svglite)
 library(rmarkdown)
+library(MuMIn)
+library(here)
+eval(metafor:::.MuMIn)
 ```
 
 ```{r ggplot settings}
@@ -49,8 +55,28 @@ colour.scheme <- c("black",
 dir.create("output", showWarnings = FALSE)
 ```
 
+```{r plot-chunk, fig.show='asis', fig.width=7, fig.height=5}
+# Your plot code here
+plot(cars)
+```
+```{r plot-ggplot, fig.show='asis', fig.width=7, fig.height=5}
+library(ggplot2)
+ggplot(cars, aes(speed, dist)) + 
+  geom_point() + 
+  theme_minimal()
+```
 
 ```{r}
+# plot(out$cooks_dist, type = "o", pch = 19,
+plot(1:4, c(1,2,3,4), type = "o", pch = 19,
+  xlab = "ID", ylab = "Cook's Distance (logarithmic scale)", xaxt = "n",
+)
+axis(1, at = 1:4, labels = 1:4)  # Manually add x-axis labels
+
+```
+
+
+```{r Helper functions}
 
 # calculate the cooks distance threshold via 2√((k+1)/(n - k - 1))
 threshold <- function(data, mods_formula) {
@@ -78,10 +104,65 @@ filter_taxonomically <- function(indata, filter_variable, variable_value) {
     drops_count = drops_count
   ))
 }
+
+
+subset_data <- function(data, investigation, yi, V, filter_functional_group = NULL, filter_family = NULL, filter_genus = NULL, filter_taxa = NULL) {
+  writeLines(paste("\nSelecting data for", investigation, "investigation..."))
+
+  n_samples <- nrow(data)
+  # Filter by investigation
+  filtered_data <- dplyr::filter(data, stringr::str_detect(treatment, investigation))
+  # Set necessary columns based on investigation type
+  necessary_cols <- c(yi, V, "family", "genus", "taxa", "original_doi")
+  if (investigation == "t_in") {
+    necessary_cols <- c(necessary_cols, "delta_t", "t_in")
+  } else if (investigation == "phtot") {
+    necessary_cols <- c(necessary_cols, "delta_ph", "phtot", "t_in")
+  }
+
+  # Filter out rows with NAs in necessary columns
+  filtered_data <- filtered_data %>%
+    drop_na(any_of(necessary_cols))
+  drops_nan <- nrow(data %>% filter(str_detect(treatment, investigation))) - nrow(filtered_data)
+  
+  # Apply taxonomic filters
+  filters <- list(
+    functional_group = filter_functional_group,
+    family = filter_family,
+    genus = filter_genus,
+    taxa = filter_taxa
+  )
+  
+  drops_count <- list()
+  # Apply each filter if provided
+  for (filter_name in names(filters)) {
+    if (!is.null(filters[[filter_name]])) {
+      result <- filter_taxonomically(filtered_data, filter_name, filters[[filter_name]])
+      filtered_data <- result$data
+      drops_count[[filter_name]] <- result$drops_count
+    }
+  }
+  
+  # Print summary
+  print(paste("Total samples in input data:", n_samples))
+  print(paste("Total samples of relevant investigation:", nrow(data %>% filter(str_detect(treatment, investigation)))))
+  print(paste("Dropped due to NaN values:", drops_nan))
+  
+  for (filter_name in names(drops_count)) {
+    print(paste("Dropped due to", filter_name, "filter:", drops_count[[filter_name]]))
+  }
+  
+  print(paste("Final sample count:", nrow(filtered_data), 
+              "(", n_samples - nrow(filtered_data), "total rows dropped )"))
+  
+  # Add an ID column
+  filtered_data <- filtered_data %>% mutate(ID = seq_len(nrow(filtered_data)))
+  return(filtered_data)
+}
 ```
 
 
-```{r}
+```{r Model results}
 ### save graphs to file
 save_figures <- function(model, data, mods_formula, save_dir = "output/", variable, run_id) {
   save_dir <- paste0(save_dir, variable, "/")
@@ -131,7 +212,7 @@ save_figures <- function(model, data, mods_formula, save_dir = "output/", variab
   print(paste0("Saving bubble plot to ", bubble_fp))
 
   # Select the appropriate mod variable based on the investigation type
-  mod_var <- if (variable == "t_in") "delta_t" else if (variable == "phtot") "delta_pH" else "delta_t"
+  mod_var <- if (variable == "t_in") "delta_t" else if (variable == "phtot") "delta_ph" else "delta_t"
   xlab_text <- if (variable == "t_in") {
     expression(paste("\U0394", "Temperature", " [", degree, "C]"))
   } else if (variable == "phtot") {
@@ -139,7 +220,6 @@ save_figures <- function(model, data, mods_formula, save_dir = "output/", variab
   } else {
     "Variable"
   }
-
   regplot.rma(model, mod = mod_var, refline = 0,
     ylab = "Hedges' g",
     xlab = xlab_text,
@@ -168,96 +248,13 @@ print_model_summary <- function(model, variable, run_id, save_dir = "output/") {
   capture.output(print(prediction_obj), file = file_conn, append = TRUE)
   close(file_conn)
 }
-
 ```
 
-
-```{r}
-subset_data <- function(data, investigation, filter_functional_group = NULL, filter_family = NULL, filter_genus = NULL, filter_taxa = NULL) {
-  # print a message to the console
-  writeLines(paste("\nSelecting data for", investigation, "investigation..."))
-
-  n_samples <- nrow(data)
-  # Track drops at each step
-  filtered_data <- data
-
-  # Filter by investigation
-  filtered_data_investigation <- filtered_data %>%
-    filter(str_detect(treatment, investigation))
-  filtered_data <- filtered_data_investigation
-
-  # set necessary columns based on investigation type
-  necessary_cols <- c("hedges_g", "hedges_g_var", "family", "genus", "taxa", "original_doi")
-
-  # add investigation-specific columns to required columns
-  if (investigation == "t_in") {
-    necessary_cols <- c(necessary_cols, "delta_t", "t_in")
-  } else if (investigation == "phtot") {
-    necessary_cols <- c(necessary_cols, "delta_pH", "phtot", "t_in")
-  }
-
-  # Filter out rows with NAs in necessary columns
-  filtered_data_nan <- filtered_data %>%
-    drop_na(any_of(necessary_cols))
-  drops_nan <- nrow(filtered_data) - nrow(filtered_data_nan)
-  filtered_data <- filtered_data_nan
-
-  drops_functional_group <- 0
-  # Apply functional group filter if provided
-  if (!is.null(filter_functional_group)) {
-    functional_group_data <- filter_taxonomically(filtered_data, "functional_group", filter_functional_group)
-    filtered_data <- functional_group_data$data
-    drops_functional_group <- functional_group_data$drops_count
-  }
-
-  # Apply genus filter if provided
-  drops_genus <- 0
-  genus_data <- filter_taxonomically(filtered_data, "genus", filter_genus)
-  filtered_data <- genus_data$data
-  drops_genus <- genus_data$drops_count
-
-  # Apply family filter if provided
-  drops_family <- 0
-  family_data <- filter_taxonomically(filtered_data, "family", filter_family)
-  filtered_data <- family_data$data
-  drops_family <- family_data$drops_count
-
-  # Apply taxa filter if provided
-  drops_taxa <- 0
-  taxa_data <- filter_taxonomically(filtered_data, "taxa", filter_taxa)
-  filtered_data <- taxa_data$data
-  drops_taxa <- taxa_data$drops_count
-
-  # Print summary of dropped rows
-  print(paste("Total samples in input data:", n_samples))
-  print(paste("Total samples of relevant investigation:", nrow(filtered_data_investigation)))
-  print(paste("Dropped due to NaN values:", drops_nan))
-  if (!is.null(filter_functional_group)) {
-    print(paste("Dropped due to functional group filter:", drops_functional_group))
-  }
-  if (!is.null(filter_genus)) {
-    print(paste("Dropped due to genus filter:", drops_genus))
-  }
-  if (!is.null(filter_family)) {
-    print(paste("Dropped due to genus filter:", drops_family))
-  }
-  if (!is.null(filter_taxa)) {
-    print(paste("Dropped due to taxa filter:", drops_taxa))
-  }
-  print(paste("Final sample count:", nrow(filtered_data), 
-              "(", n_samples - nrow(filtered_data), "total rows dropped )"))
-  # add an ID column
-  filtered_data <- filtered_data %>% mutate(ID = seq_len(nrow(filtered_data)))
-  return(filtered_data)
-}
-```
-
-
-```{r}
-run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 8)) {
+```{r Meta-analysis pipeline}
+run_meta_analysis <- function(data, yi, V, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 8)) {
   # Eliminates anomalies based on Cook's distance, then runs a random-effects multi-level model.
-  model <- rma.mv(yi = hedges_g,
-    V = hedges_g_var,
+  model <- rma.mv(yi = data[[yi]],
+    V = data[[V]],
     data = data,
     method = "REML",
     mods = mods_formula,
@@ -282,9 +279,10 @@ run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel
   )
   # plot Cook's distances
   plot(cooks_dist, type = "o", pch = 19,
-       xlab = "ID", ylab = "Cook's Distance", xaxt = "n",
-       # plot a horizontal line at the threshold value
+       xlab = "ID", ylab = "Cook's Distance (logarithmic scale)", xaxt = "n",
+      log = "y",
        )
+  # plot a horizontal line at the threshold value
   abline(h = threshold_val, col = "red", lty = 5)
 
   axis(side = 1, at = seq_along(cooks_dist),
@@ -307,8 +305,8 @@ run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel
 
   # try to re-run model with cleaned data. if nlminb optimizer fails, stop execution
   final_model <- tryCatch({
-    rma.mv(yi = hedges_g,
-      V = hedges_g_var,
+    rma.mv(yi = data[[yi]],
+      V = data[[V]],
       data = cleaned_data,
       method = "REML",
       mods = mods_formula,
@@ -326,10 +324,8 @@ run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel
     cooks_dist = cooks_dist
   ))
 }
-```
 
-```{r}
-meta_analysis_end_to_end <- function(data, variable, mods_formula, run_id,
+meta_analysis_end_to_end <- function(data, variable, yi, V, mods_formula, run_id,
                                      filter_functional_group = NULL,
                                      filter_family = NULL, filter_taxa = NULL,
                                      filter_genus = NULL, threshold_val = NULL,
@@ -337,11 +333,11 @@ meta_analysis_end_to_end <- function(data, variable, mods_formula, run_id,
                                      parallel_opts = list(type = "multicore", ncpus = 16)) {
   # run meta-analysis for specified formula, treatment variable, and taxa/genus filters
   # automatically saves forest and bubble plots to output directory
-  subset <- subset_data(data, variable, filter_functional_group = filter_functional_group, filter_family = filter_family, filter_taxa = filter_taxa, filter_genus = filter_genus)
+  subset <- subset_data(data, variable, yi, V, filter_functional_group = filter_functional_group, filter_family = filter_family, filter_taxa = filter_taxa, filter_genus = filter_genus)
   # run meta-analysis
   # Try to run meta-analysis and handle any errors
   results <- tryCatch({
-    run_meta_analysis(subset, mods_formula, threshold_val, parallel_opts)
+    run_meta_analysis(subset, yi, V, mods_formula, threshold_val, parallel_opts)
   }, error = function(e) {
     cat(sprintf("\nERROR: Meta-analysis failed for %s with error: %s\n", run_id, e$message))
     return(NULL)
@@ -377,18 +373,171 @@ meta_analysis_end_to_end <- function(data, variable, mods_formula, run_id,
 }
 ```
 
-```{r}
+```{r Running: all data, naive model}
 # ALL DATA PLOTS
-all_data <- read.csv(file = "data/tmp/results.csv")
+# Set the working directory to the file's location for consistent data loading
+all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
+# all_data <- read.csv(here("data/tmp/results_phtot.csv"))
+
 # order the data by increasing hedges g
-all_data <- all_data[order(all_data$hedges_g), ]
+# all_data <- all_data[order(all_data$hedges_g), ]
 
-ph_mods_formula <- ~ delta_pH + phtot + t_in + factor(family) - 1
-results <- meta_analysis_end_to_end(all_data, "phtot", ph_mods_formula, "phtot_initial")
+# select first 50 rows for debugging
+all_data <- all_data[0:50, ]
 
-temp_mods_formula <- ~ delta_t + t_in + factor(family) - 1
-# temp_mods_formula <- ~ delta_t + t_in - 1
-results <- meta_analysis_end_to_end(all_data, "t_in", temp_mods_formula, "t_in_initial")
+# ph_mods_formula <- ~ delta_ph + factor(family) - 1
+# results <- meta_analysis_end_to_end(all_data, "phtot", ph_mods_formula, "phtot_naive")
+
+temp_mods_formula <- ~ delta_ph + factor(family) - 1
+results <- meta_analysis_end_to_end(all_data, "phtot", "effect_size", "effect_var", mods_formula=temp_mods_formula, run_id="temp_naive")
+# results <- meta_analysis_end_to_end(all_data, "phtot", "hedges_g", "hedges_g_var", mods_formula=temp_mods_formula, run_id="temp_naive")
+
+```
+
+```{r}
+run_meta <- function(data, yi, V, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 16)) {
+  
+  model <- rma.mv(yi = data[[yi]],
+    V = data[[V]],
+    data = data,
+    method = "REML",
+    mods = mods_formula,
+    test = "z",
+    random = list(~ 1 | (ID / original_doi)) # IDs are nested within original_doi
+  )
+  # if threshold in argument is NULL, compute
+  if (is.null(threshold_val)) {
+    threshold_val <- threshold(data, mods_formula)
+  }
+  cat(sprintf("Cook's distance threshold: %.2f\n", threshold_val))
+  # calculate Cook's distance
+  cooks_dist <- cooks.distance.rma.mv(
+    model,
+    progbar = TRUE,
+    reestimate = TRUE,
+    # parallel = "multicore",
+    # ncpus = 16,
+    parallel = parallel_opts$type,
+    ncpus = parallel_opts$ncpus,
+    cl = NULL
+  )
+  print(cooks_dist)
+  plot(cooks_dist, type = "o", pch = 19,
+    xlab = "ID", ylab = "Cook's Distance (logarithmic scale)", xaxt = "n",
+    # log = "y"
+  )
+  # plot a horizontal line at the threshold value
+  abline(h = threshold_val, col = "red", lty = 5)
+
+  axis(side = 1, at = seq_along(cooks_dist),
+       labels = as.numeric(names(cooks_dist)))
+
+  return(list(model=model, cooks_dist=cooks_dist))
+}
+
+all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
+all_data <- all_data[1:50, ]
+# assign ID column
+all_data <- all_data %>% mutate(ID = seq_len(nrow(all_data)))
+subset <- subset_data(all_data, "phtot", "effect_size", "effect_var", filter_functional_group = NULL, filter_family = NULL, filter_genus = NULL, filter_taxa = NULL)
+# run meta model with yi as effect_size and V as effect_var columns
+temp_mods_formula <- ~ delta_ph + factor(family) - 1
+out <- run_meta(subset, "effect_size", "effect_var", temp_mods_formula)
+
+
+```
+
+```{r, echo=TRUE, fig.show='hold'}
+plot(1:4, c(1,2,3,4), type = "o", pch = 19,
+     xlab = "ID", ylab = "Cook's Distance (logarithmic scale)", xaxt = "n")
+
+axis(1, at = 1:4, labels = 1:4)  # Manually add x-axis labels
+
+```
+
+
+
+```{r}
+
+# subset <- subset_data(all_data, "temp", "effect_size", "effect_var", filter_functional_group = NULL, filter_family = NULL, filter_genus = NULL, filter_taxa = NULL)
+
+# model <- rma.mv(yi = subset[["effect_size"]],
+#   V = subset[["effect_var"]],
+#   data = subset,
+#   method = "REML",
+#   mods = temp_mods_formula,
+#   test = "z",
+#   random = list(~ 1 | (ID / original_doi)) # IDs are nested within original_doi
+# )
+# threshold_val <- threshold(subset, temp_mods_formula)
+
+# cooks_dist <- cooks.distance.rma.mv(
+#   model,
+#   progbar = TRUE,
+#   # reestimate = TRUE,
+#   parallel = "multicore",
+#   ncpus = 16,
+#   cl = NULL
+# )
+# model <- rma.mv(yi = all_data[['effect_size']],
+#   V = all_data[['effect_var']],
+#   data = all_data,
+#   method = "REML",
+#   mods = temp_mods_formula,
+#   test = "z",
+#   random = list(~ 1 | (ID / original_doi)) # IDs are nested within original_doi
+# )
+
+
+```
+```{r MuMIn model investigation}
+### DETERMINING THE BEST MODEL
+all_data <- read.csv(here("data/tmp/results.csv"))
+
+# select first 50 rows for debugging
+# Note: using 0:50 will include row 0 which doesn't exist in R (indexing starts at 1)
+# all_data <- all_data[1:500, ]
+# filter data from the start to ensure model is fit on same data each time
+# this is handled in functions but best to be sure
+cols_to_include <- c("hedges_g", "hedges_g_var", "delta_ph", "phtot",
+                     "delta_t", "t_in", "functional_group", "family",
+                     "original_doi")
+
+# select these columns in all_data
+model_data <- all_data[, cols_to_include]
+
+# # filter for the phtot treatment
+model_data <- model_data %>% drop_na()
+# create ID column
+model_data <- model_data %>% mutate(ID = seq_len(nrow(model_data)))
+
+# check for nans
+cat("NUMBER OF NAN VALUES:", sum(is.na(model_data)), "\n")
+# set model to fail if any nan values
+options(na.action = "na.fail")
+
+# all subsets regression via dredge
+full_model <- rma.mv(yi = hedges_g,
+                     V = hedges_g_var,
+                     mods = ~ delta_ph + phtot + delta_t + t_in + factor(family) - 1,
+                     random = ~ 1 | (original_doi / ID),
+                     data = model_data,
+                     method = "ML"
+                     )
+model_selection <- dredge(full_model, trace = 2)
+
+# Get subset of models within 2 AICc points of the best model
+subset(model_selection, delta <= 2, recalc.weights = FALSE)
+# Extract the best model and refit using REML instead of ML
+best_model <- get.models(model_selection, subset = 1, method = "REML")[[1]]
+# Display the formula used in the best model
+best_model$formula.mods
+
+```
+
+```{r Future predictions}
+
+
 ```
 
 ```{r}
@@ -397,7 +546,7 @@ results <- meta_analysis_end_to_end(all_data, "t_in", temp_mods_formula, "t_in_i
 # for each unique family in all_data, run the meta-analysis and save the plots with a distinct run_id
 unique_families <- unique(all_data$family)
 
-phtot_family_formula <- ~ delta_pH + phtot + t_in - 1
+phtot_family_formula <- ~ delta_ph + phtot + t_in - 1
 t_in_family_formula <- ~ delta_t + t_in - 1
 
 ph_run_id <- "phtot_family"
@@ -421,7 +570,7 @@ for (family in unique_families) {
 
 functional_groups <- unique(all_data$functional_group)
 
-func_group_phtot_formula <- ~ delta_pH + phtot + t_in + factor(family) - 1
+func_group_phtot_formula <- ~ delta_ph + t_in + factor(family) - 1
 func_group_t_in_formula <- ~ delta_t + t_in + factor(family) - 1
 
 ph_run_id <- "phtot_fg"
@@ -433,7 +582,7 @@ for (func_group in functional_groups) {
               "\nRunning meta-analysis for functional group: %s (%d/%d)\n",
               func_group, which(functional_groups == func_group), length(functional_groups)))
 
-  ph_run_id <- paste0("phtot_", func_group) 
+  ph_run_id <- paste0("phtot_", func_group)
   results <- meta_analysis_end_to_end(all_data, "phtot", func_group_phtot_formula, ph_run_id, 
                                       filter_functional_group = func_group, save_dir = "output/func_groups/")
 
@@ -445,98 +594,98 @@ for (func_group in functional_groups) {
 
 
 # Deprecated
-```{r, fig.width = 6, fig.height = 8}
+# ```{r, fig.width = 6, fig.height = 8}
 
-# Overall plot of all studies assessing calcification in wrt temperature
+# # Overall plot of all studies assessing calcification in wrt temperature
 
-svg(file = 'output/t_in_overall_bubble_with_id_nested_algae_more.svg', width = 8, height = 8)
+# svg(file = 'output/t_in_overall_bubble_with_id_nested_algae_more.svg', width = 8, height = 8)
 
-regplot.rma(t_in_model, mod = "delta_t", refline = 0,
-  # xlim = c(-1,0.25),
-  ylim = c(-10, 5),
-  # predlim = c(-1,0.25),
-  ylab = "Hedges' g", xlab = expression(paste("\U0394", "Temperature", " [", degree, "C]")),
-  main = bquote(.(as.character(mods_formula)))
-)
-dev.off()
-```
+# regplot.rma(t_in_model, mod = "delta_t", refline = 0,
+#   # xlim = c(-1,0.25),
+#   ylim = c(-10, 5),
+#   # predlim = c(-1,0.25),
+#   ylab = "Hedges' g", xlab = expression(paste("\U0394", "Temperature", " [", degree, "C]")),
+#   main = bquote(.(as.character(mods_formula)))
+# )
+# dev.off()
+# ```
 
-```{r}
-t_in_data_hedges <- read.csv(file="data/tmp/results_t_in.csv")
-n_samples <- nrow(t_in_data_hedges)
-# remove rows with nan values in necessary columns
-necessary_cols <- c("hedges_g", "hedges_g_var", "delta_t", "t_in", "genus", "taxa")
-# data cleaning
-t_in_data_hedges <- t_in_data_hedges %>% drop_na(necessary_cols)
-print(n_samples - nrow(t_in_data_hedges)) # print how many rows were dropped
+# ```{r}
+# t_in_data_hedges <- read.csv(file="data/tmp/results_t_in.csv")
+# n_samples <- nrow(t_in_data_hedges)
+# # remove rows with nan values in necessary columns
+# necessary_cols <- c("hedges_g", "hedges_g_var", "delta_t", "t_in", "genus", "taxa")
+# # data cleaning
+# t_in_data_hedges <- t_in_data_hedges %>% drop_na(necessary_cols)
+# print(n_samples - nrow(t_in_data_hedges)) # print how many rows were dropped
 
-# filter to only include rows with 'coral' in taxa column
-t_in_data_hedges <- t_in_data_hedges %>% filter(str_detect(taxa, "Coral"))
-mods_formula <- ~ delta_t + t_in + factor(genus) - 1
+# # filter to only include rows with 'coral' in taxa column
+# t_in_data_hedges <- t_in_data_hedges %>% filter(str_detect(taxa, "Coral"))
+# mods_formula <- ~ delta_t + t_in + factor(genus) - 1
 
-# run model for univariate analysis of temperature
-t_in_results <- run_meta_analysis(
-  data = t_in_data_hedges,
-  mods_formula = mods_formula # -ve 1 removes the model intercept
-)
+# # run model for univariate analysis of temperature
+# t_in_results <- run_meta_analysis(
+#   data = t_in_data_hedges,
+#   mods_formula = mods_formula # -ve 1 removes the model intercept
+# )
 
-t_in_model <- t_in_results$model
-t_in_data_hedges <- t_in_results$data # cleaned data
-```
-
-
-```{r, fig.width = 6, fig.height = 8}
-
-# Overall plot of all studies assessing calcification in wrt temperature
-
-svg(file = 'output/t_in_overall_bubble_with_id_nested_algae_more.svg', width = 8, height = 8)
-
-regplot.rma(t_in_model, mod = "delta_t", refline = 0,
-  # xlim = c(-1,0.25),
-  ylim = c(-10, 5),
-  # predlim = c(-1,0.25),
-            ylab = "Hedges' g", xlab = expression(paste("\U0394", "Temperature", " [", degree, "C]")),
-                        main = bquote(.(as.character(mods_formula)))
-)
-dev.off()
-```
+# t_in_model <- t_in_results$model
+# t_in_data_hedges <- t_in_results$data # cleaned data
+# ```
 
 
-```{r}
-phtot_data_hedges <- read.csv(file="data/tmp/results_phtot.csv")
-n_samples <- nrow(phtot_data_hedges)
-# remove rows with nan values in necessary columns
-necessary_cols <- c("hedges_g", "hedges_g_var", "delta_pH", "phtot", "genus")
-# data cleaning
-phtot_data_hedges <- phtot_data_hedges %>% drop_na(necessary_cols)
-print(n_samples - nrow(phtot_data_hedges)) # print how many rows were dropped
+# ```{r, fig.width = 6, fig.height = 8}
 
-phtot_data_hedges <- phtot_data_hedges %>% filter(str_detect(taxa, "Coral"))
+# # Overall plot of all studies assessing calcification in wrt temperature
 
-mods_formula = ~ delta_pH + phtot + t_in + factor(genus) - 1 # -ve 1 removes the model intercept
-# run model for univariate analysis of temperature
-phtot_results <- run_meta_analysis(
-  data = phtot_data_hedges,
-  mods_formula = mods_formula
-)
+# svg(file = 'output/t_in_overall_bubble_with_id_nested_algae_more.svg', width = 8, height = 8)
 
-phtot_model <- phtot_results$model
-phtot_hedges <- phtot_results$data # cleaned data
-```
+# regplot.rma(t_in_model, mod = "delta_t", refline = 0,
+#   # xlim = c(-1,0.25),
+#   ylim = c(-10, 5),
+#   # predlim = c(-1,0.25),
+#             ylab = "Hedges' g", xlab = expression(paste("\U0394", "Temperature", " [", degree, "C]")),
+#                         main = bquote(.(as.character(mods_formula)))
+# )
+# dev.off()
+# ```
 
 
-```{r, fig.width = 6, fig.height = 8}
+# ```{r}
+# phtot_data_hedges <- read.csv(file="data/tmp/results_phtot.csv")
+# n_samples <- nrow(phtot_data_hedges)
+# # remove rows with nan values in necessary columns
+# necessary_cols <- c("hedges_g", "hedges_g_var", "delta_ph", "phtot", "genus")
+# # data cleaning
+# phtot_data_hedges <- phtot_data_hedges %>% drop_na(necessary_cols)
+# print(n_samples - nrow(phtot_data_hedges)) # print how many rows were dropped
 
-# Overall plot of all studies assessing calcification in wrt ph
+# phtot_data_hedges <- phtot_data_hedges %>% filter(str_detect(taxa, "Coral"))
 
-svg(file = 'output/phtot_overall_bubble_with_id_nested_coral_more.svg', width = 8, height = 8)
+# mods_formula = ~ delta_ph + phtot + t_in + factor(genus) - 1 # -ve 1 removes the model intercept
+# # run model for univariate analysis of temperature
+# phtot_results <- run_meta_analysis(
+#   data = phtot_data_hedges,
+#   mods_formula = mods_formula
+# )
 
-regplot.rma(phtot_model, mod = "delta_pH", refline = 0, 
-  # xlim = c(-1,0.25),
-   ylim = c(-5,5), 
-   predlim = c(-1,0.25),
-            ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]),
-            main = bquote(.(as.character(mods_formula)))
-      )
-      dev.off() 
-```
+# phtot_model <- phtot_results$model
+# phtot_hedges <- phtot_results$data # cleaned data
+# ```
+
+
+# ```{r, fig.width = 6, fig.height = 8}
+
+# # Overall plot of all studies assessing calcification in wrt ph
+
+# svg(file = 'output/phtot_overall_bubble_with_id_nested_coral_more.svg', width = 8, height = 8)
+
+# regplot.rma(phtot_model, mod = "delta_ph", refline = 0, 
+#   # xlim = c(-1,0.25),
+#    ylim = c(-5,5), 
+#    predlim = c(-1,0.25),
+#             ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]),
+#             main = bquote(.(as.character(mods_formula)))
+#       )
+#       dev.off() 
+# ```

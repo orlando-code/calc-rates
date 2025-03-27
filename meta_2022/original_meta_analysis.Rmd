@@ -67,18 +67,30 @@ adult.data.hedges <- read.csv(file = "meta_2022/adult_raw_data(in).csv") %>%
   filter(!is.na(dpHt)) %>%  # remove rows with missing dpHt values
   mutate(id = row.names(.)) %>% # create an id field
   mutate(correction = (1 - (3/(4*(n*2)-9)))) %>%  # calculate small-sample bias correction factor
-  mutate(corrected_hedges = Hedges.G * correction) %>%  # apply correction
+  mutate(corrected_hedges = Hedges.G * correction) %>%  # apply bias correction
   mutate(corrected_variance = Variance * (correction^2))
+
+
+
+# multiple corrected_hedges by SQRT(n)
+
+adult.data.hedges <- adult.data.hedges %>%
+  mutate(n_corrected_hedges = corrected_hedges * 1/sqrt(n))
 
 ```
 
-## Check for outliers
+```{r}
+# print the first 5 values of corrected_hedges and n_corrected_hedges columns
+head(adult.data.hedges$corrected_hedges, 5)
+head(adult.data.hedges$n_corrected_hedges, 5)
 
+```
 ```{r outlier check}
+## Check for outliers
 
 # Random-effects multi-level model is applied for assessing calcification in adults.
 
-model.full.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+model.full.adult.hedges.id.nested <- rma.mv(yi = n_corrected_hedges, 
               V = corrected_variance, 
               data = adult.data.hedges, 
               method = "REML",
@@ -106,7 +118,13 @@ adult.data.hedges <- adult.data.hedges[-c(adult.outliers$Study),]
 rm(adult.outliers)
 
 ```
+```{r}
+model.full.adult.hedges.cooks %>% 
+  as_tibble() %>% 
+  mutate(Study = seq(1:nrow(adult.data.hedges))) %>%
+  filter(value > 0.31)  # hardcoded threshold
 
+```
 ## Multi-level meta-analysis
 ```{r}
 run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 8)) {
@@ -116,11 +134,12 @@ run_meta_analysis <- function(data, mods_formula, threshold_val = NULL, parallel
 
 # Random-effects multi-level model for assessing calcification in adults is re-run after removing outliers.
 
-model.full.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges, 
+model.full.adult.hedges.id.nested <- rma.mv(yi = n_corrected_hedges, 
               V = corrected_variance, 
               data = adult.data.hedges, 
               method = "REML", 
-              mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              # mods = ~ dpHt + Temperature + Irradiance..umol.photons.m.2.s.1. + Duration..days. + factor(Family) - 1,
+              mods = ~ dpHt + Temperature + factor(Family) - 1,
               test="z",
               random = list(~ 1| (id/Study)))
 
@@ -132,7 +151,7 @@ model.full.adult.hedges.id.nested <- rma.mv(yi = corrected_hedges,
 
 #Overall plot of all studies assessing calcification in adults
 
-svg(file = 'output/ben_adult_overall_bubble_with_id_nested.svg', width = 8, height = 8) 
+svg(file = 'output/ben_adult_overall_bubble_with_id_n_corrected_no_extras.svg', width = 8, height = 8) 
 regplot.rma(model.full.adult.hedges.id.nested, mod = "dpHt", refline = 0, xlim = c(-1,0.25), ylim = c(-15,15), predlim = c(-1,0.25),
             ylab = "Hedges' g", xlab = expression(paste("\U0394", "pH")[T]))
 dev.off() 
