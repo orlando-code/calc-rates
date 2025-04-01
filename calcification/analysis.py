@@ -8,56 +8,11 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 # custom
-from calcification import utils
+from calcification import utils, config
 import cbsyst.helpers as cbh
 
 ### core analysis calculations
-def calc_cohens_d(mu1: float, mu2: float, sd_pooled: float) -> float:
-    """Calculate Hedges G metric: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
-    
-    Args:
-        mu1 (float): mean of group 1
-        mu2 (float): mean of group 2
-    2 (float): mean of group 2
-        sd_pooled (float): pooled standard deviation of both groups
-        
-    Returns:
-        float: Hedges G metric
-    """
-    return (mu1 - mu2) / sd_pooled
-
-
-# def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
-#     """Calculate pooled standard deviation: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
-    
-#     Args:
-#         n1 (int): number of samples in group 1
-#         n2 (int): number of samples in group 2
-#         sd1 (float): standard deviation of group 1
-#         sd2 (float): standard deviation of group 2
-        
-#     Returns:
-#         float: pooled standard deviation
-#     """
-#     return np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))
-
-
-def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
-    """Calculate pooled standard deviation: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
-    NB the simpler version (as used by Ben). Doesn't weight by sample size (although this slightly captured by sd) 
-    Args:
-        n1 (int): number of samples in group 1
-        n2 (int): number of samples in group 2
-        sd1 (float): standard deviation of group 1
-        sd2 (float): standard deviation of group 2
-        
-    Returns:
-        float: pooled standard deviation
-    """
-    return np.sqrt((sd1 ** 2 + sd2 ** 2) / 2)
-
-
-def calculate_raw_effect_size(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None, epsilon=1e-6):
+def calc_relative_rate(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None, epsilon=1e-6):
     """
     Calculate percent change between two means with error propagation.
     
@@ -137,29 +92,47 @@ def calculate_raw_effect_size(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None, ep
     var_pc = (dpc_dmu1**2 * se1**2) + (dpc_dmu2**2 * se2**2)
     
     return pc, var_pc
-    
-    
 
-def calc_cohens_d_var(n1: int, n2: int, d: float) -> float:
-    """Calculate variance of Cohen's d metric: https://www.campbellcollaboration.org/calculator/equations
+
+def calc_absolute_rate(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None):
+    """Calculate the simple difference between two means with error propagation.
     
     Args:
+        mu1 (float): mean of group 1 (control)
+        mu2 (float): mean of group 2 (treatment)
+        sd1 (float): standard deviation of group 1
+        sd2 (float): standard deviation of group 2
         n1 (int): number of samples in group 1
         n2 (int): number of samples in group 2
-        d (float): Hedges G metric
-        
+    
     Returns:
-        float: variance of Hedges G metric
+        tuple: absolute difference between means, standard error of the difference
     """
-    return (n1 + n2) / (n1 * n2) + d ** 2 / (2 * (n1 + n2))
-
+    abs_diff = mu2 - mu1
+    
+    # if standard deviations are provided, calculate the uncertainty
+    if sd1 is not None and sd2 is not None and n1 is not None and n2 is not None:
+        se1 = sd1 / np.sqrt(n1)
+        se2 = sd2 / np.sqrt(n2)
+        
+        # Error propagation - calculate partial derivatives
+        d_abs_diff_dmu1 = -1
+        d_abs_diff_dmu2 = 1
+        
+        # Calculate standard error using error propagation
+        var_abs_diff = (d_abs_diff_dmu1**2 * se1**2) + (d_abs_diff_dmu2**2 * se2**2)
+        
+        return abs_diff, var_abs_diff
+    
+    return abs_diff, None
+    
 
 def calc_bias_correction(n1: int, n2: int) -> float:
     """Calculate bias correction for Cohen's d metric: https://www.campbellcollaboration.org/calculator/equations
     
     Args:
-        n1 (int): number of samples in group 1
-        n2 (int): number of samples in group 2
+        n1 (int): number of samples in group 1 (control)
+        n2 (int): number of samples in group 2 (treatment)
         
     Returns:
         float: bias correction factor
@@ -167,12 +140,32 @@ def calc_bias_correction(n1: int, n2: int) -> float:
     return 1 - 3 / (4 * (n1 + n2 - 2) - 1)
 
 
+def calc_cohens_d(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: int) -> tuple[float, float]:
+    """Calculate Cohen's d metric: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
+    
+    Args:
+        mu1 (float): mean of group 1 (control)
+        mu2 (float): mean of group 2 (treatment)
+        sd1 (float): standard deviation of group 1
+        sd2 (float): standard deviation of group 2
+        n1 (int): number of samples in group 1
+        n2 (int): number of samples in group 2
+                
+    Returns:
+        tuple[float, float]: Cohen's d and its variance
+    """
+    sd_pooled = np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))    # N.B. BH (2021) uses simple average
+    d = (mu2 - mu1) / sd_pooled
+    d_var = (n1 + n2) / (n1 * n2) + d ** 2 / (2 * (n1 + n2))
+    return d, d_var
+
+
 def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: int) -> float:
     """Calculate Hedges G metric: https://www.campbellcollaboration.org/calculator/equations
     
     Args:
-        mu1 (float): mean of group 1
-        mu2 (float): mean of group 2
+        mu1 (float): mean of group 1 (control)
+        mu2 (float): mean of group 2 (treatment)
         sd1 (float): standard deviation of group 1
         sd2 (float): standard deviation of group 2
         n1 (int): number of samples in group 1
@@ -181,20 +174,17 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     Returns:
         float: Hedges G metric
     """
-    sd_pooled = calc_sd_pooled(n1, n2, sd1, sd2)
-    d = calc_cohens_d(mu1, mu2, sd_pooled)
-    var = calc_cohens_d_var(n1, n2, d)
+    d, d_var = calc_cohens_d(mu1, mu2, sd_pooled)
     bias_correction = calc_bias_correction(n1, n2)
-    hedges_g_var = var * bias_correction ** 2
     
-    hedges_g = d * bias_correction
-    # calculate 95% confidence intervals
-    se_g = np.sqrt(var*bias_correction**2)  # standard error
-    hedges_g_lower = hedges_g - 1.959964 * se_g
-    hedges_g_upper = hedges_g + 1.959964 * se_g
+    hg = d * bias_correction
+    hg_var = d_var * bias_correction ** 2
+    # # calculate 95% confidence intervals
+    # se_g = np.sqrt(var*bias_correction**2)  # standard error
+    # hg_lower = hg - 1.959964 * se_g
+    # hg_upper = hg + 1.959964 * se_g
+    return hg, hg_var
     
-    return hedges_g, hedges_g_var, (hedges_g_lower, hedges_g_upper), sd_pooled, d, bias_correction
-
 
 ### determining treatment conditions
 def determine_control_conditions(df) -> dict:
@@ -405,123 +395,51 @@ def cluster_values(values, tolerance: float) -> list:
     return clusters
 
 
-def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Series, effect_type: str = 'hedges_g') -> pd.Series:
+### calculating treatment effects
+def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculate the effect size (Hedges' g or relative calcification) and append additional columns for a treatment row.
+    Calculate Hedges' g for a DataFrame of experimental results.
     
     Args:
-        treatment_row: Row containing treatment data
-        control_data: Dictionary containing control group data
-    
+        df: DataFrame containing experimental data
+        
     Returns:
-        pandas.Series: Modified row with Hedges' g calculations
+        pandas.DataFrame: DataFrame with added Hedges' g calculations
     """
-    # if treatment_row.doi == "10.1016/j.envpol.2020.115344":
-    #     print("here"
-    mu_t, sd_t, n_t = treatment_row['calcification'], treatment_row['calcification_sd'], treatment_row['n']
-    mu_c, sd_c, n_c = control_data['calcification'], control_data['calcification_sd'], control_data['n']
-    t_in_c, ph_c = control_data['temp'], control_data['phtot']
+    # copy to avoid modifying original
+    result_df = df.copy()
     
-    if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
-        print(f"Missing data for {effect_type} calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]")
-        print(treatment_row.doi)
-
-    row_copy = treatment_row.copy() # create a copy to avoid SettingWithCopyWarning
+    effect_cols = ['delta_t', 'delta_ph', 'effect_size', 'effect_var']
+    for col in effect_cols:
+        result_df[col] = np.nan
     
-    if effect_type == 'hedges_g':
-        effect_size, effect_var, (_, _), sd_pooled, d, bias_correction = calc_hedges_g(mu_t, mu_c, sd_t, sd_c, n_t, n_c)   # TODO: reverse these
-        # leaving these in for debugging
-        row_copy['pooled_sd'] = sd_pooled
-        row_copy['d'] = d
-        row_copy['bias_correction'] = bias_correction
-    elif effect_type == 'relative_calcification':
-        effect_size, effect_var = calculate_raw_effect_size(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
+    # group by relevant factors and apply processing
+    grouped_data = []
+    doi_bar = tqdm(result_df.doi.unique())
+    for doi in doi_bar:
+        doi_bar.set_description(f"Processing {doi}")
+        study_df = result_df[result_df['doi'] == doi]
+        for irr_group, irr_df in study_df.groupby('irr_group'):
+            for species, species_df in irr_df.groupby('species_types'):
+                df = process_group_multivar(species_df)
+                if df is not None:
+                    grouped_data.append(df)
+                
+    # TODO: fix this: still raising the futurewarning error
+    valid_dfs = [df for df in grouped_data if df is not None and not df.empty and not df.isna().all().all()]
+    if valid_dfs:
+        return pd.concat(valid_dfs)
     else:
-        raise ValueError(f"Effect type {effect_type} not recognized. Please choose 'hedges_g' or 'relative_calcification'")
-    
-    row_copy['effect_size'] = effect_size
-    row_copy['effect_var'] = effect_var
-    # general metadata
-    row_copy['delta_t'] = row_copy['temp'] - t_in_c
-    row_copy['delta_ph'] = row_copy['phtot'] - ph_c
-    row_copy['treatment_val'] = row_copy['temp'] if row_copy['treatment'] == 'temp' else row_copy['phtot']
-    row_copy['control_calcification'] = mu_c
-    row_copy['control_calcification_sd'] = sd_c
-    row_copy['treatment_calcification'] = mu_t
-    row_copy['treatment_calcification_sd'] = sd_t
-    
-    return row_copy
+        # Return empty DataFrame with same columns and dtypes as expected output
+        return pd.DataFrame(columns=df.columns if len(grouped_data) > 0 and grouped_data[0] is not None else None)
 
 
-def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
-    """
-    Aggregate a DataFrame by treatment group. Useful for when samples are individual datapoints, or multiple slightly-different controls are present.
-    
-    Args:
-        df: DataFrame containing data for a specific treatment group
-        
-    Returns:
-        pandas.Series: Series containing aggregated data
-    """
-    aggregation = df.agg({
-        'calcification': ['mean', 'std'],
-        'n': 'count'
-    })
-    control_row = df.iloc[0]
-    control_row = control_row.copy()
-    control_row['calcification'] = aggregation['calcification']['mean']
-    control_row['calcification_sd'] = aggregation['calcification']['std']
-    control_row['n'] = aggregation['n']['count']
-    return control_row
-    
-
-# def process_group(species_df: pd.DataFrame, effect_type: str = 'hedges_g') -> pd.DataFrame:
-#     """
-#     Process a group of species data to calculate Hedges' g.
-    
-#     Args:
-#         species_df: DataFrame containing data for a specific species
-        
-#     Returns:
-#         pandas.DataFrame: DataFrame with Hedges' g calculations
-#     """
-#     # TODO: implement simple method (single control): see deprecated code
-#     result_dfs = []
-#     result_dfs.extend(process_group_multivar(species_df, effect_type=effect_type))
-        
-#     # suppress futurewarning
-#     import warnings
-#     warnings.simplefilter(action='ignore', category=FutureWarning)
-    
-#     if result_dfs:  # TODO: fix future warning without dropping all-nan columns
-#         # Identify all column names across all DataFrames
-#         all_columns = set().union(*(df.columns for df in result_dfs))
-        
-#         # Ensure all DataFrames contain the same columns with consistent dtypes
-#         for i, df in enumerate(result_dfs):
-#             missing_cols = all_columns - set(df.columns)
-#             for col in missing_cols:
-#                 df[col] = pd.NA  # Retain columns but explicitly mark as NA
-#             result_dfs[i] = df.astype({col: "object" for col in missing_cols})  # Set dtype to avoid dtype inference issues
-    
-#     # Concatenate DataFrames without dropping NaN-only columns
-#         result_df = pd.concat(result_dfs, axis=0, ignore_index=True)
-#         # # drop all-NA columns from each DataFrame before concatenation (avoids future warning)
-#         # filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
-#         # # ensure at least one DataFrame is non-empty before concatenation
-#         # filtered_dfs = [df for df in filtered_dfs if not df.empty]
-#         return result_df
-#         # return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
-#     else:
-#         return None
-
-def process_group_multivar(df, effect_type='hedges_g'):
+def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
     """
     Process a group of species data to calculate effect size.
     
     Args:
         df: DataFrame containing data for a specific species
-        effect_type: Type of effect size to calculate
     
     Returns:
         pandas.DataFrame: DataFrame with effect size calculations
@@ -553,7 +471,7 @@ def process_group_multivar(df, effect_type='hedges_g'):
             treatment_df.loc[:, 'treatment'] = 'phtot'
             
         # calculate effect size varying temperature
-        effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_data, effect_type=effect_type), axis=1)
+        effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_data), axis=1)
         return effect_size
     
     results_df.append(grouped_by_ph.apply(process_group, control_level_col='treatment_level_t', include_groups=False))
@@ -562,43 +480,120 @@ def process_group_multivar(df, effect_type='hedges_g'):
     return pd.concat(results_df).reset_index(drop=True)
 
 
-def calculate_effect_for_df(df: pd.DataFrame, effect_type: str = 'hedges_g') -> pd.DataFrame:
+def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     """
-    Calculate Hedges' g for a DataFrame of experimental results.
+    Aggregate a DataFrame by treatment group. Useful for when samples are individual datapoints, or multiple slightly-different controls are present.
     
     Args:
-        df: DataFrame containing experimental data
+        df: DataFrame containing data for a specific treatment group
         
     Returns:
-        pandas.DataFrame: DataFrame with added Hedges' g calculations
+        pandas.Series: Series containing aggregated data
     """
-    # copy to avoid modifying original
-    result_df = df.copy()
+    aggregation = df.agg({
+        'calcification': ['mean', 'std'],
+        'n': 'count'
+    })
+    control_row = df.iloc[0]
+    control_row = control_row.copy()
+    control_row['calcification'] = aggregation['calcification']['mean']
+    control_row['calcification_sd'] = aggregation['calcification']['std']
+    control_row['n'] = aggregation['n']['count']
+    return control_row
+
+
+def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Series) -> pd.Series:
+    """
+    Calculate the effect size (Hedges' g or relative calcification) and append additional columns for a treatment row.
     
-    effect_cols = ['delta_t', 'delta_ph', 'effect_size', 'effect_var']
-    for col in effect_cols:
-        result_df[col] = np.nan
+    Args:
+        treatment_row: Row containing treatment data
+        control_data: Dictionary containing control group data
     
-    # group by relevant factors and apply processing
-    grouped_data = []
-    doi_bar = tqdm(result_df.doi.unique())
-    for doi in doi_bar:
-        doi_bar.set_description(f"Processing {doi}")
-        study_df = result_df[result_df['doi'] == doi]
-        for irr_group, irr_df in study_df.groupby('irr_group'):
-            for species, species_df in irr_df.groupby('species_types'):
-                # df = process_group(species_df, effect_type=effect_type)
-                df = process_group_multivar(species_df, effect_type=effect_type)
-                if df is not None:
-                    grouped_data.append(df)
-                
-    # TODO: fix this: still raising the futurewarning error
-    valid_dfs = [df for df in grouped_data if df is not None and not df.empty and not df.isna().all().all()]
-    if valid_dfs:
-        return pd.concat(valid_dfs)
-    else:
-        # Return empty DataFrame with same columns and dtypes as expected output
-        return pd.DataFrame(columns=df.columns if len(grouped_data) > 0 and grouped_data[0] is not None else None)
+    Returns:
+        pandas.Series: Row with calculated effect sizes and additional metadata
+    """
+    mu_t, sd_t, n_t = treatment_row['calcification'], treatment_row['calcification_sd'], treatment_row['n']
+    mu_c, sd_c, n_c = control_data['calcification'], control_data['calcification_sd'], control_data['n']
+    t_in_c, ph_c = control_data['temp'], control_data['phtot']
+    
+    if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
+        print(f"Missing data for effect size calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]")
+        print(treatment_row.doi)
+
+    row_copy = treatment_row.copy() # create a copy to avoid SettingWithCopyWarning
+    
+    d_effect, d_var = calc_cohens_d(mu_c, mu_t, sd_c, sd_t, n_c, n_t)   # Cohen's d
+    hg_effect, hg_var = calc_hedges_g(mu_c, mu_t, sd_c, sd_t, n_c, n_t) # Hedges' g
+    
+    # handle relative calcification (use raw value if already stated relative to baseline)
+    rc_effect, rc_var = (mu_t, sd_t) if isinstance(treatment_row['calcification_units'], str) and 'delta' in treatment_row['calcification_units'] else calc_relative_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
+    
+    abs_effect, abs_var = calc_absolute_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)  # absolute differences
+    
+    # assign effect sizes
+    row_copy.update({
+        'cohens_d': d_effect, 'cohens_d_var': d_var,
+        'hedges_g': hg_effect, 'hedges_g_var': hg_var,
+        'relative_calcification': rc_effect, 'relative_calcification_var': rc_var,
+        'absolute_calcification': abs_effect, 'absolute_calcification_var': abs_var
+    })
+    
+    # calculate metadata
+    row_copy['delta_t'] = row_copy['temp'] - t_in_c
+    row_copy['delta_ph'] = row_copy['phtot'] - ph_c
+    row_copy['treatment_val'] = row_copy['temp'] if row_copy['treatment'] == 'temp' else row_copy['phtot']
+    row_copy['control_calcification'] = mu_c
+    row_copy['control_calcification_sd'] = sd_c
+    row_copy['treatment_calcification'] = mu_t
+    row_copy['treatment_calcification_sd'] = sd_t
+    
+    return row_copy
+
+
+def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climatology_data_fp: str, selection_dict: dict={'include': 'yes'}):
+    """
+    Calculate effect sizes from raw data and align with climatology data.
+    
+    Args:
+        raw_data_fp (str or Path): Path to raw data file
+        data_sheet_name (str): Name of the sheet containing data
+        climatology_data_fp (str or Path): Path to climatology data file
+        selection_dict (dict): Dictionary of selection criteria
+        
+    Returns:
+        pd.DataFrame: DataFrame with calculated effect sizes
+    """
+    # load and process carbonate chemistry data
+    carbonate_df = utils.populate_carbonate_chemistry(raw_data_fp, data_sheet_name, selection_dict=selection_dict)
+    
+    # prepare for alignment with climatology by uniquifying DOIs
+    carbonate_df = utils.uniquify_dois(carbonate_df)
+    print(f"\nShape of dataframe with all rows marked for inclusion: {carbonate_df.shape}")
+    
+    # save selected columns of carbonate dataframe to file for reference
+    carbonate_save_fields = utils.read_yaml(config.resources_dir / 'mapping.yaml')["carbonate_save_columns"]
+    carbonate_df[carbonate_save_fields].to_csv(config.tmp_data_dir / 'carbonate_chemistry.csv', index=False)
+
+    # assign treatment groups
+    carbonate_df_tgs = assign_treatment_groups_multilevel(carbonate_df)
+
+    # calculate effect size
+    print(f"\nCalculating effect sizes...")
+    effects_df = calculate_effect_for_df(carbonate_df_tgs).reset_index(drop=True)
+
+    
+    # load climatology data and merge with effects
+    climatology_df = pd.read_csv(climatology_data_fp).set_index('doi')
+    # effects_df = effects_df.merge(climatology_df, on='doi', how='left')
+    
+    # save results
+    save_cols = utils.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
+    effects_df['year'] = pd.to_datetime(effects_df['year']).dt.strftime('%Y')  # cast year from pd.timestamp to integer
+    effects_df[save_cols].to_csv(config.tmp_data_dir / f"effect_sizes.csv", index=False)
+    
+    return effects_df
+
 
 
 ### cbsyst sensitivity investigation
@@ -937,3 +932,89 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
     #     return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
     # else:
     #     return None
+    
+    
+    # def process_group(species_df: pd.DataFrame, effect_type: str = 'hedges_g') -> pd.DataFrame:
+#     """
+#     Process a group of species data to calculate Hedges' g.
+    
+#     Args:
+#         species_df: DataFrame containing data for a specific species
+        
+#     Returns:
+#         pandas.DataFrame: DataFrame with Hedges' g calculations
+#     """
+#     # TODO: implement simple method (single control): see deprecated code
+#     result_dfs = []
+#     result_dfs.extend(process_group_multivar(species_df, effect_type=effect_type))
+        
+#     # suppress futurewarning
+#     import warnings
+#     warnings.simplefilter(action='ignore', category=FutureWarning)
+    
+#     if result_dfs:  # TODO: fix future warning without dropping all-nan columns
+#         # Identify all column names across all DataFrames
+#         all_columns = set().union(*(df.columns for df in result_dfs))
+        
+#         # Ensure all DataFrames contain the same columns with consistent dtypes
+#         for i, df in enumerate(result_dfs):
+#             missing_cols = all_columns - set(df.columns)
+#             for col in missing_cols:
+#                 df[col] = pd.NA  # Retain columns but explicitly mark as NA
+#             result_dfs[i] = df.astype({col: "object" for col in missing_cols})  # Set dtype to avoid dtype inference issues
+    
+#     # Concatenate DataFrames without dropping NaN-only columns
+#         result_df = pd.concat(result_dfs, axis=0, ignore_index=True)
+#         # # drop all-NA columns from each DataFrame before concatenation (avoids future warning)
+#         # filtered_dfs = [df.dropna(how="all", axis=1) for df in result_dfs]
+#         # # ensure at least one DataFrame is non-empty before concatenation
+#         # filtered_dfs = [df for df in filtered_dfs if not df.empty]
+#         return result_df
+#         # return pd.concat(filtered_dfs, axis=0) if filtered_dfs else None
+#     else:
+#         return None
+
+
+# def calc_cohens_d(mu1: float, mu2: float, sd_pooled: float) -> float:
+#     """Calculate Hedges G metric: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
+    
+#     Args:
+#         mu1 (float): mean of group 1
+#         mu2 (float): mean of group 2
+#     2 (float): mean of group 2
+#         sd_pooled (float): pooled standard deviation of both groups
+        
+#     Returns:
+#         float: Hedges G metric
+#     """
+#     return (mu1 - mu2) / sd_pooled
+
+
+# def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
+#     """Calculate pooled standard deviation: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
+    
+#     Args:
+#         n1 (int): number of samples in group 1
+#         n2 (int): number of samples in group 2
+#         sd1 (float): standard deviation of group 1
+#         sd2 (float): standard deviation of group 2
+        
+#     Returns:
+#         float: pooled standard deviation
+#     """
+#     return np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))
+
+
+# def calc_sd_pooled(n1: int, n2: int, sd1: float, sd2: float) -> float:
+#     """Calculate pooled standard deviation: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
+#     NB the simpler version (as used by Ben). Doesn't weight by sample size (although this slightly captured by sd) 
+#     Args:
+#         n1 (int): number of samples in group 1
+#         n2 (int): number of samples in group 2
+#         sd1 (float): standard deviation of group 1
+#         sd2 (float): standard deviation of group 2
+        
+#     Returns:
+#         float: pooled standard deviation
+#     """
+#     return np.sqrt((sd1 ** 2 + sd2 ** 2) / 2)
