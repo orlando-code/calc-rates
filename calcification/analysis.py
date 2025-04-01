@@ -174,7 +174,7 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     Returns:
         float: Hedges G metric
     """
-    d, d_var = calc_cohens_d(mu1, mu2, sd_pooled)
+    d, d_var = calc_cohens_d(mu1, mu2, sd1, sd2, n1, n2)
     bias_correction = calc_bias_correction(n1, n2)
     
     hg = d * bias_correction
@@ -404,12 +404,15 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
         df: DataFrame containing experimental data
         
     Returns:
-        pandas.DataFrame: DataFrame with added Hedges' g calculations
+        pandas.DataFrame: DataFrame with calculated effect sizes
     """
     # copy to avoid modifying original
     result_df = df.copy()
     
-    effect_cols = ['delta_t', 'delta_ph', 'effect_size', 'effect_var']
+    effect_cols = ['delta_t', 'delta_ph', 
+                   'cohens_d', 'cohens_d_var', 'hedges_g', 'hedges_g_var',
+                   'relative_calcification', 'relative_calcification_var',
+                   'absolute_calcification', 'absolute_calcification_var',]
     for col in effect_cols:
         result_df[col] = np.nan
     
@@ -470,7 +473,7 @@ def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
         elif control_level_col == "treatment_level_ph":
             treatment_df.loc[:, 'treatment'] = 'phtot'
             
-        # calculate effect size varying temperature
+        # calculate effect size varying treatment condition
         effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_data), axis=1)
         return effect_size
     
@@ -527,7 +530,7 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     hg_effect, hg_var = calc_hedges_g(mu_c, mu_t, sd_c, sd_t, n_c, n_t) # Hedges' g
     
     # handle relative calcification (use raw value if already stated relative to baseline)
-    rc_effect, rc_var = (mu_t, sd_t) if isinstance(treatment_row['calcification_units'], str) and 'delta' in treatment_row['calcification_units'] else calc_relative_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
+    rc_effect, rc_var = (mu_t, sd_t) if isinstance(treatment_row['calcification_unit'], str) and 'delta' in treatment_row['calcification_unit'] else calc_relative_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
     
     abs_effect, abs_var = calc_absolute_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)  # absolute differences
     
@@ -582,7 +585,6 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     print(f"\nCalculating effect sizes...")
     effects_df = calculate_effect_for_df(carbonate_df_tgs).reset_index(drop=True)
 
-    
     # load climatology data and merge with effects
     climatology_df = pd.read_csv(climatology_data_fp).set_index('doi')
     # effects_df = effects_df.merge(climatology_df, on='doi', how='left')
@@ -593,7 +595,6 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     effects_df[save_cols].to_csv(config.tmp_data_dir / f"effect_sizes.csv", index=False)
     
     return effects_df
-
 
 
 ### cbsyst sensitivity investigation
