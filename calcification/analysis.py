@@ -573,7 +573,7 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     carbonate_df = utils.populate_carbonate_chemistry(raw_data_fp, data_sheet_name, selection_dict=selection_dict)
     
     # prepare for alignment with climatology by uniquifying DOIs
-    carbonate_df = utils.uniquify_dois(carbonate_df)
+    carbonate_df = utils.uniquify_multilocation_study_dois(carbonate_df)
     print(f"\nShape of dataframe with all rows marked for inclusion: {carbonate_df.shape}")
     
     # save selected columns of carbonate dataframe to file for reference
