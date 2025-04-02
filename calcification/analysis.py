@@ -550,6 +550,8 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     row_copy['control_calcification_sd'] = sd_c
     row_copy['treatment_calcification'] = mu_t
     row_copy['treatment_calcification_sd'] = sd_t
+    row_copy['treatment_n'] = n_t
+    row_copy['control_n'] = n_c
     
     return row_copy
 
