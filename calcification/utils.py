@@ -13,7 +13,7 @@ import itertools
 import string
 
 # custom
-from calcification import utils, config
+from calcification import utils, config, locations
 import cbsyst as cb
 from tqdm.auto import tqdm
 import cbsyst.helpers as cbh
@@ -36,8 +36,26 @@ def read_yaml(yaml_fp) -> dict:
 
 
 def write_yaml(data: dict, fp="unnamed.yaml") -> None:
+    # Convert numpy values to Python native types before serialization
+    def _convert_numpy(obj):
+        if isinstance(obj, dict):
+            return {k: _convert_numpy(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [_convert_numpy(i) for i in obj]
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.number):
+            return obj.item()
+        elif isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        else:
+            return obj
+            
+    converted_data = _convert_numpy(data)
     with open(fp, "w") as file:
-        yaml.dump(data, file)
+        yaml.dump(converted_data, file)
 
 
 def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
@@ -56,20 +74,26 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
     df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
     
-    if selection_dict:  # filter for selected values
-        for key, value in selection_dict.items():
-            df = df[df[key] == value]
-    
     # flag up duplicate dois (only if they have also have 'include' as 'yes')
     inclusion_df = df[df['include'] == 'yes']
     duplicate_dois = inclusion_df[inclusion_df.duplicated(subset='doi', keep=False)]
     if not duplicate_dois.empty and not all(pd.isna(duplicate_dois['doi'])):
         print("\nDuplicate DOIs found, treat with caution:")
-        print([doi for doi in duplicate_dois.doi.unique() if doi is not np.nan])  
-    
+        print([doi for doi in duplicate_dois.doi.unique() if doi is not np.nan])
+        
     # fill down necessary repeated metadata values
     df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']] = df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']].infer_objects(copy=False).ffill()
     df[['coords', 'cleaned_coords']] = df.groupby('doi')[['coords', 'cleaned_coords']].ffill()  # fill only as far as the next DOI
+    
+    if selection_dict:  # filter for selected values
+        for key, value in selection_dict.items():
+            df = df[df[key] == value]    
+    
+    df = uniquify_multilocation_study_dois(df)  # uniquify dois to reflect locations (for studies with multiple locations)
+    # assign locations
+    df = locations.assign_coordinates(df)  # assign coordinates to locations
+    # save locations information
+    locations.save_locations_information(df)
     
     # create family, genus, species, and functional group columns
     df = assign_taxonomical_info(df)
@@ -100,7 +124,7 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
         axis=1)
     
     return df
-
+        
 
 def map_units(df: pd.DataFrame) -> pd.DataFrame:
     map_dict = utils.read_yaml(config.resources_dir / "mapping.yaml")["unit_map"]
@@ -128,27 +152,26 @@ def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def uniquify_dois(df):
-    """
-    Uniquify dois to reflect locations (for studies with multiple locations)
-    
-    Args:
-        df (pd.DataFrame): dataframe containing doi and location columns
-    
-    Returns:
-        pd.DataFrame: dataframe with uniquified dois, and copies of original
-    """
-    df['original_doi'] = df['doi']
-    unique_pairs = df.drop_duplicates(subset=['doi', 'location'])[['doi', 'location']]
-    unique_pairs.doi = utils.uniquify_repeated_values(df.drop_duplicates(subset=['doi', 'location']).doi)
+def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
 
-    # create a dictionary mapping from original (doi, location) pairs to uniquified dois
-    doi_location_map = dict(zip(zip(df.drop_duplicates(subset=['doi', 'location'])['doi'], 
-                                df.drop_duplicates(subset=['doi', 'location'])['location']), 
-                            unique_pairs['doi']))
-    df['doi'] = [doi_location_map.get((doi, loc), doi) for doi, loc in zip(df['doi'], df['location'])]
-    
-    return df
+    temp_df = df.copy()
+    temp_df['original_doi'] = temp_df['doi']
+    temp_df['location_lower'] = temp_df['location'].str.lower()
+
+    # locs_df = temp_df.drop_duplicates(['doi', 'location_lower', 'cleaned_coords']).set_index('doi')
+    locs_df = temp_df.drop_duplicates(['doi', 'location_lower', 'coords', 'cleaned_coords'])
+
+    locs_df.loc[:,'doi'] = utils.uniquify_repeated_values(locs_df.doi)
+
+    temp_df = temp_df.merge(locs_df['doi'], how='left', left_index=True, right_index=True, suffixes=("_old",""))
+    # drop original doi column
+    temp_df.drop(columns=['doi_old'], inplace=True)
+    # group by original doi to fill down the new doi
+    temp_df['doi'] = temp_df.groupby('original_doi')['doi'].ffill()
+    return temp_df
+
+
+
 
 
 def get_species_info_from_worms(species_binomial: str) -> dict:
@@ -192,6 +215,7 @@ def get_species_info_from_worms(species_binomial: str) -> dict:
 
             result = {
                 'species': species_binomial,
+                'genus': data.get('genus', 'Not Found'),
                 'family': data.get('family', 'Not Found'),
                 'status': 'Found',
                 'rank': data.get('rank', 'Not Found'),
@@ -250,7 +274,7 @@ def assign_functional_group(taxon_info):
     order = taxon_info.get('order', '').lower()
     class_name = taxon_info.get('class', '').lower()
     phylum = taxon_info.get('phylum', '').lower()
-    genus = taxon_info.get('species', '').split()[0].lower()  # Extract genus from species name
+    genus = taxon_info.get('genus', '').lower()  # Extract genus from species name
     binomial = taxon_info.get('species', '').lower()
 
     if genus in ['jania', 'amphiroa']:
@@ -312,7 +336,7 @@ def assign_core_groupings(taxon_info: dict) -> str:
         str: Core grouping name
     """
     # check for halimeda in genus
-    if taxon_info.get('genus', '').lower() in ['halimeda']:
+    if taxon_info.get('genus', '').lower() == 'halimeda':
         return 'Halimeda'    
     
     if taxon_info['functional_group'] in ['Crustose coralline algae', 'Calcareous algae'] or 'calcareous' in taxon_info['functional_group'].lower():
@@ -434,7 +458,7 @@ def get_highlighted_mask(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") 
                 mask.iat[row_idx, col_idx] = True
                 
     # Always mark 'include' and 'n' columns as True for future processing
-    for col in ['Include', 'n', 'Species types']:
+    for col in ['Include', 'n', 'Species types', 'Location']:
         if col in mask.columns:
             mask[col] = True
 
@@ -717,26 +741,30 @@ def select_by_stat(ds, variables_stats: dict):
     return ds_selected
 
 
-# Function to determine optimal number of clusters using silhouette score
-def optimal_kmeans(data, max_clusters=8):
-    best_k = 2  # Minimum sensible number of clusters
-    best_score = -1
-    scores = []
 
-    for k in range(2, min(len(data), max_clusters + 1)):  # Avoid excessive clustering
-        kmeans = KMeans(n_clusters=k, random_state=42, n_init=max_clusters)
-        labels = kmeans.fit_predict(data)
-        score = silhouette_score(data, labels)
-        scores.append((k, score))
-
-        if score > best_score:
-            best_score = score
-            best_k = k
-
-    return best_k, scores
 
 
 ### DEPRECATED
+
+# Function to determine optimal number of clusters using silhouette score
+# def optimal_kmeans(data, max_clusters=8):
+#     best_k = 2  # Minimum sensible number of clusters
+#     best_score = -1
+#     scores = []
+
+#     for k in range(2, min(len(data), max_clusters + 1)):  # Avoid excessive clustering
+#         kmeans = KMeans(n_clusters=k, random_state=42, n_init=max_clusters)
+#         labels = kmeans.fit_predict(data)
+#         score = silhouette_score(data, labels)
+#         scores.append((k, score))
+
+#         if score > best_score:
+#             best_score = score
+#             best_k = k
+
+#     return best_k, scores
+
+
 # def rate_conversion(rate_val: float, rate_unit: str) -> tuple[float, str]:
 #     """Conversion into gCaCO3 ... day-1 for absolute rates"""
 #     rate_components = rate_unit.split(' ')
@@ -817,3 +845,42 @@ def optimal_kmeans(data, max_clusters=8):
 
     
     
+    
+    # def uniquify_dois(df):
+#     """
+#     Uniquify dois to reflect locations (for studies with multiple locations)
+    
+#     Args:
+#         df (pd.DataFrame): dataframe containing doi and location columns
+    
+#     Returns:
+#         pd.DataFrame: dataframe with uniquified dois, and copies of original
+#     """
+#     df['original_doi'] = df['doi']
+#     temp_df = df.copy()
+#     temp_df['location_lower'] = temp_df['location'].str.lower()
+    
+    
+    
+#     unique_locs = temp_df.drop_duplicates(['location_lower', 'coords', 'cleaned_coords'])[['doi', 'location']]
+#     # unique_locs.dropna(subset=['latitude', 'longitude'], inplace=True) # remove empty rows
+#     dois = unique_locs.doi
+#     temp_df.index = uniquify_repeated_values(dois)
+#     doi_location_map = dict(zip(zip(temp_df.drop_duplicates(subset=['doi', 'location_lower', 'coords', 'cleaned_coords'])['doi'], 
+#                                 temp_df.drop_duplicates(subset=['doi', 'location_lower', 'coords', 'cleaned_coords'])['location']), 
+#                             dois))
+#     temp_df['doi'] = [doi_location_map.get((doi, loc), doi) for doi, loc in zip(temp_df['doi'], temp_df['location'])]
+#     # temp_df['doi'] = temp_df.index
+#     return temp_df
+
+    
+    
+    # unique_locs.doi = utils.uniquify_repeated_values(df.drop_duplicates(subset=['doi', 'location']).doi)
+
+    # # create a dictionary mapping from original (doi, location) pairs to uniquified dois
+    # doi_location_map = dict(zip(zip(df.drop_duplicates(subset=['doi', 'location'])['doi'], 
+    #                             df.drop_duplicates(subset=['doi', 'location'])['location']), 
+    #                         unique_locs['doi']))
+    # df['doi'] = [doi_location_map.get((doi, loc), doi) for doi, loc in zip(df['doi'], df['location'])]
+    
+    # return df

@@ -1,11 +1,32 @@
 import pandas as pd
 import numpy as np
 import re
+from tqdm.auto import tqdm
+import googlemaps
 
-# from calcification import utils
+from calcification import utils, config
 
 ### spatial
-def get_coordinates_from_gmaps(location_name: str, gmaps_client) -> pd.Series:
+def get_google_maps_coordinates(locations: list[str]) -> dict:
+
+    if (config.resources_dir / 'gmaps_locations.yaml').exists():
+        print(f"Using locations in {config.resources_dir / 'gmaps_locations.yaml'}.")
+        gmaps_coords = utils.read_yaml(config.resources_dir / 'gmaps_locations.yaml')
+    else:
+        print(f"Creating gmaps_locations.yaml file in {config.resources_dir}")
+        # get coordinates for these locations using Google Maps API
+        gmaps_coords = {}
+        GMAPS_API_KEY = utils.read_yaml(config.resources_dir / "api_keys.yaml")['google_maps_api']
+        gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
+
+        for loc in tqdm(locations, desc="Querying Google Maps to retrieve coordinates of locations"):
+            gmaps_coords[loc] = tuple(get_coord_pair_from_google_maps(loc, gmaps_client).values)   # slightly hacky formatting since originally written for processing dataframe column
+        # save locations to yaml file
+        utils.write_yaml(gmaps_coords, config.resources_dir / 'gmaps_locations.yaml')
+    return gmaps_coords
+    
+    
+def get_coord_pair_from_google_maps(location_name: str, gmaps_client) -> pd.Series:
     """
     Get the latitude and longitude of a location using the Google Maps API. Used row-wise on a DataFrame.
 
@@ -25,6 +46,42 @@ def get_coordinates_from_gmaps(location_name: str, gmaps_client) -> pd.Series:
         print(f"Error for {location_name}: {e}")
         return pd.Series([None, None])
 
+
+def assign_coordinates(df: pd.DataFrame) -> pd.DataFrame:
+    ### get locations for which there are no coordinates (from location, where cleaned_coords is NaN)
+    locs = df.loc[df['cleaned_coords'].isna(), 'location'].unique()
+    temp_df = df.copy()
+    
+    gmaps_coords = get_google_maps_coordinates(locs)
+    # first convert cleaned_coords to decimal degrees
+    df['loc'] = df['cleaned_coords'].apply(lambda x: standardize_coordinates(x) if pd.notna(x) else None)
+    # where no cleaned_coords value but coords value exists (is clean already), fill with decimal degrees
+    mask = df['loc'].isna() & df['coords'].notna()
+    df.loc[mask, 'loc'] = df.loc[mask, 'coords'].apply(standardize_coordinates)
+    # for locations where coordinates from cleaned_coords are available, fill them in
+    # for remaining locations, use the coordinates from Google Maps API if available
+    df['loc'] = df['loc'].fillna(df['location'].map(gmaps_coords))
+
+    # extract latitude and longitude from the coordinate tuples, with proper type checking
+    df['latitude'] = df['loc'].apply(lambda x: x[0] if isinstance(x, tuple) else None)
+    df['longitude'] = df['loc'].apply(lambda x: x[1] if isinstance(x, tuple) else None)
+    
+    return df
+
+
+def save_locations_information(df: pd.DataFrame) -> None:
+    """
+    Save locations information to YAML and CSV files.
+    """
+    if not ((config.resources_dir / "locations.yaml").exists() and (config.resources_dir / "locations.csv").exists()):
+        # send to dictionary
+        locs_df = df.set_index('doi').drop_duplicates(['location_lower', 'cleaned_coords', 'latitude', 'longitude'])[['location', 'latitude', 'longitude']]
+        # save dictionary to yaml
+        utils.write_yaml(locs_df.to_dict(orient='index'), config.resources_dir / "locations.yaml")
+        print(f'Saved locations to {config.resources_dir / "locations.yaml"}')
+        locs_df.to_csv(config.resources_dir / "locations.csv", index=True, index_label='doi')
+        print(f'Saved locations to {config.resources_dir / "locations.csv"}')
+    
 
 def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
     """Convert degrees, minutes, and seconds to decimal degrees."""
