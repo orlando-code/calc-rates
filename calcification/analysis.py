@@ -593,6 +593,7 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     save_cols = utils.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
     effects_df['year'] = pd.to_datetime(effects_df['year']).dt.strftime('%Y')  # cast year from pd.timestamp to integer
     effects_df[save_cols].to_csv(config.tmp_data_dir / f"effect_sizes.csv", index=False)
+    print(f"\nShape of dataframe with effect sizes: {effects_df.shape}")
     
     return effects_df
 
