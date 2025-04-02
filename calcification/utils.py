@@ -2,6 +2,7 @@
 import yaml
 from openpyxl import load_workbook
 import requests
+from functools import lru_cache
 
 # general
 import numpy as np
@@ -19,8 +20,8 @@ import cbsyst.helpers as cbh
 
 ### global constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
-PREFIXES = {'m': 1e-3, 'μ': 1e-6, 'n': 1e-9}
-DURATIONS = {'hr': 24, 'd': 1, 'wk': 1/7, 's': 86400}
+PREFIXES = {'c': 1e-2, 'm': 1e-3, 'μ': 1e-6, 'u': 1e-6, 'n': 1e-9} # TODO: probably shouldn't need both 'μ' and 'u'
+DURATIONS = {'s': 86400, 'hr': 24, 'd': 1, 'wk': 1/7, 'month': 365/12, 'y': 1/365}
 
 
 ### file handling
@@ -43,6 +44,7 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
     with open(fp, "a") as file:
         yaml.dump(data, file)
 
+
 ### processing files
 def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
@@ -57,11 +59,6 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     if selection_dict:  # filter for selected values
         for key, value in selection_dict.items():
             df = df[df[key] == value]
-    # TODO: perhaps this would be a good step to make all same case
-    # make all string values in the dataframe (excluding 'species_types') lowercase
-    # for col in df.select_dtypes(include=['object']).columns:
-    #     if col not in ['species_types', 'doi', 'coords', 'cleaned_coords', 'location']:
-    #         df[col] = df[col].str.lower()  
     
     # flag up duplicate dois (only if they have also have 'include' as 'yes')
     inclusion_df = df[df['include'] == 'yes']
@@ -96,7 +93,22 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
     # calculate calcification standard deviation only when 'calcification_se' and 'n' are not NaN
     df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else row['calcification_sd'], axis=1)
     
+    # calculate standarised calcification rates and relevant units
+    df = map_units(df)  # map units to st_units
+    df[['st_calcification', 'st_calcification_sd', 'st_calcification_unit']] = df.apply(
+        lambda x: pd.Series(utils.rate_conversion(x['calcification'], x['calcification_sd'], x['st_calcification_unit'])) if pd.notna(x['calcification']) and pd.notna(x['st_calcification_unit']) else pd.Series(['', '', '']), 
+        axis=1)
+    
     return df
+
+
+def map_units(df: pd.DataFrame) -> pd.DataFrame:
+    map_dict = utils.read_yaml(config.resources_dir / "mapping.yaml")["unit_map"]
+    inverted_map = {val: key for key, values in map_dict.items() for val in values}
+
+    df['st_calcification_unit'] = df['calcification_unit'].map(inverted_map)
+    return df
+    
 
 def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
     df = df.assign(
@@ -112,6 +124,30 @@ def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
     # extract nested dictionary values for each species
     df['family'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('family', 'Unknown'))
     df['functional_group'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('functional_group', 'Unknown'))
+    df['core_grouping'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('core_grouping', 'Unknown'))
+    return df
+
+
+def uniquify_dois(df):
+    """
+    Uniquify dois to reflect locations (for studies with multiple locations)
+    
+    Args:
+        df (pd.DataFrame): dataframe containing doi and location columns
+    
+    Returns:
+        pd.DataFrame: dataframe with uniquified dois, and copies of original
+    """
+    df['original_doi'] = df['doi']
+    unique_pairs = df.drop_duplicates(subset=['doi', 'location'])[['doi', 'location']]
+    unique_pairs.doi = utils.uniquify_repeated_values(df.drop_duplicates(subset=['doi', 'location']).doi)
+
+    # create a dictionary mapping from original (doi, location) pairs to uniquified dois
+    doi_location_map = dict(zip(zip(df.drop_duplicates(subset=['doi', 'location'])['doi'], 
+                                df.drop_duplicates(subset=['doi', 'location'])['location']), 
+                            unique_pairs['doi']))
+    df['doi'] = [doi_location_map.get((doi, loc), doi) for doi, loc in zip(df['doi'], df['location'])]
+    
     return df
 
 
@@ -125,14 +161,17 @@ def get_species_info_from_worms(species_binomial: str) -> dict:
         dict: Dictionary with family name and additional taxonomic information
     """
     
+    # strip leading/trailing whitespace
+    species_binomial = species_binomial.strip()
     # clean species name
     if any(x in species_binomial.replace('.', '').split() for x in ['sp', 'spp', 'cf']): # remove general indication from species, leaving just genus
         species_binomial = species_binomial.split()[0]  # take the first word as the genus
+    # manual filtering
     if species_binomial in ['Massive porites', 'Porites lutea/lobata']:
         species_binomial = 'Porites'
-    if 'CCA' in species_binomial:
-        return {'species': species_binomial, 'family': 'Corallinaceae-Sporolithaceae', 'status': 'Best guess', 'functional_group': 'Crustose coralline algae'}
-        
+    if 'CCA' in species_binomial:   # e.g. 'Unknown CCA'
+        return {'species': species_binomial, 'family': 'Corallinaceae-Sporolithaceae', 'status': 'Best guess', 'functional_group': 'Crustose coralline algae', 'core_grouping': 'CCA'}
+    
     # URL encode the species name to handle spaces properly
     encoded_species = requests.utils.quote(species_binomial)
     base_url = f"https://www.marinespecies.org/rest/AphiaRecordsByName/{encoded_species}?like=false&marine_only=true"
@@ -141,6 +180,7 @@ def get_species_info_from_worms(species_binomial: str) -> dict:
         response = requests.get(base_url)
         response.raise_for_status()  # raise exception for 4XX/5XX status codes
         data = response.json()
+
         
         if data and isinstance(data, list) and len(data) > 0:   # assign response to dictionary if data found
             if len(data) > 1:   # if more than one record, take the most recent one which is 'accepted' in the 'status' field
@@ -163,14 +203,15 @@ def get_species_info_from_worms(species_binomial: str) -> dict:
                 'order': data.get('order', 'Not Found')
             }
             result['functional_group'] = assign_functional_group(result)
+            result['core_grouping'] = assign_core_groupings(result)
 
             return result
         else:
-            return {'species': species_binomial, 'family': 'Not Found', 'status': 'No Data', 'functional_group': 'Unknown'}
+            return {'species': species_binomial, 'family': 'Not Found', 'status': 'No Data', 'functional_group': 'Unknown', 'core_grouping': 'Unknown'}
     
     except requests.exceptions.RequestException as e:
         print(f"API Request Error for {species_binomial}: {e}")
-        return {'species': species_binomial, 'family': 'Error', 'status': str(e)}
+        return {'species': species_binomial, 'family': 'Error', 'status': str(e), 'functional_group': 'Unknown', 'core_grouping': 'Unknown'}
 
 
 def create_species_mapping_yaml(species_list) -> None:
@@ -179,13 +220,14 @@ def create_species_mapping_yaml(species_list) -> None:
     Args:
         species_list (list): List of coral species names in 'Genus species' format
     """
-    import yaml
     species_mapping = {}
     for species in tqdm(species_list, desc='Querying WoRMS API to retrieve organism taxonomic data'):
         species_info = get_species_info_from_worms(species)
+        # print(species_info)
         species_mapping[species] = {
             'family': species_info['family'],
-            'functional_group': species_info['functional_group']}
+            'functional_group': species_info['functional_group'],
+            'core_grouping': species_info['core_grouping']}
     # save family: genus, species mapping to YAML file
     with open(config.resources_dir / 'species_mapping.yaml', 'w') as file:
         yaml.dump(species_mapping, file)
@@ -257,7 +299,57 @@ def assign_functional_group(taxon_info):
     
     # catch-all case
     return 'Other benthic organism'
+    
+    
+def assign_core_groupings(taxon_info: dict) -> str:
+    """
+    Assign a core grouping (CCA, halimeda, coral, foraminifera, other) based on taxonomical information.
+    
+    Args:
+        taxon_info (dict): Functional group name
+    
+    Returns:
+        str: Core grouping name
+    """
+    # check for halimeda in genus
+    if taxon_info.get('genus', '').lower() in ['halimeda']:
+        return 'Halimeda'    
+    
+    if taxon_info['functional_group'] in ['Crustose coralline algae', 'Calcareous algae'] or 'calcareous' in taxon_info['functional_group'].lower():
+        return 'CCA'        
+    elif taxon_info['functional_group'] in ['Fleshy algae', 'Turf algae', 'Articulate coralline algae']:
+        return 'Other algae'
+    elif taxon_info['functional_group'] in ['Hard coral', 'Soft coral']:
+        return 'Coral'
+    elif taxon_info['functional_group'] in ['Foraminifera']:
+        return 'Foraminifera'
+    else:
+        return 'Other'
 
+def binomial_to_genus_species(binomial):
+    """
+    Convert a binomial name to genus and species.
+    
+    Args:
+        binomial (str): Binomial name.
+        
+    Returns:
+        tuple: Genus and species names.
+    """
+    # strip periods, 'cf' (used to compare with known species)
+    binomial = binomial.replace('.', '')
+    binomial = binomial.replace('cf', '')
+    split = binomial.split(' ')
+    # remove any empty strings (indicative of leading/trailing whitespace)
+    split = [s for s in split if s]
+    
+    if 'spp' in binomial or 'sp' in split:
+        genus = split[0]
+        species = 'spp'
+    else:
+        genus = split[0]
+        species = split[-1] if len(split) > 1 else 'spp'
+    return genus, species
 
 
 def aggregate_df(df, method: str='mean') -> pd.DataFrame:
@@ -311,32 +403,6 @@ def irradiance_conversion(irr_val: float, irr_unit: str="PAR") -> float:
     # convert from mol quanta m-2 day-1 to μmol quanta m-2 s-1
     s_in_day = DURATIONS['s']
     return irr_val / (s_in_day * PREFIXES['μ']) if irr_unit == "PAR" else irr_val
-    
-
-def binomial_to_genus_species(binomial):
-    """
-    Convert a binomial name to genus and species.
-    
-    Args:
-        binomial (str): Binomial name.
-        
-    Returns:
-        tuple: Genus and species names.
-    """
-    # strip periods, 'cf' (used to compare with known species)
-    binomial = binomial.replace('.', '')
-    binomial = binomial.replace('cf', '')
-    split = binomial.split(' ')
-    # remove any empty strings (indicative of leading/trailing whitespace)
-    split = [s for s in split if s]
-    
-    if 'spp' in binomial or 'sp' in split:
-        genus = split[0]
-        species = 'spp'
-    else:
-        genus = split[0]
-        species = split[-1] if len(split) > 1 else 'spp'
-    return genus, species
 
 
 def get_highlighted_mask(fp: str, sheet_name: str, rgb_color: str = "FFFFC000") -> pd.DataFrame:
@@ -412,6 +478,7 @@ def uniquify_repeated_values(vals: list) -> list:
 
 
 ### carbonate chemistry
+# @lru_cache(maxsize=32)
 def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     df = process_df(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict=selection_dict)
     ### load measured values
@@ -474,46 +541,152 @@ def calculate_carb_chem(row, out_values: list) -> dict:
         print(f"Error: {e}")
 
 
-def rate_conversion(rate_val: float, rate_unit: str) -> float:
-    """Conversion into gCaCO3 ... day-1 for absolute rates"""
+### UNIT STANDARDISATION
+def parse_unit_components(unit: str) -> tuple[str, str]:
+    """Parse a unit string into numerator and denominator components."""
+    if ' ' not in unit:
+        raise ValueError(f"Unit '{unit}' does not have proper format 'numerator denominator'")
     
-    # convert moles to mass
-    if 'mol' in rate_unit:
-        rate_val *= MOLAR_MASS_CACO3
-        mol_prefix = rate_unit.split('mol')[0]
-        if mol_prefix in PREFIXES:
-            rate_val *= PREFIXES[mol_prefix]
+    components = unit.split(' ')
+    if len(components) != 2:
+        raise ValueError(f"Unit '{unit}' has more than two components")
+    
+    return components[0], components[1]
 
-    # convert time unit
-    for time_unit, factor in DURATIONS.items():
-        if time_unit in rate_unit:
+def extract_prefix(unit_part: str, unit_type: str) -> tuple[str, str]:
+    """Extract the prefix from a unit part (e.g., 'mg' -> 'm', 'g')."""
+    if 'delta' in unit_part:    # relative changes
+        return '', unit_part
+    
+    # determine unit type
+    if unit_type == 'mass':
+        match = re.match(r'([nuμmcdk]?)(g|mol)', unit_part)
+    elif unit_type == 'area':
+        match = re.match(r'([nuμmcdk]?)(m2|m-2)', unit_part)
+    elif unit_type == 'length':
+        match = re.match(r'([nuμmcdk]?)(m{1}$)', unit_part)
+    else:
+        return '', unit_part
+    
+    if match:
+        return match.group(1), match.group(2)
+    return '', unit_part
+
+
+def convert_numerator(num_part: str, rate_val: float) -> tuple[float, str]:
+    """Convert the numerator part of the unit."""
+    if 'delta' in num_part: # relative changes
+        return rate_val, num_part
+    
+    has_caco3 = 'CaCO3' in num_part    
+    if has_caco3:
+        num_part_clean = num_part.replace('CaCO3', '')
+    else:
+        num_part_clean = num_part
+    
+    if 'mol' in num_part_clean: # molar units
+        prefix, base = extract_prefix(num_part_clean, 'mass')
+        rate_val *= MOLAR_MASS_CACO3 * PREFIXES.get(prefix, 1.0)
+        new_unit = 'g'
+    elif 'g' in num_part_clean: # mass units
+        prefix, base = extract_prefix(num_part_clean, 'mass')
+        rate_val *= PREFIXES.get(prefix, 1.0)
+        new_unit = 'g'
+    elif 'm2' in num_part_clean:    # area units
+        prefix, base = extract_prefix(num_part_clean, 'area')
+        rate_val *= PREFIXES.get(prefix, 1.0) ** 2
+        new_unit = 'm2'
+    elif re.search(r'm{1}$', num_part_clean):   # extension units
+        prefix, base = extract_prefix(num_part_clean, 'length')
+        rate_val *= PREFIXES.get(prefix, 1.0)
+        new_unit = 'm'
+    elif re.match(r'[nuμmcdk]{2}', num_part_clean): # duplicate units e.g. mm
+        prefix = num_part_clean[0]
+        rate_val *= PREFIXES.get(prefix, 1.0)
+        new_unit = num_part_clean[1:]
+    else:
+        new_unit = num_part_clean
+    
+    if has_caco3:   # TODO: extend to all?
+        new_unit = f"{new_unit}CaCO3"
+    
+    return rate_val, new_unit
+
+def convert_denominator(denom_part: str, rate_val: float) -> tuple[float, str]:
+    """Convert the denominator part of the unit."""
+    for duration, factor in DURATIONS.items():
+        if duration in denom_part:
             rate_val *= factor
+            denom_part = denom_part.replace(duration, 'd')
             break
     
-    # area conversion
-    if 'cm-2' in rate_unit.split(' ')[1]:
-        rate_val *= 1e4   # cm2 to m2
-    # mass conversion
-    mass_prefix = rate_unit.split(' ')[1][0]
-    if mass_prefix in PREFIXES:
-        rate_val *= PREFIXES[mass_prefix]   # convert to g
+    if 'm-2' in denom_part: # area units
+        prefix, _ = extract_prefix(denom_part, 'area')
+        if prefix != 'c':   # convert to cm-2
+            rate_val /= (PREFIXES.get(prefix, 1.0) / PREFIXES['c']) ** 2
+            denom_part = denom_part.replace(f"{prefix}m-2", "cm-2")
     
-    # TODO: add non-CaCO3 conversions
+    elif 'g' in denom_part and not (denom_part.startswith('d') and len(denom_part) <= 3):  # mass units, avoiding 'day' confusion
+        prefix, _ = extract_prefix(denom_part, 'mass')
+        rate_val /= PREFIXES.get(prefix, 1.0)
+        denom_part = denom_part.replace(f"{prefix}g", "g")
+    
+    elif re.search(r'[nuμmcdk]{2}-2', denom_part):  # duplicate character units e.g. mm
+        prefix = denom_part[0]
+        rate_val /= (PREFIXES.get(prefix, 1.0) / PREFIXES['c']) ** 2    # convert to cm-2
+        denom_part = "cm-2" + denom_part[3:]
+    
+    return rate_val, denom_part
 
+def rate_conversion(
+    rate_val: float, 
+    rate_error: float = None,
+    rate_unit: str = "", 
+) -> [tuple[float, str], tuple[float, str, float]]:
+    """
+    Convert rate to standardized units (gCaCO3 per day) and propagate errors if provided.
     
-    return rate_val
+    Parameters:
+    - rate_val: Rate value to convert
+    - rate_unit: Original rate unit string (e.g., 'mgCaCO3 cm-2d-1')
+    - rate_error: Standard deviation or standard error of the rate (optional)
+    
+    Returns:
+    - Converted rate value
+    - New standardized rate unit
+    - Converted error value (if rate_error was provided)
+    """
+    if rate_unit is None or rate_unit != rate_unit: # handle nans
+        if rate_error is not None:
+            return rate_val, "", rate_error
+        return rate_val, ""
+    
+    try:    # split into numerator and denominator
+        num_part, denom_part = parse_unit_components(rate_unit)
+    except ValueError as e:
+        if rate_error is not None:
+            return rate_val, str(e), rate_error
+        return rate_val, str(e)
+    
+    original_val = rate_val    
+    rate_val, new_num = convert_numerator(num_part, rate_val)    
+    rate_val, new_denom = convert_denominator(denom_part, rate_val)
+    new_rate_unit = f"{new_num} {new_denom}"
+    
+    # calculate the scaling factor and propagate error if provided
+    if rate_error is not None:
+        if original_val != 0:
+            scaling_factor = rate_val / original_val
+            new_error = rate_error * abs(scaling_factor)
+        else:
+            # if original value is zero, can't determine scaling factor
+            # In this case, we assume the error scales similarly
+            new_error = rate_error
+        return rate_val, new_error, new_rate_unit
+    
+    return rate_val, None, new_rate_unit
 
 
-def unit_name_conversion(rate_unit: str) -> str:
-    # TODO: expand for all types of rate
-    if "cm-2" in rate_unit:
-        return "gCaCO3 m-2d-1"  # specific area unit
-    elif "g-1" in rate_unit or "mg-1" in rate_unit:
-        return "gCaCO3 g-1d-1"  # specific mass unit
-    else:
-        return "Unknown"
-    
-    
 ### sensitivity analysis
 def select_by_stat(ds, variables_stats: dict):
     """
@@ -561,3 +734,86 @@ def optimal_kmeans(data, max_clusters=8):
             best_k = k
 
     return best_k, scores
+
+
+### DEPRECATED
+# def rate_conversion(rate_val: float, rate_unit: str) -> tuple[float, str]:
+#     """Conversion into gCaCO3 ... day-1 for absolute rates"""
+#     rate_components = rate_unit.split(' ')
+#     # print(rate_components)
+#     num = rate_components[0]
+#     denom = rate_components[1]
+    
+#     # if rate_unit == 'um d-1':
+#     #     print('problem')
+#     # process numerator
+#     if 'delta' in num:  # no conversion needed
+#         # rate_val = rate_val
+#         new_rate_unit_num = num.replace('delta%', 'delta%')
+#     else:
+#         # Initialize num_prefix as an empty string
+#         num_prefix = ""
+        
+#         new_rate_unit_num = num
+#         if 'mol' in num:    # moles
+#             rate_val *= MOLAR_MASS_CACO3
+#             num_prefix = num.split('mol')[0]
+#             num = num.replace('mol', 'g')
+#             new_rate_unit_num = num.replace(num_prefix, '')
+    
+#         elif 'g' in num:    # mass
+#             num_prefix = num.split('g')[0]
+#             # new_rate_unit_num = num.replace(num_prefix, 'g')
+#             new_rate_unit_num = num.replace(num_prefix, '')
+#         elif 'm2' in num:    # area (need to square)
+#             num_prefix = num.split('m2')[0]
+#             # if more than one 'num_prefix' occurence, do this
+#             if num.count(num_prefix) > 1 and num_prefix != '':
+#                 new_rate_unit_num = num[1:]
+#         elif 'm' in num:    # extension
+#             num_prefix = num[0] # TODO: always valid?
+#             if num.count(num_prefix) > 1:   # mm
+#                 new_rate_unit_num = num[1:]
+#             else:
+#                 new_rate_unit_num = num.replace(num_prefix, '')
+                    
+#         # check if prefix exists and is valid
+#         if num_prefix in PREFIXES:
+#             if 'm2' in num:  # area
+#                 rate_val *= PREFIXES[num_prefix]**2
+#             else:
+#                 rate_val *= PREFIXES[num_prefix]
+        
+#     denom_prefix = ""
+#     new_rate_unit_denom = denom
+#     # process denominator
+#     if 'm-2' in denom:  # specific area
+#         denom_prefix = denom.split('m-2')[0]
+#         if denom.count(denom_prefix) > 1 and denom_prefix != '':    # mm
+#             new_rate_unit_denom = 'c'+denom[1:]
+#             denom_prefix = 'm'
+#         else:
+#             new_rate_unit_denom = denom.replace(denom_prefix, 'c')
+                
+#         if denom_prefix in PREFIXES:
+#             rate_val /= (PREFIXES[denom_prefix]/PREFIXES['c'])**2
+#     elif 'g' in denom:  # specific mass
+#         denom_prefix = denom.split('g')[0]
+#         if denom_prefix in PREFIXES:
+#             rate_val /= PREFIXES[denom_prefix]
+
+#         new_rate_unit_denom = denom.replace(denom_prefix, '')
+#     # time conversion
+#     if any(duration in denom for duration in DURATIONS.keys()):
+#         for duration, factor in DURATIONS.items():
+#             if duration in denom:
+#                 rate_val *= factor
+#                 new_rate_unit_denom = new_rate_unit_denom.replace(duration, 'd')
+#                 break
+            
+#     new_rate_unit = f"{new_rate_unit_num} {new_rate_unit_denom}"
+
+#     return rate_val, new_rate_unit   
+
+    
+    
