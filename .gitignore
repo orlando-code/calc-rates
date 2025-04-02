@@ -181,6 +181,7 @@ api_keys.yaml
 tmp/
 # ignore climatology
 climatology/
+data/
 
 # output files/graphs TODO: include in final repo
 output/
