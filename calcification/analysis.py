@@ -4,8 +4,7 @@ import xarray as xa
 from itertools import combinations
 from tqdm.auto import tqdm
 
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+import statsmodels.api as sm
 
 # custom
 from calcification import utils, config
@@ -184,6 +183,30 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     # hg_lower = hg - 1.959964 * se_g
     # hg_upper = hg + 1.959964 * se_g
     return hg, hg_var
+
+
+### meta-analysis functions
+def calc_cooks_distance(data: pd.Series) -> pd.Series:
+    """
+    Calculate Cook's distance for a given data series.
+    """
+    # fit OLS model
+    X = sm.add_constant(data)
+    model = sm.OLS(data, X).fit()
+    # calculate Cook's distance
+    influence = model.get_influence()
+    cooks_d = influence.cooks_distance[0]
+    
+    return cooks_d
+
+
+def calc_cooks_threshold(data: pd.Series, nparams: int) -> float:
+    """
+    Calculate the Cook's distance threshold for outlier detection via 2√((k+1)/(n - k - 1)): a reproducible numerical replacement of eyeballing for outliers in the distance-study graph.
+    """
+    n = len(data)
+    threshold = 2 * np.sqrt((nparams + 1) / (n - nparams - 1))
+    return threshold
     
 
 ### determining treatment conditions
@@ -556,8 +579,9 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     return row_copy
 
 
-def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climatology_data_fp: str, selection_dict: dict={'include': 'yes'}):
+def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climatology_data_fp: str=None, selection_dict: dict={'include': 'yes'}):
     """
+    # TODO: replace with new processing functions?
     Calculate effect sizes from raw data and align with climatology data.
     
     Args:
@@ -588,7 +612,7 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     effects_df = calculate_effect_for_df(carbonate_df_tgs).reset_index(drop=True)
 
     # load climatology data and merge with effects
-    climatology_df = pd.read_csv(climatology_data_fp).set_index('doi')
+    # climatology_df = pd.read_csv(climatology_data_fp).set_index('doi')
     # effects_df = effects_df.merge(climatology_df, on='doi', how='left')
     
     # save results
@@ -598,6 +622,56 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     print(f"\nShape of dataframe with effect sizes: {effects_df.shape}")
     
     return effects_df
+
+
+### curve fitting
+def fit_curve(df, variable, effect_type, order):
+    """
+    Fit a polynomial curve to the data.
+
+    Parameters:
+    - df (pd.DataFrame): The dataframe containing the data.
+    - variable (str): The independent variable.
+    - effect_type (str): The dependent variable.
+    - order (int): The order of the polynomial to fit.
+
+    Returns:
+    - model: The fitted regression model.
+    """
+    # Remove NaNs
+    df = df[df[variable].notna() & df[effect_type].notna()]
+
+    # Create polynomial features
+    X = np.vander(df[variable], N=order + 1, increasing=True)
+    
+    # Fit the model
+    model = sm.OLS(df[effect_type], X).fit()
+    return model
+
+def predict_curve(model, x, alpha=0.05):
+    """
+    Predict values using the fitted model with confidence intervals.
+
+    Parameters:
+    - model: The fitted regression model.
+    - x (np.ndarray): The independent variable values.
+    - alpha (float): Significance level for confidence intervals (default: 0.05 for 95% CI)
+
+    Returns:
+    - tuple: (predicted values, lower confidence bound, upper confidence bound)
+    """
+    X = np.vander(x, N=model.params.shape[0], increasing=True)
+    prediction = model.get_prediction(X)
+    
+    # Get the predicted values
+    predicted = prediction.predicted_mean
+    
+    # Get the confidence intervals
+    conf_int = prediction.conf_int(alpha=alpha)
+    lower = conf_int[:, 0]
+    upper = conf_int[:, 1]
+    
+    return predicted, lower, upper
 
 
 ### cbsyst sensitivity investigation
