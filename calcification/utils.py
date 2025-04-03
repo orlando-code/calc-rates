@@ -64,21 +64,33 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
 
 
 ### processing files
-def process_raw_data(df, require_results, selection_dict) -> pd.DataFrame:
-    """Process raw data from the spreadsheet.
+def process_raw_data(df: pd.DataFrame, require_results: bool=True, selection_dict: dict={'include': 'yes'}, ph_conversion: bool=True) -> pd.DataFrame:
+    """Process raw data from the spreadsheet to prepare for analysis
+    Args:
+        df (pd.DataFrame): DataFrame containing raw data
+        require_results (bool): Whether to require results for processing
+        selection_dict (dict): Dictionary of selections to filter the DataFrame
+    
+    Returns:
+        pd.DataFrame: Processed DataFrame
     """
-    df = process_raw_data(df, selection_dict=selection_dict)  # general processing
+    df = preprocess_df(df, selection_dict=selection_dict)  # general processing
     # location processsing
     # TODO: have functions return series rather than a modified dataframe
     df = uniquify_multilocation_study_dois(df)  # for dois with multiple locations
     df = locations.assign_coordinates(df)  # assign coordinates to locations
     locations.save_locations_information(df)    # save locations information
+    df = locations.assign_ecoregions(df)  # assign ecoregions to locations
     
     # create family, genus, species, and functional group columns from species binomials
     df = assign_taxonomical_info(df)
 
     # convert integrated irradiance to irradiance
     df['irr'] = df.apply(lambda row: irradiance_conversion(row['ipar'], 'PAR') if pd.notna(row['ipar']) else row['irr'], axis=1)
+    
+    # convert pH to H+ concentration in μmol/kg seawater
+    if ph_conversion:
+        df['hplus'] = df.apply(lambda row: ph_to_hplus(row['phtot']) if pd.notna(row['phtot']) else None, axis=1)
     
     if require_results: # keep only rows with all the necessary data
         df = df.dropna(subset=['n', 'calcification'])    
@@ -93,6 +105,7 @@ def process_raw_data(df, require_results, selection_dict) -> pd.DataFrame:
         axis=1)
     
     return df
+
 
 def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     """Clean dataframe fields and standardise for future processing"""
@@ -129,6 +142,8 @@ def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> 
     for col in problem_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
+    # remove any columns with 'unnamed' in the header
+    df = df.loc[:, ~df.columns.str.contains('^unnamed')]
     return df
 
 
@@ -424,6 +439,11 @@ def extract_year_from_str(s) -> pd.Timestamp:
         return pd.NaT
     except ValueError:
         return None
+
+
+def ph_to_hplus(ph: float) -> float:
+    """Convert pH to H+ concentration in μmol/kg seawater."""
+    return 10**(-ph) * 1e6  # convert pH to H+ concentration in μmol/kg seawater
 
 
 def irradiance_conversion(irr_val: float, irr_unit: str="PAR") -> float:
