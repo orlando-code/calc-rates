@@ -90,6 +90,31 @@ def plot_effect_size_grid(results_df, rate_types,
     return fig, axes
 
 
+class Polynomial:
+    """Completely unnecessary class for formatting polynomial strings nicely"""
+    def __init__(self, coefficients, dps=2):
+        self.coeffs = coefficients
+        self.dps = dps
+
+    def __str__(self):
+        chunks = []
+        for coeff, power in zip(self.coeffs, range(len(self.coeffs) - 1, -1, -1)):
+            if coeff == 0:
+                continue
+            chunks.append(self.format_coeff(round(coeff, self.dps)))
+            chunks.append(self.format_power(power))
+        chunks[0] = chunks[0].lstrip("+")
+        return ''.join(chunks)
+
+    @staticmethod
+    def format_coeff(coeff):
+        return str(coeff) if coeff < 0 else "+{0}".format(coeff)
+
+    @staticmethod
+    def format_power(power):
+        return 'x' if power == 1 else 'x^{0}'.format(power) if power != 0 else ''
+    
+
 ### DEPRECATED
 # def generic_plot_stacked_hist(df: pd.DataFrame, ax: matplotlib.axes.Axes, filter_col_name: str, filter_col_val: str | float, response_col_name: str, group_col_name: str, group_values_list: list, color_map: dict, title: str="no title") -> None:
 #     """
