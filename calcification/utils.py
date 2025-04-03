@@ -64,7 +64,38 @@ def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
 
 
 ### processing files
-def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
+def process_raw_data(df, require_results, selection_dict) -> pd.DataFrame:
+    """Process raw data from the spreadsheet.
+    """
+    df = process_raw_data(df, selection_dict=selection_dict)  # general processing
+    # location processsing
+    # TODO: have functions return series rather than a modified dataframe
+    df = uniquify_multilocation_study_dois(df)  # for dois with multiple locations
+    df = locations.assign_coordinates(df)  # assign coordinates to locations
+    locations.save_locations_information(df)    # save locations information
+    
+    # create family, genus, species, and functional group columns from species binomials
+    df = assign_taxonomical_info(df)
+
+    # convert integrated irradiance to irradiance
+    df['irr'] = df.apply(lambda row: irradiance_conversion(row['ipar'], 'PAR') if pd.notna(row['ipar']) else row['irr'], axis=1)
+    
+    if require_results: # keep only rows with all the necessary data
+        df = df.dropna(subset=['n', 'calcification'])    
+    
+    # calculate calcification standard deviation
+    df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else row['calcification_sd'], axis=1)
+    
+    # calculate standarised calcification rates and relevant units
+    df = map_units(df)  # map units to standardised units
+    df[['st_calcification', 'st_calcification_sd', 'st_calcification_unit']] = df.apply(
+        lambda x: pd.Series(utils.rate_conversion(x['calcification'], x['calcification_sd'], x['st_calcification_unit'])) if pd.notna(x['calcification']) and pd.notna(x['st_calcification_unit']) else pd.Series(['', '', '']), 
+        axis=1)
+    
+    return df
+
+def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
+    """Clean dataframe fields and standardise for future processing"""
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
     df = df.map(lambda x: unicodedata.normalize("NFKD", str(x)).replace('\xa0', ' ') if isinstance(x, str) else x)  # clean non-breaking spaces from string cells
     # general processing
@@ -89,52 +120,29 @@ def process_df(df: pd.DataFrame, require_results: bool=False, selection_dict: di
         for key, value in selection_dict.items():
             df = df[df[key] == value]    
     
-    df = uniquify_multilocation_study_dois(df)  # uniquify dois to reflect locations (for studies with multiple locations)
-    # assign locations
-    df = locations.assign_coordinates(df)  # assign coordinates to locations
-    # save locations information
-    locations.save_locations_information(df)
-    
-    # create family, genus, species, and functional group columns
-    df = assign_taxonomical_info(df)
-    
     # missing sample size values
     if df['n'].dtype == 'object':  # Only perform string operations if column contains strings
         df = df[~df['n'].str.contains('~', na=False)]   # remove any rows in which 'n' has '~' in the string
         df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
     df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].apply(safe_to_numeric)
-    
-    
     problem_cols = ['irr', 'ipar']  # some columns have rogue strings when they should all contain numbers: in this case, convert unconvertable values to NaN
     for col in problem_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df['irr'] = df.apply(lambda row: irradiance_conversion(row['ipar'], 'PAR') if pd.notna(row['ipar']) else row['irr'], axis=1)  # convert irradiance to consistent unit
-    
-    if require_results:
-        df = df.dropna(subset=['n', 'calcification'])    # keep only rows with all the necessary data
-    
-    # calculate calcification standard deviation only when 'calcification_se' and 'n' are not NaN
-    df['calcification_sd'] = df.apply(lambda row: calc_sd_from_se(row['calcification_se'], row['n']) if pd.notna(row['calcification_se']) and pd.notna(row['n']) else row['calcification_sd'], axis=1)
-    
-    # calculate standarised calcification rates and relevant units
-    df = map_units(df)  # map units to st_units
-    df[['st_calcification', 'st_calcification_sd', 'st_calcification_unit']] = df.apply(
-        lambda x: pd.Series(utils.rate_conversion(x['calcification'], x['calcification_sd'], x['st_calcification_unit'])) if pd.notna(x['calcification']) and pd.notna(x['st_calcification_unit']) else pd.Series(['', '', '']), 
-        axis=1)
-    
     return df
-        
+
 
 def map_units(df: pd.DataFrame) -> pd.DataFrame:
+    """Map units to standardised units."""
     map_dict = utils.read_yaml(config.resources_dir / "mapping.yaml")["unit_map"]
     inverted_map = {val: key for key, values in map_dict.items() for val in values}
-
     df['st_calcification_unit'] = df['calcification_unit'].map(inverted_map)
     return df
-    
+
 
 def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
+    """Assign taxonomical information to the DataFrame.
+    """
     df = df.assign(
         genus=df.species_types.apply(lambda x: binomial_to_genus_species(x)[0]),
         species=df.species_types.apply(lambda x: binomial_to_genus_species(x)[1])
@@ -146,32 +154,31 @@ def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
         print(f'Using species mapping in {config.resources_dir / 'species_mapping.yaml'}.')
     species_mapping = read_yaml(config.resources_dir / 'species_mapping.yaml')
     # extract nested dictionary values for each species
-    df['family'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('family', 'Unknown'))
-    df['functional_group'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('functional_group', 'Unknown'))
-    df['core_grouping'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('core_grouping', 'Unknown'))
+    # df['family'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('family', 'Unknown'))
+    # df['functional_group'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('functional_group', 'Unknown'))
+    # df['core_grouping'] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get('core_grouping', 'Unknown'))
+    species_fields = ['family', 'functional_group', 'core_grouping']
+    for field in species_fields:
+        df[field] = df.species_types.apply(lambda x: species_mapping.get(x, {}).get(field, 'Unknown'))
     return df
 
 
 def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
-
+    """Uniquify DOIs for studies with multiple locations. N.B. requires 'location', 'coords', and 'cleaned_coords' columns.
+    """
     temp_df = df.copy()
     temp_df['original_doi'] = temp_df['doi']
-    temp_df['location_lower'] = temp_df['location'].str.lower()
-
-    # locs_df = temp_df.drop_duplicates(['doi', 'location_lower', 'cleaned_coords']).set_index('doi')
-    locs_df = temp_df.drop_duplicates(['doi', 'location_lower', 'coords', 'cleaned_coords'])
+    temp_df['location_lower'] = temp_df['location'].str.lower() # lower to make not case sensitive
+    locs_df = temp_df.drop_duplicates(['doi', 'location_lower', 'coords', 'cleaned_coords'])    # drop duplicates to get truly unique
 
     locs_df.loc[:,'doi'] = utils.uniquify_repeated_values(locs_df.doi)
 
     temp_df = temp_df.merge(locs_df['doi'], how='left', left_index=True, right_index=True, suffixes=("_old",""))
-    # drop original doi column
+    # drop original doi column (now redundant)
     temp_df.drop(columns=['doi_old'], inplace=True)
-    # group by original doi to fill down the new doi
+    # group by original doi to fill down the new, uniquified doi
     temp_df['doi'] = temp_df.groupby('original_doi')['doi'].ffill()
     return temp_df
-
-
-
 
 
 def get_species_info_from_worms(species_binomial: str) -> dict:
@@ -203,7 +210,6 @@ def get_species_info_from_worms(species_binomial: str) -> dict:
         response = requests.get(base_url)
         response.raise_for_status()  # raise exception for 4XX/5XX status codes
         data = response.json()
-
         
         if data and isinstance(data, list) and len(data) > 0:   # assign response to dictionary if data found
             if len(data) > 1:   # if more than one record, take the most recent one which is 'accepted' in the 'status' field
@@ -259,8 +265,7 @@ def create_species_mapping_yaml(species_list) -> None:
     
     
 def assign_functional_group(taxon_info):
-    """
-    Assign a functional group based on taxonomic information.
+    """Assign a functional group based on taxonomic information.
     N.B. this mapping is not exhaustive: only checked with ~130 species.
     There is also likely subjectivity in assignment.
 
@@ -326,8 +331,7 @@ def assign_functional_group(taxon_info):
     
     
 def assign_core_groupings(taxon_info: dict) -> str:
-    """
-    Assign a core grouping (CCA, halimeda, coral, foraminifera, other) based on taxonomical information.
+    """Assign a core grouping (CCA, halimeda, coral, foraminifera, other) based on taxonomical information.
     
     Args:
         taxon_info (dict): Functional group name
@@ -351,8 +355,7 @@ def assign_core_groupings(taxon_info: dict) -> str:
         return 'Other'
 
 def binomial_to_genus_species(binomial):
-    """
-    Convert a binomial name to genus and species.
+    """Convert a binomial name to genus and species.
     
     Args:
         binomial (str): Binomial name.
@@ -402,7 +405,7 @@ def safe_to_numeric(col):
     try:
         return pd.to_numeric(col)
     except (ValueError, TypeError):
-        return col  # Return original column if conversion fails
+        return col  # return original column if conversion fails
     
     
 def extract_year_from_str(s) -> pd.Timestamp:
@@ -504,12 +507,12 @@ def uniquify_repeated_values(vals: list) -> list:
 ### carbonate chemistry
 # @lru_cache(maxsize=32)
 def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
-    df = process_df(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict=selection_dict)
+    df = process_raw_data(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict=selection_dict)
     ### load measured values
     print("Loading measured values...")
     measured_df = get_highlighted(fp, sheet_name=sheet_name)    # keeping all cols
     # return measured_df
-    measured_df = process_df(measured_df, require_results=False, selection_dict=selection_dict)
+    measured_df = process_raw_data(measured_df, require_results=False, selection_dict=selection_dict)
     
     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
     print("Calculating total pH values...")
