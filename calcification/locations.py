@@ -1,16 +1,19 @@
-import pandas as pd
-import numpy as np
+# general
 import re
+import numpy as np
+import pandas as pd
 from tqdm.auto import tqdm
+# spatial
 import googlemaps
-
+import geopandas as gpd
+# custom
 from calcification import utils, config
 
 ### spatial
 def get_google_maps_coordinates(locations: list[str]) -> dict:
 
     if (config.resources_dir / 'gmaps_locations.yaml').exists():
-        print(f"Using locations in {config.resources_dir / 'gmaps_locations.yaml'}.")
+        print(f"Using locations in {config.resources_dir / 'gmaps_locations.yaml'}")
         gmaps_coords = utils.read_yaml(config.resources_dir / 'gmaps_locations.yaml')
     else:
         print(f"Creating gmaps_locations.yaml file in {config.resources_dir}")
@@ -60,12 +63,30 @@ def assign_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[mask, 'loc'] = df.loc[mask, 'coords'].apply(standardize_coordinates)
     # for locations where coordinates from cleaned_coords are available, fill them in
     # for remaining locations, use the coordinates from Google Maps API if available
-    df['loc'] = df['loc'].fillna(df['location'].map(gmaps_coords))
+    df['loc'] = df['loc'].fillna(df.apply(lambda row: tuple(gmaps_coords.get(row['location'])) if row['location'] in gmaps_coords else None, axis=1))
 
     # extract latitude and longitude from the coordinate tuples, with proper type checking
     df['latitude'] = df['loc'].apply(lambda x: x[0] if isinstance(x, tuple) else None)
     df['longitude'] = df['loc'].apply(lambda x: x[1] if isinstance(x, tuple) else None)
     
+    return df
+
+
+def assign_ecoregions(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assign ecoregions to locations based intersections of points with ecoregion polygons.
+    """
+    # load ecoregion data
+    ecoregions_gdf = gpd.read_file(config.climatology_data_dir / "MEOW/meow_ecos.shp")
+    ecoregions_gdf = ecoregions_gdf.to_crs(epsg=4326)
+    df = df.dropna(subset=["latitude", "longitude"])
+    # generate geometry columnn and convert to geodataframe for matching
+    df["geometry"] = gpd.points_from_xy(df["longitude"], df["latitude"])
+    df = gpd.GeoDataFrame(df, geometry="geometry", crs=4326)
+    df = gpd.sjoin(df, ecoregions_gdf[['geometry', 'ECOREGION', 'REALM', 'Lat_Zone']], how="left", predicate="intersects")
+    df = df.drop(columns=["geometry"])
+    df.columns = df.columns.str.lower()
+
     return df
 
 
@@ -75,7 +96,7 @@ def save_locations_information(df: pd.DataFrame) -> None:
     """
     if not ((config.resources_dir / "locations.yaml").exists() and (config.resources_dir / "locations.csv").exists()):
         # send to dictionary
-        locs_df = df.set_index('doi').drop_duplicates(['location_lower', 'cleaned_coords', 'latitude', 'longitude'])[['location', 'latitude', 'longitude']]
+        locs_df = df.drop_duplicates(['doi'], keep='first')[['doi', 'location', 'latitude', 'longitude']].set_index('doi')
         # save dictionary to yaml
         utils.write_yaml(locs_df.to_dict(orient='index'), config.resources_dir / "locations.yaml")
         print(f'Saved locations to {config.resources_dir / "locations.yaml"}')
@@ -97,10 +118,7 @@ def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
     except Exception as e:
         print(f"Error converting DMS: {degrees}° {minutes}′ {seconds}″ {direction} → {e}")
         return None
-    
-    
 
-        
 
 def standardize_coordinates(coord_string):
     """Convert various coordinate formats into decimal degrees."""
