@@ -156,7 +156,7 @@ save_figures <- function(model, yi, data, mods_formula, save_dir = "output/", va
   # dev.off()
 
   print(paste(yi))
-  if (str_detect(yi, "raw")) {
+  if (str_detect(yi, "relative_calcification")) {
     effect_type <- "% change in calcification rate"
   } else {
     effect_type <- "Hedges' g"
@@ -206,8 +206,8 @@ save_figures <- function(model, yi, data, mods_formula, save_dir = "output/", va
   } else {
     "Variable"
   }
-  # set y-axis limits to +- 500 if effect size is raw, else +- 10
-  if (str_detect(yi, "raw")) {
+  # set y-axis limits to +- 500 if effect size is relative, else +- 10
+  if (str_detect(yi, "relative_calcification")) {
     ylim <- c(-500, 500)
   } else {
     ylim <- c(-10, 10)
@@ -248,6 +248,12 @@ print_model_summary <- function(model, variable, run_id, save_dir = "output/") {
 ```{r Meta-analysis pipeline}
 run_meta_analysis <- function(data, yi, V, mods_formula, threshold_val = NULL, parallel_opts = list(type = "multicore", ncpus = 8)) {
   # Eliminates anomalies based on Cook's distance, then runs a random-effects multi-level model.
+  
+  # Ensure data has an ID column
+  if (!"ID" %in% colnames(data)) {
+    data <- data %>% mutate(ID = seq_len(nrow(data)))
+  }
+  
   model <- rma.mv(yi = data[[yi]],
     V = data[[V]],
     data = data,
@@ -275,35 +281,30 @@ run_meta_analysis <- function(data, yi, V, mods_formula, threshold_val = NULL, p
   # plot Cook's distances
   plot(cooks_dist, type = "o", pch = 19,
        xlab = "ID", ylab = "Cook's Distance (logarithmic scale)", xaxt = "n",
-      log = "y",
-       )
+       log = "y", main= paste("Cook's distances") # add title
+  )
   # plot a horizontal line at the threshold value
   abline(h = threshold_val, col = "red", lty = 5)
 
   axis(side = 1, at = seq_along(cooks_dist),
        labels = as.numeric(names(cooks_dist)))
 
-
   # determine outliers
   outliers <- cooks_dist %>%
-    as_tibble() %>%
-    # mutate(ID = seq_len(nrow(data))) %>%
+    as_tibble(rownames = "ID") %>%
+    mutate(ID = as.numeric(ID)) %>%
     filter(value > threshold_val)
 
   # remove outliers if any were found
   cleaned_data <- data
-  # print(cleaned_data)
-  print(data[-c(outliers$ID), ])
-
+  
   if (nrow(outliers) > 0) {
     # Remove rows identified as outliers based on Cook's distance
-    cleaned_data <- data[-c(outliers$ID), ]
+    cleaned_data <- data[!(data$ID %in% outliers$ID), ]
     cat(sprintf("Removed %d outlier(s) out of %d samples\n", nrow(outliers), nrow(data)))
   } else {
     cat("No outliers detected\n")
   }
-
-  # print(cleaned_data)
 
   # try to re-run model with cleaned data. if nlminb optimizer fails, stop execution
   final_model <- tryCatch({
@@ -391,19 +392,30 @@ all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
 # all_data <- all_data[order(all_data$hedges_g), ]
 
 # select first 50 rows for debugging
-all_data <- all_data[0:100, ]
+# all_data <- all_data[0:1000, ]
 
-# remove rows for which effect_size_raw is > 500
-# all_data <- all_data %>% filter(effect_size_raw < 500)
+# remove rows for which hedges_g is > 500
+# all_data <- all_data %>% filter(hedges_g < 500)
 
 # ph_mods_formula <- ~ delta_ph + factor(family) - 1
 # results <- meta_analysis_end_to_end(all_data, "phtot", ph_mods_formula, "phtot_naive")
 
-ph_mods_formula <- ~ delta_ph + temp + factor(family) - 1
-temp_mods_formula <- ~ delta_t + phtot + factor(family) - 1
-# results <- meta_analysis_end_to_end(all_data, "phtot", "effect_size_raw", "effect_var_raw", mods_formula=ph_mods_formula, run_id="ph_naive_raw")
-results <- meta_analysis_end_to_end(all_data, "temp", "effect_size_raw", "effect_var_raw", mods_formula=temp_mods_formula, run_id="temp_naive_raw")
-# results <- meta_analysis_end_to_end(all_data, "phtot", "hedges_g", "hedges_g_var", mods_formula=temp_mods_formula, run_id="temp_naive")
+ph_mods_formula <- ~ delta_ph + temp + factor(core_grouping) - 1
+temp_mods_formula <- ~ delta_t + phtot + factor(core_grouping) - 1
+# temp_mods_formula <- ~ delta_t - 1
+results <- meta_analysis_end_to_end(
+  all_data, "phtot", "hedges_g", "hedges_g_var", mods_formula=ph_mods_formula, 
+  run_id="ph_hedges_cg")
+results <- meta_analysis_end_to_end(
+    all_data, "temp", "hedges_g", "hedges_g_var", mods_formula = temp_mods_formula,
+    run_id = "temp_hedges_cg")
+results <- meta_analysis_end_to_end(
+  all_data, "phtot", "relative_calcification", "relative_calcification_var", mods_formula=ph_mods_formula, 
+  run_id="ph_relative_calcification_cg")
+results <- meta_analysis_end_to_end(
+    all_data, "temp", "relative_calcification", "relative_calcification_var", mods_formula = temp_mods_formula,
+    run_id = "temp_relative_calcification_cg")
+
 
 ```
 
@@ -458,15 +470,6 @@ temp_mods_formula <- ~ delta_ph + factor(family) - 1
 out <- run_meta(subset, "effect_size", "effect_var", temp_mods_formula)
 
 
-```
-```{r}
-  if (str_detect("effect_size", "raw")) {
-    effect_type <- "% change in calcification rate"
-  } else {
-    effect_type <- "Hedges' g"
-  }
-
-  print(paste("Effect type:", effect_type))
 ```
 
 
