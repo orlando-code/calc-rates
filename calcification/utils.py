@@ -12,6 +12,11 @@ import re
 import itertools
 import string
 
+# R
+import rpy2
+import rpy2.robjects as ro
+from rpy2.robjects.packages import importr
+
 # custom
 from calcification import utils, config, locations
 import cbsyst as cb
@@ -146,6 +151,26 @@ def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> 
     df = df.loc[:, ~df.columns.str.contains('^unnamed')]
     return df
 
+
+
+def ensure_r_package_imported(package_name):
+    """
+    Ensure that an R package is imported using rpy2.
+    
+    Parameters:
+    -----------
+    package_name : str
+        Name of the R package to import.
+    
+    Returns:
+    --------
+    None
+    """
+    try:
+        rpackages.importr(package_name)
+    except rpy2.robjects.packages.PackageNotFoundError:
+        rpackages.importr(package_name)
+        
 
 def map_units(df: pd.DataFrame) -> pd.DataFrame:
     """Map units to standardised units."""
@@ -530,9 +555,12 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
     df = process_raw_data(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict=selection_dict)
     ### load measured values
     print("Loading measured values...")
+    print('1:', df.shape)
     measured_df = get_highlighted(fp, sheet_name=sheet_name)    # keeping all cols
-    # return measured_df
-    measured_df = process_raw_data(measured_df, require_results=False, selection_dict=selection_dict)
+    print('2:', measured_df.shape)
+    # measured_df = process_raw_data(measured_df, require_results=False, selection_dict=selection_dict)
+    measured_df = preprocess_df(measured_df, selection_dict=selection_dict)
+    print('3:', measured_df.shape)
     
     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
     print("Calculating total pH values...")
@@ -544,6 +572,7 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
         else np.nan,
         axis=1
     )
+    print('4:', measured_df.shape)
     # if one of ph is provided, ensure total ph is calculated
     measured_df.loc[:, 'phtot'] = measured_df.apply(
         lambda row: cbh.pH_scale_converter(
@@ -552,25 +581,25 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
         else row['phtot'],
         axis=1
     )
-    # count number of non-nan phtot values
-    # print(f"\nTotal number of total pH values: {measured_df['phtot'].count()}")
+    print('5:', measured_df.shape)
 
-    
     ### calculate carbonate chemistry
     carb_metadata = read_yaml(config.resources_dir / "mapping.yaml")
     carb_chem_cols = carb_metadata['carbonate_chemistry_cols']
     out_values = carb_metadata['carbonate_chemistry_params']
     carb_df = measured_df[carb_chem_cols].copy()
+    print('6:', carb_df.shape)
 
     # apply function row-wise
     tqdm.pandas(desc="Calculating carbonate chemistry")
+
     carb_df.loc[:, out_values] = carb_df.progress_apply(lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1)
+    print('7:', carb_df.shape)
     return df.combine_first(carb_df)
-    # return measured_df
 
 
 def calculate_carb_chem(row, out_values: list) -> dict:
-    """Calculate carbonate chemistry parameters and return a dictionary."""
+    """Calculate carbonate chemistry parameters and return a dictionary."""  
     try:
         out_dict = cb.Csys(
             pHtot=row['phtot'],
@@ -732,6 +761,38 @@ def rate_conversion(
         return rate_val, new_error, new_rate_unit
     
     return rate_val, None, new_rate_unit
+
+
+### climatology
+def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd.DataFrame:
+    """
+    Convert the climatology CSV file to a multi-index DataFrame.
+    """
+    df = pd.read_csv(fp).drop(columns=['data_ID', 'Unnamed: 0']).set_index('doi')
+    # rename columns to be less wordy
+    df = df.replace(
+        {"2021_2040": 2040,
+        "2041_2060": 2060,
+        "2081_2100": 2100}
+        ).infer_objects(copy=False)
+    
+    var = 'ph' if 'ph' in str(fp.name) else 'sst' if 'sst' in str(fp.name) else None
+    if not var:
+        raise ValueError("File path must contain 'ph' or 'sst' to determine variable type.")
+    df = pd.concat([df.iloc[:, :4], df.iloc[:, 4:].rename(columns=lambda col: col if var in col else f'{var}_{col}')], axis=1)
+
+    # load locations yaml as dataframe
+    locations_fp = config.resources_dir / 'locations.yaml'
+    locations_df = pd.DataFrame(utils.read_yaml(locations_fp)).T
+    # reorder columns to be latitude, longitude, location
+    locations_df = locations_df[['latitude', 'longitude', 'location']]
+
+    # merge locations with sst_df
+    df = df.merge(locations_df, left_index=True, right_index=True, how='left', suffixes=('', '_right'))
+    df = df.loc[:, ~df.columns.str.endswith('_right')]
+    df.reset_index(inplace=True, names='doi')
+    
+    return df
 
 
 ### sensitivity analysis
