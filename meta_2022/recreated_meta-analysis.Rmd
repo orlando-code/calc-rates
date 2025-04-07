@@ -93,10 +93,10 @@ subset_data <- function(data, investigation, yi, V, filter_functional_group = NU
   filtered_data <- dplyr::filter(data, stringr::str_detect(treatment, investigation))
   # Set necessary columns based on investigation type
   necessary_cols <- c(yi, V, "family", "genus", "taxa", "original_doi")
-  if (investigation == "t_in") {
-    necessary_cols <- c(necessary_cols, "delta_t", "t_in")
+  if (investigation == "temp") {
+    necessary_cols <- c(necessary_cols, "delta_t", "temp")
   } else if (investigation == "phtot") {
-    necessary_cols <- c(necessary_cols, "delta_ph", "phtot", "t_in")
+    necessary_cols <- c(necessary_cols, "delta_ph", "phtot", "temp")
   }
 
   # Filter out rows with NAs in necessary columns
@@ -402,21 +402,38 @@ all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
 
 ph_mods_formula <- ~ delta_ph + temp + factor(core_grouping) - 1
 temp_mods_formula <- ~ delta_t + phtot + factor(core_grouping) - 1
-# temp_mods_formula <- ~ delta_t - 1
-results <- meta_analysis_end_to_end(
+results_ph <- meta_analysis_end_to_end(
   all_data, "phtot", "hedges_g", "hedges_g_var", mods_formula=ph_mods_formula, 
-  run_id="ph_hedges_cg")
+  run_id="comparison_test_ph")
 results <- meta_analysis_end_to_end(
     all_data, "temp", "hedges_g", "hedges_g_var", mods_formula = temp_mods_formula,
-    run_id = "temp_hedges_cg")
-results <- meta_analysis_end_to_end(
-  all_data, "phtot", "relative_calcification", "relative_calcification_var", mods_formula=ph_mods_formula, 
-  run_id="ph_relative_calcification_cg")
-results <- meta_analysis_end_to_end(
-    all_data, "temp", "relative_calcification", "relative_calcification_var", mods_formula = temp_mods_formula,
-    run_id = "temp_relative_calcification_cg")
+    run_id = "comparison_test_t")
+# results <- meta_analysis_end_to_end(
+#   all_data, "phtot", "relative_calcification", "relative_calcification_var", mods_formula=ph_mods_formula, 
+#   run_id="ph_relative_calcification_cg")
+# results <- meta_analysis_end_to_end(
+#     all_data, "temp", "relative_calcification", "relative_calcification_var", mods_formula = temp_mods_formula,
+#     run_id = "temp_relative_calcification_cg")
 
 
+```
+
+```{r Mumin testing}
+n_cores <- 16
+clust <- parallel::makeCluster({n_cores})
+
+mods_formula <- ~ delta_t + phtot + factor(core_grouping) - 1
+data = all_data[1:500, ]
+global_model <- rma.mv(yi = data[['hedges_g']],
+  V = data[['hedges_g_var']],
+  data = data,
+  method = "REML",
+  mods = mods_formula,
+  test = "z",
+  random = list(~ 1 | (original_doi)) # IDs are nested within original_doi
+)
+
+MuMIn::dredge(global_model, cluster=clust)
 ```
 
 ```{r}
