@@ -55,6 +55,50 @@ colour.scheme <- c("black",
 dir.create("output", showWarnings = FALSE)
 ```
 
+```{r Mumin testing}
+
+# load temp data
+# Load your data
+tmp_data <- read.csv(here("data/tmp/temp_df.csv"))
+
+# Create cluster
+n_cores <- 16
+clust <- makeCluster(n_cores)
+
+# Load packages in each worker
+clusterEvalQ(clust, library(metafor))
+clusterEvalQ(clust, library(MuMIn))
+
+# Export the data and variables to the cluster
+clusterExport(clust, c("tmp_data"))
+
+# Define the global model
+mods_formula <- ~ delta_t + phtot - 1
+global_model <- rma.mv(
+  yi = tmp_data[["hedges_g"]],
+  V = tmp_data[["hedges_g_var"]],
+  data = tmp_data,
+  method = "REML",
+  mods = mods_formula,
+  test = "z",
+  random = list(~1 | ID/original_doi)
+)
+
+# Export model to cluster
+clusterExport(clust, c("global_model"))
+
+# Run dredge
+dredge_result <- MuMIn::dredge(global_model, cluster = clust, trace=2)
+subset(dredge_result, delta <= 2, recalc.weights=FALSE)
+
+
+# Stop cluster
+stopCluster(clust)
+```
+
+```{r}
+
+```
 ```{r Helper functions}
 
 # calculate the cooks distance threshold via 2√((k+1)/(n - k - 1))
@@ -392,7 +436,7 @@ all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
 # all_data <- all_data[order(all_data$hedges_g), ]
 
 # select first 50 rows for debugging
-# all_data <- all_data[0:1000, ]
+all_data <- all_data[0:100, ]
 
 # remove rows for which hedges_g is > 500
 # all_data <- all_data %>% filter(hedges_g < 500)
@@ -401,13 +445,13 @@ all_data <- read.csv(here("data/tmp/effect_sizes.csv"))
 # results <- meta_analysis_end_to_end(all_data, "phtot", ph_mods_formula, "phtot_naive")
 
 ph_mods_formula <- ~ delta_ph + temp + factor(core_grouping) - 1
-temp_mods_formula <- ~ delta_t + phtot + factor(core_grouping) - 1
+# temp_mods_formula <- ~ delta_t + phtot + factor(core_grouping) - 1
 results_ph <- meta_analysis_end_to_end(
   all_data, "phtot", "hedges_g", "hedges_g_var", mods_formula=ph_mods_formula, 
-  run_id="comparison_test_ph")
-results <- meta_analysis_end_to_end(
-    all_data, "temp", "hedges_g", "hedges_g_var", mods_formula = temp_mods_formula,
-    run_id = "comparison_test_t")
+  run_id="nulllll")
+# results <- meta_analysis_end_to_end(
+#     all_data, "temp", "hedges_g", "hedges_g_var", mods_formula = temp_mods_formula,
+#     run_id = "comparison_test_t")
 # results <- meta_analysis_end_to_end(
 #   all_data, "phtot", "relative_calcification", "relative_calcification_var", mods_formula=ph_mods_formula, 
 #   run_id="ph_relative_calcification_cg")
@@ -423,7 +467,8 @@ n_cores <- 16
 clust <- parallel::makeCluster({n_cores})
 
 mods_formula <- ~ delta_t + phtot + factor(core_grouping) - 1
-data = all_data[1:500, ]
+data = all_data
+# data = all_data[1:500, ]
 global_model <- rma.mv(yi = data[['hedges_g']],
   V = data[['hedges_g_var']],
   data = data,
