@@ -18,6 +18,7 @@ repo_dir = get_repo_root()
 resources_dir = repo_dir / "resources"
 meta_dir = repo_dir / "meta_2022"
 module_dir = repo_dir / "calcification"
+fig_dir = repo_dir / "figures"
 
 # DATA DIRECTORIES
 data_dir = repo_dir / "data"
