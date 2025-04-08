@@ -6,6 +6,15 @@ from tqdm.auto import tqdm
 
 import statsmodels.api as sm
 
+# R
+import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri, FloatVector
+import rpy2.robjects.packages as rpackages
+
+metafor = rpackages.importr("metafor")
+base = rpackages.importr("base")
+
+
 # custom
 from calcification import utils, config
 import cbsyst.helpers as cbh
@@ -611,6 +620,7 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     print(f"\nCalculating effect sizes...")
     effects_df = calculate_effect_for_df(carbonate_df_tgs).reset_index(drop=True)
 
+    # TODO: handle climatology
     # load climatology data and merge with effects
     # climatology_df = pd.read_csv(climatology_data_fp).set_index('doi')
     # effects_df = effects_df.merge(climatology_df, on='doi', how='left')
@@ -726,7 +736,184 @@ def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percent
     )
 
 
+def generate_formula(effect_type: str, treatment: str=None, variables: list[str] = None, include_intercept: bool = False) -> str:
+    if variables is None:
+        variables = []
+        
+    # Add treatment-specific variable if needed
+    if treatment:
+        if treatment == "phtot":
+            variables.append("delta_ph")
+        elif treatment == "temp":
+            variables.append("delta_t")
+        else:
+            raise ValueError(f"Unknown treatment: {treatment}")
+    
+    # Remove duplicates and process variables
+    variables = list(set(variables))
+    variable_mapping = utils.read_yaml(config.resources_dir / 'mapping.yaml')["meta_model_factor_variables"]
+    
+    # Split into factor and regular variables
+    factor_vars = [f"factor({v})" for v in variables if v in variable_mapping]
+    other_vars = [v for v in variables if v not in variable_mapping]
+    
+    # Combine all parts into formula string
+    parts = other_vars + factor_vars
+    formula = f"{effect_type} ~ {' + '.join(parts)}"
+    
+    # Remove intercept if specified
+    return formula + " - 1" if not include_intercept else formula
 
+
+def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', treatment=None, necessary_vars: list[str] = None, formula: str=None) -> pd.DataFrame:
+    # TODO: get necessary variables more dynamically (probably via a mapping including factor)
+    data = df.copy()
+    # specify model
+    
+    if not formula:
+        formula = generate_formula(effect_type, treatment, variables=necessary_vars)
+
+    # select only rows relevant to treatment
+    if treatment:
+        data = data[data["treatment"] == treatment]
+    n_investigation = len(data)
+    # remove nans for subset effect_type
+    required_columns = [effect_type, f"{effect_type}_var", 'original_doi', 'ID'] + (necessary_vars or [])
+    data = data.dropna(subset=required_columns)
+    n_nans = n_investigation - len(data)
+    
+    ### summarise processing
+    print("\n----- PROCESSING SUMMARY -----")
+    print('Treatment: ', treatment)
+    print('Total samples in input data: ', len(df))
+    print('Total samples of relevant investigation: ', n_investigation)
+    print('Dropped due to NaN values in required columns:', n_nans)
+    print(f'Final sample count: {len(data)} ({n_nans+(len(df)-n_investigation)} rows dropped)')
+    
+    # remove outliers
+    nparams = len(formula.split('+'))
+    data, outliers = remove_cooks_outliers(data, effect_type=effect_type, nparams=nparams)
+    
+    return formula, data
+
+
+def remove_cooks_outliers(df: pd.DataFrame, effect_type: str = 'hedges_g', nparams: int=3) -> pd.DataFrame:
+    data = df.copy()
+    # calculate cooks distance
+    cooks_threshold = calc_cooks_threshold(data[effect_type], nparams=nparams)
+    # calculate cooks distance
+    data["cooks_d"] = calc_cooks_distance(
+        data[effect_type]
+    )
+
+    # remove outliers
+    data_no_outliers = data[data["cooks_d"] < cooks_threshold]
+    outliers = data[data["cooks_d"] >= cooks_threshold]
+    print(f"\nRemoved {len(outliers)} outliers (from {len(data)} samples) based on Cook's distance threshold of {cooks_threshold:.2f}")
+    return data_no_outliers, outliers
+
+
+import rpy2.robjects as ro
+
+def run_metafor_model(
+    df: pd.DataFrame,
+    effect_type: str = 'hedges_g',
+    treatment: str = None,
+    necessary_vars: list[str] = None,
+    formula: str = None,
+) -> tuple[ro.vectors.DataFrame, ro.vectors.DataFrame, pd.DataFrame]:
+    """
+    Run the metafor model on the given dataframe.
+    
+    Args:
+        df (pd.DataFrame): The dataframe to run the model on.
+        effect_type (str): The type of effect to use.
+        treatment (str): The treatment to use.
+        necessary_vars (list[str]): The necessary variables to use.
+        formula (str): The formula to use.
+    
+    Returns:
+        ro.vectors.DataFrame: The results of the metafor model.
+    """
+    # preprocess the dataframe
+    formula, df = preprocess_df_for_meta_model(df, effect_type, treatment, necessary_vars, formula)
+    print(f'Using formula {formula}')
+    # df, outliers = remove_cooks_outliers(df, effect_type, nparams=nparams)
+    
+    # convert df to R dataframe
+    df_r = pandas2ri.py2rpy(df)
+    
+    # run the metafor model
+    print('\nRunning metafor model...')
+    model = metafor.rma_mv(
+        yi=ro.FloatVector(df_r.rx2(effect_type)),
+        V=ro.FloatVector(df_r.rx2(f"{effect_type}_var")),
+        data=df_r,
+        mods=ro.Formula(formula),
+        random=ro.Formula("~ 1 | original_doi/ID")
+    )
+    print('Model fitting complete.')
+    return model, base.summary(model), df
+
+
+def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var: str = "sst"):
+    # Get constant terms from the model matrix (excluding intercept/first column)
+    model_matrix = ro.r('model.matrix')(model)
+    const_terms = np.array(model_matrix)[:, 1:].mean(axis=0)
+    const_terms_list = const_terms.tolist()
+
+    df = df.sort_index()     # Sort the index to avoid PerformanceWarning about lexsort depth
+    locations = df.index.unique()
+    prediction_rows = []  # to hold newmods inputs
+    metadata_rows = []    # to track what each row corresponds to
+
+    for location in tqdm(locations, desc=f"Generating batched predictions for {scenario_var}"):
+        location_df = df.loc[location]
+        scenarios = location_df['scenario'].unique()
+
+        for scenario in scenarios:
+            scenario_df = location_df[location_df['scenario'] == scenario]
+            time_frames = [1995] + list(scenario_df.time_frame.unique())
+
+            for time_frame in time_frames:
+                if time_frame == 1995:
+                    base = scenario_df[f'mean_historical_{scenario_var}_30y_ensemble'].mean()
+                    mean_scenario = base
+                    p10_scenario = scenario_df[f'percentile_10_historical_{scenario_var}_30y_ensemble'].mean()
+                    p90_scenario = scenario_df[f'percentile_90_historical_{scenario_var}_30y_ensemble'].mean()
+                else:
+                    time_scenario_df = scenario_df[scenario_df['time_frame'] == time_frame]
+                    mean_scenario = time_scenario_df[f'mean_{scenario_var}_20y_anomaly_ensemble'].mean()
+                    p10_scenario = time_scenario_df[f'{scenario_var}_percentile_10_anomaly_ensemble'].mean()
+                    p90_scenario = time_scenario_df[f'{scenario_var}_percentile_90_anomaly_ensemble'].mean()
+                    # Generate predictions for mean, p10, and p90 scenarios
+                for percentile, anomaly in [('mean', mean_scenario), ('p10', p10_scenario), ('p90', p90_scenario)]:
+                    prediction_rows.append([anomaly] + const_terms_list)
+                    metadata_rows.append({
+                        'doi': location[0],
+                        'location': location[1],
+                        'longitude': location[2],
+                        'latitude': location[3],
+                        'scenario_var': scenario_var,
+                        'scenario': scenario,
+                        'time_frame': time_frame,
+                        'anomaly_value': anomaly,
+                        'percentile': percentile
+                    })
+
+    # Convert to R matrix (newmods)
+    newmods_np = np.array(prediction_rows, dtype=float)
+    newmods_r = ro.r.matrix(FloatVector(newmods_np.flatten()), nrow=newmods_np.shape[0], byrow=True)
+
+    # Predict all at once in R
+    predictions_r = ro.r('predict')(model, newmods=newmods_r, digits=2)
+    predicted_vals = list(predictions_r)
+
+    # Combine metadata and predictions
+    for i, val in enumerate(predicted_vals[0]): # for now, just taking mean predictions (ignoring ci, pi)
+        metadata_rows[i]['predicted_effect_size'] = val
+
+    return metadata_rows
 # def compute_heds
     # def calculate_effect_size(df1_sample, df2_sample, var, group1, group2):
     #     other_var = 'temp' if var == 'phtot' else 'phtot'
