@@ -3,6 +3,7 @@ import yaml
 from openpyxl import load_workbook
 import requests
 from functools import lru_cache
+import datetime
 
 # general
 import numpy as np
@@ -762,6 +763,10 @@ def rate_conversion(
     
     return rate_val, None, new_rate_unit
 
+
+def get_formatted_timestamp():
+    return datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
+    
 
 ### climatology
 def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd.DataFrame:
