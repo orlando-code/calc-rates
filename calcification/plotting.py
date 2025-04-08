@@ -1,6 +1,12 @@
-import matplotlib.pyplot as plt
+# general
 import matplotlib
+import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+from matplotlib import gridspec
+import seaborn as sns
+# spatial
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 
 # R
 import rpy2.robjects as ro
@@ -10,7 +16,10 @@ from rpy2.robjects import pandas2ri
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from scipy import interpolate
 
+# custom
+from calcification import config, utils
 
 def plot_effect_size_grid(results_df, rate_types,
                           x_var, y_vars, col_titles=None, rate_type_mapping=None, figure_title=None,
@@ -297,7 +306,216 @@ def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True,
     return fig, ax
 
 
+def interpolate_spline(xs, ys, npoints=100, k=2):
+    
+    x_fine = np.linspace(min(xs), max(xs) + 10, 100)
+    spline = interpolate.splrep(xs, ys, k=k)
+    smooth = interpolate.splev(x_fine, spline)
+    return x_fine, smooth
 
+
+def plot_spatial_effect_distribution(predictions_df, time_frame=2100, figsize=(10, 10), dpi=300):
+    """
+    Plots the spatial distribution of predicted effect sizes for SSP scenarios on a map.
+
+    Parameters:
+        predictions_df (pd.DataFrame): DataFrame containing predictions with columns ['longitude', 'latitude', 'scenario', 'time_frame', 'predicted_effect_size'].
+        time_frame (int): The time frame to filter the data for plotting (default is 2100).
+        figsize (tuple): Size of the figure (default is (10, 10)).
+        dpi (int): Resolution of the figure (default is 300).
+    # TODO: future thoughts
+    - size as e.g. uncertainty, number of datapoints
+    - interpolate within reef presence to show effect on whole ecosystem
+    """
+    ssp_scenarios = predictions_df['scenario'].unique()
+
+    # Create figure
+    fig, axes = plt.subplots(len(ssp_scenarios), 1, figsize=figsize, subplot_kw={'projection': ccrs.PlateCarree()}, dpi=dpi)
+
+    # Normalize color map to the range of predicted effect sizes
+    min_effects = predictions_df['predicted_effect_size'].min()
+    max_effects = predictions_df['predicted_effect_size'].max()
+
+    for i, (name, scenario) in enumerate(zip(['SSP 1-2.6', 'SSP 2-4.5', 'SSP 3-7.0', 'SSP 5-8.5'], ssp_scenarios)):
+        # Add map features
+        axes[i].set_extent([-180, 180, -40, 40], crs=ccrs.PlateCarree())
+        axes[i].add_feature(cfeature.LAND)
+        axes[i].add_feature(cfeature.OCEAN, alpha=0.3)
+        axes[i].add_feature(cfeature.COASTLINE, edgecolor='lightgray', zorder=-1)
+        axes[i].add_feature(cfeature.BORDERS, linestyle=':', edgecolor='gray', alpha=0.2)
+
+        # Filter data for the specific scenario and time frame
+        data_to_plot = predictions_df[(predictions_df['scenario'] == scenario) & (predictions_df['time_frame'] == time_frame)]
+        if data_to_plot.empty:
+            raise ValueError(f"No data available for scenario {scenario} at time frame {time_frame}.")
+            continue
+        data_to_plot = data_to_plot.sort_values(by='predicted_effect_size', ascending=True)
+
+        # Normalize color map
+        norm = plt.Normalize(vmin=min_effects, vmax=max_effects)
+
+        # Plot scatter points
+        sc = axes[i].scatter(
+            data_to_plot['longitude'],
+            data_to_plot['latitude'],
+            c=data_to_plot['predicted_effect_size'],
+            cmap=plt.cm.Reds_r,
+            norm=norm,
+            s=10,
+            edgecolor='k',
+            linewidth=0.3,
+            transform=ccrs.PlateCarree(),
+        )
+
+        # Add title to the left of each axis
+        axes[i].set_title(name, loc='left', fontsize=8)
+
+    # Add overall colorbar for the collection of axes - position it inside the figure
+    plt.tight_layout()
+    plt.subplots_adjust(bottom=0.15)  # Make room for colorbar at bottom
+    cbar_ax = fig.add_axes([0.125, 0.1, 0.75, 0.02])  # [lower-left-x, lower-left-y, width, height]
+    fig.colorbar(sc, cax=cbar_ax, orientation='horizontal', label='Predicted Effect Size (Hedges\' g)')
+    cbar_ax.tick_params(labelsize=8)  # Adjust colorbar tick size
+
+    plt.suptitle('Spatial distribution of predicted effect sizes for SSP scenarios', fontsize=8)
+    plt.show()
+    
+    return fig, axes
+
+
+def plot_global_timeseries(data, plot_vars=['sst', 'ph'], plot_var_labels: list[str] = {'sst': "Sea surface temperature anomaly (°C)", 'ph': "pH$_{total}$ anomaly"}, time_discontinuity=2025, figsize=(10, 10), dpi=300):
+    """
+    Plots timeseries of global impacts for given scenarios and variables.
+
+    Parameters:
+        data (pd.DataFrame): DataFrame containing the data to plot.
+        plot_vars (list): List of variables to plot (e.g., ['sst', 'ph']).
+        time_discontinuity (int): Year separating historical and forecast data.
+        figsize (tuple): Size of the figure.
+        dpi (int): Resolution of the figure.
+    """
+    scenarios = data.scenario.unique()
+    # Calculate dimensions
+    total_rows = 1 + len(scenarios) + 1
+    n_cols = len(plot_vars)
+
+    # Create figure and GridSpec
+    fig = plt.figure(figsize=figsize, dpi=dpi)
+    gs = gridspec.GridSpec(total_rows, n_cols, height_ratios=[1] + [0.4] + [1] * len(scenarios))
+
+    # Create axes
+    ax = np.empty((total_rows, n_cols), dtype=object)
+    for i in range(total_rows):
+        if i == 1:  # Skip spacer row
+            continue
+        for j in range(n_cols):
+            ax[i, j] = fig.add_subplot(gs[i, j])
+
+    # Add annotations
+    fig.text(0.5, 0.92, "Predicted global conditions for each scenario", ha='center', fontsize=12)
+    fig.text(0.5, 0.7, "Resulting effect sizes, by scenario", ha='center', fontsize=12)
+
+    # Define colors and formatting
+    historic_colour, historic_alpha = 'darkgrey', 0.5
+    forecast_alpha, zero_effect_colour, zero_effect_alpha = 0.2, "black", 0.5
+    scenario_colours = sns.color_palette("Reds", len(scenarios))
+    scenario_colour_dict = {scenario: scenario_colours[i] for i, scenario in enumerate(scenarios)}
+
+    # Flatten axes for easier iteration
+    axes = [ax[i, j] for i in range(total_rows) for j in range(n_cols) if i != 1]
+
+    x_points = data['time_frame'].unique()
+    
+    for i, axis in enumerate(axes):
+        plot_var = plot_vars[i % n_cols]
+        data_subset = data[data['variable'] == plot_var]
+        if i < n_cols:  # Forecast trajectories
+            for scenario in scenarios:
+                forecast_subset = data_subset[data_subset['scenario'] == scenario]
+                x_fine, mean_spline = interpolate_spline(
+                    x_points, forecast_subset['anomaly_value_mean'])
+                x_fine, low_spline = interpolate_spline(
+                    x_points, forecast_subset['anomaly_value_p10'])
+                x_fine, up_spline = interpolate_spline(
+                    x_points, forecast_subset['anomaly_value_p90'])
+
+                # Masks and formatting
+                historic_mask = x_fine < time_discontinuity
+                forecast_mask = x_fine >= time_discontinuity
+
+                axis.plot(x_fine[forecast_mask], mean_spline[forecast_mask], '--', alpha=0.7, color=scenario_colour_dict[scenario])
+                axis.fill_between(x_fine[forecast_mask], low_spline[forecast_mask], up_spline[forecast_mask], alpha=forecast_alpha, color=scenario_colour_dict[scenario], linewidth=0)
+
+            axis.plot(x_fine[historic_mask], mean_spline[historic_mask], '--', color=historic_colour)
+            axis.fill_between(x_fine[historic_mask], low_spline[historic_mask], up_spline[historic_mask], alpha=historic_alpha, color=historic_colour, linewidth=0)
+
+            annotate_var = f'{plot_var_labels[plot_var]}'
+            axis.annotate(annotate_var, xy=(0.05, 1.1), xycoords='axes fraction', ha='left', fontsize=10)
+        else:  # Effect sizes
+            scenario = scenarios[(i - n_cols) // n_cols]
+            subset = data_subset[data_subset['scenario'] == scenario]
+
+            x_points = list(subset['time_frame'].unique())
+            x_fine, mean_spline = interpolate_spline(x_points, subset['predicted_effect_size_mean'])
+            x_fine, up_spline = interpolate_spline(x_points, subset['predicted_effect_size_p90'])
+            x_fine, low_spline = interpolate_spline(x_points, subset['predicted_effect_size_p10'])
+
+            axis.plot(x_fine[forecast_mask], mean_spline[forecast_mask], '--', alpha=0.7, color=scenario_colour_dict[scenario])
+            axis.fill_between(x_fine[forecast_mask], low_spline[forecast_mask], up_spline[forecast_mask], alpha=forecast_alpha, color=scenario_colour_dict[scenario], linewidth=0)
+            axis.plot(x_fine[historic_mask], mean_spline[historic_mask], '--', color=historic_colour)
+            axis.fill_between(x_fine[historic_mask], low_spline[historic_mask], up_spline[historic_mask], alpha=historic_alpha, color=historic_colour, linewidth=0)
+            axis.hlines(0, xmin=x_fine.min(), xmax=x_fine.max(), color=zero_effect_colour, alpha=zero_effect_alpha)
+
+    # Add legend
+    handles = [
+        plt.Line2D([], [], linestyle='--', color=historic_colour, label='Historical'),
+        plt.Line2D([], [], linestyle='-', color=zero_effect_colour, label='Zero effect', alpha=zero_effect_alpha)
+    ] + [
+        plt.Line2D([], [], linestyle='--', color=scenario_colours[i], label=scenario)
+        for i, scenario in enumerate(scenarios)
+    ]
+    fig.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, 0.98), ncol=len(handles), fontsize=8, frameon=False)
+
+    # Set y-labels, x-labels, limits, and formatting
+    global_min_ylim, global_max_ylim = float('inf'), float('-inf')
+
+    for i, axis in enumerate(axes):
+        if i >= n_cols:
+            ymin, ymax = axis.get_ylim()
+            global_min_ylim = min(global_min_ylim, ymin)
+            global_max_ylim = max(global_max_ylim, ymax)
+
+    for i, axis in enumerate(axes):
+        axis.tick_params(axis='both', labelsize=8)
+        axis.set_xlim(1995, 2100)
+        if i >= n_cols:
+            axis.set_ylabel("Effect size", fontsize=8)
+            axis.set_ylim(global_min_ylim, global_max_ylim)
+
+            if i < len(axes) - n_cols:
+                axis.set_xticks([])
+            else:
+                axis.set_xlabel("Year", fontsize=8)
+
+    plt.show()
+    return fig, ax
+
+
+def save_fig(
+    fig: object,
+    fig_name: str,
+    run_key: str = None,
+) -> None:
+    print('Saving figure to', config.fig_dir)
+    config.fig_dir.mkdir(parents=True, exist_ok=True)
+    run_key = run_key + "_" + utils.get_formatted_timestamp() if run_key else utils.get_formatted_timestamp()
+    
+    fig_fp = config.fig_dir / f"{fig_name}_{run_key}.png"
+    fig.savefig(fig_fp, dpi=300)
+    
+    print(f"Figure saved to {fig_fp}")
+    
+    
 ### DEPRECATED
 # def generic_plot_stacked_hist(df: pd.DataFrame, ax: matplotlib.axes.Axes, filter_col_name: str, filter_col_val: str | float, response_col_name: str, group_col_name: str, group_values_list: list, color_map: dict, title: str="no title") -> None:
 #     """
