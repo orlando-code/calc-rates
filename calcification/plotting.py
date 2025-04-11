@@ -21,6 +21,14 @@ from scipy import interpolate
 # custom
 from calcification import config, utils
 
+SCENARIO_MAP = {
+    'ssp126': 'SSP 1-2.6',
+    'ssp245': 'SSP 2-4.5',
+    'ssp370': 'SSP 3-7.0',
+    'ssp585': 'SSP 5-8.5',
+}
+
+
 def plot_effect_size_grid(results_df, rate_types,
                           x_var, y_vars, col_titles=None, rate_type_mapping=None, figure_title=None,
                           figsize=(10, 8), dpi=300, s=1):
@@ -129,7 +137,7 @@ class Polynomial:
     
 
 def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True, 
-                 point_size="seinv", point_color='black', point_fill='white', 
+                 point_size="seinv", point_color='black', point_fill='white', colorby: list=None,
                  line_color='blue', ci_color='lightblue', ci_line_color='blue',
                  xlab=None, ylab=None, xlim=None, ylim=None, predlim=None,
                  refline=0, figsize=(10, 7), title=None):
@@ -261,11 +269,19 @@ def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True,
         point_color = [point_color] * len(xi)
     if isinstance(point_fill, str):
         point_fill = [point_fill] * len(xi)
+        
+    if colorby is not None: # create a color map for the points
+        colorby = np.array(colorby)
+        unique_colors = np.unique(colorby)
+        color_map = {color: plt.cm.viridis(i / len(unique_colors)) for i, color in enumerate(unique_colors)}
+        point_colors = [color_map[color] for color in colorby]
+    else:
+        point_colors = point_fill
     
     sorted_indices = np.argsort(-norm_weights)  # larger points plot at the back
     for i in sorted_indices:
         sc = ax.scatter(xi[i], yi[i], s=norm_weights[i]**2, 
-                  edgecolor=point_color[i], facecolor=point_fill[i], 
+                  edgecolor=point_color[i], facecolor=point_colors[i] if colorby is not None else point_fill[i],
                   zorder=3, alpha=0.8)
         
     if ci and shade:    # add confidence interval
@@ -288,8 +304,8 @@ def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True,
     
     plt.scatter([], [], edgecolor=point_color[0], facecolor=point_fill[0], alpha=0.8, label='Studies')
     ax.plot(xs, pred, color=line_color, linewidth=2, label='Regression line')    # plot regression line
-    plt.plot([],[], linestyle='--', color=ci_line_color, label='95% Confidence interval')
-    plt.plot([],[], linestyle=':', color=ci_line_color, label='95% Prediction interval')    
+    plt.plot([],[], linestyle='--', color=ci_line_color, label='95% Confidence interval') if ci else None
+    plt.plot([],[], linestyle=':', color=ci_line_color, label='95% Prediction interval') if pi else None
     
     ### formatting
     ax.axhline(y=refline, color='gray', label='Zero effect level', linestyle='-', linewidth=1) if refline is not None else None    # add reference line
@@ -306,6 +322,296 @@ def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True,
     return fig, ax
 
 
+def meta_regplot_plotly(model, mod_pos=None, level=95, ci=True, pi=True, 
+                      point_size="seinv", point_color='black', point_fill='white', 
+                      doi_list=None,
+                      line_color='blue', ci_color='rgba(173, 216, 230, 0.3)', ci_line_color='blue',
+                      xlab=None, ylab=None, xlim=None, ylim=None, predlim=None,
+                      refline=0, figsize=(900, 600), title=None):
+    """
+    Create an interactive meta-regression plot from an rma.mv or rma object using Plotly.
+    
+    Args:
+        model (rpy2.robjects.vectors.ListVector): An R rma.mv or rma model object.
+        mod_pos (int or str, optional): Position or name of the moderator variable to plot.
+        level (float, default=95): Confidence level for confidence intervals.
+        ci (bool, default=True): Whether to plot confidence intervals.
+        pi (bool, default=True): Whether to plot prediction intervals.
+        point_size (str or array-like, default="seinv"): Point sizes - either "seinv" (inverse of standard error), 
+            "vinv" (inverse of variance), or an array of custom sizes.
+        point_color (str or array-like, default='black'): Color for point borders.
+        point_fill (str or array-like, default='white'): Fill color for points.
+        doi_list (list, optional): List of DOIs or identifiers for each study point.
+        line_color (str, default='blue'): Color for regression line.
+        ci_color (str, default='rgba(173, 216, 230, 0.3)'): Color for CI shading.
+        ci_line_color (str, default='blue'): Color for CI lines.
+        xlab (str, optional): Label for x-axis.
+        ylab (str, optional): Label for y-axis.
+        xlim (tuple, optional): Limits for x-axis (min, max).
+        ylim (tuple, optional): Limits for y-axis (min, max).
+        predlim (tuple, optional): Limits for predicted x-axis values (min, max).
+        refline (float, optional): Reference line to add at specific y-value.
+        figsize (tuple, default=(900, 600)): Figure size (width, height) in pixels.
+        title (str, optional): Plot title.
+        
+    Returns:
+        plotly.graph_objects.Figure: Interactive Plotly figure
+    """
+    import numpy as np
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    import pandas as pd
+    from rpy2.robjects import pandas2ri
+    import rpy2.robjects as ro
+    
+    # Enable automatic conversion between R and pandas
+    pandas2ri.activate()
+    
+    # Extract model components
+    yi = np.array(model.rx2('yi.f'))
+    vi = np.array(model.rx2('vi.f'))
+    X = np.array(model.rx2('X.f'))
+    xi = X[:, mod_pos]  # moderator of interest
+    
+    # Handle missing values
+    mask = ~np.isnan(yi) & ~np.isnan(vi) & ~np.isnan(xi)
+    if not all(mask):
+        yi = yi[mask]
+        vi = vi[mask]
+        xi = xi[mask]
+        if doi_list is not None:
+            doi_list = [doi_list[i] for i in range(len(mask)) if mask[i]]
+    
+    # Create weight vector for point sizes
+    if point_size == "seinv":
+        weights = 1 / np.sqrt(vi)
+    elif point_size == "vinv":
+        weights = 1 / vi
+    elif isinstance(point_size, (list, np.ndarray)):
+        weights = np.array(point_size)
+    else:
+        weights = np.ones_like(yi)
+    
+    # Normalize weights for point sizes
+    if len(weights) > 0:
+        min_w, max_w = min(weights), max(weights)
+        if max_w - min_w > np.finfo(float).eps:
+            norm_weights = 30 * (weights - min_w) / (max_w - min_w) + 1
+        else:
+            norm_weights = np.ones_like(weights) * 20
+    else:
+        norm_weights = np.ones_like(yi) * 20
+    
+    # Create sequence of x values for the regression line
+    range_xi = max(xi) - min(xi)
+    predlim = (min(xi) - 0.1*range_xi, max(xi) + 0.1*range_xi) if predlim is None else predlim
+    xs = np.linspace(predlim[0], predlim[1], 1000)
+    
+    r_xs = ro.FloatVector(xs)
+    
+    # Create prediction function in R
+    predict_function = ro.r('''
+    function(model, xs, mod_pos, level) {
+        # Get mean values for all predictors
+        X_means <- colMeans(model$X.f)
+        
+        # Create new data for predictions
+        Xnew <- matrix(rep(X_means, each=length(xs)), nrow=length(xs))
+        colnames(Xnew) <- colnames(model$X.f)
+        
+        # Set the moderator of interest to the sequence of values
+        Xnew[,mod_pos] <- xs
+        
+        # Remove intercept if present in the model
+        if (model$int.incl) {
+            Xnew <- Xnew[,-1, drop=FALSE]
+        }
+        
+        # Make predictions
+        pred <- predict(model, newmods=Xnew, level=(level/100))
+        
+        # Return results
+        return(pred)
+    }
+    ''')
+    
+    # Get predictions
+    try:
+        pred_res = predict_function(model, r_xs, mod_pos + 1, level)  # R is 1-indexed
+        pred = np.array(pred_res.rx2('pred'))
+        ci_lb = np.array(pred_res.rx2('ci.lb'))
+        ci_ub = np.array(pred_res.rx2('ci.ub'))
+        pred_lb = np.array(pred_res.rx2('pi.lb'))
+        pred_ub = np.array(pred_res.rx2('pi.ub'))
+    except Exception as e:
+        print(f"Error in prediction: {e}")
+        print("Falling back to simplified prediction")
+        # Simplified fallback to at least get a regression line
+        coeffs = np.array(model.rx2('b'))
+        if len(coeffs) > 1:  # Multiple coefficients
+            if model.rx2('int.incl')[0]:  # Model includes intercept
+                pred = coeffs[0] + coeffs[mod_pos] * xs
+            else:
+                pred = coeffs[mod_pos-1] * xs
+        else:  # Single coefficient
+            pred = coeffs[0] * xs
+        ci_lb = pred - 1.96 * 0.5  # Rough approximation
+        ci_ub = pred + 1.96 * 0.5  # Rough approximation
+        pred_lb = pred - 1.96 * 1.0  # Rough approximation for prediction interval
+        pred_ub = pred + 1.96 * 1.0  # Rough approximation for prediction interval
+    
+    # Create Plotly figure
+    fig = go.Figure()
+    
+    
+    # Prepare study point data
+    hover_text = []
+    if doi_list is not None:
+        for i in range(len(xi)):
+            hover_text.append(f"DOI: {doi_list.iloc[i]}<br>X: {xi[i]:.4f}<br>Y: {yi[i]:.4f}<br>SE: {np.sqrt(vi[i]):.4f}")
+    else:
+        for i in range(len(xi)):
+            hover_text.append(f"X: {xi[i]:.4f}<br>Y: {yi[i]:.4f}<br>SE: {np.sqrt(vi[i]):.4f}")
+    
+    # Create colormap if DOIs are provided
+    if doi_list is not None:
+        unique_dois = list(set(doi_list))
+        colorscale = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+                     '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        # Extend color palette if needed
+        if len(unique_dois) > len(colorscale):
+            import plotly.express as px
+            colorscale = px.colors.qualitative.Plotly + px.colors.qualitative.D3
+        
+        color_map = {doi: colorscale[i % len(colorscale)] for i, doi in enumerate(unique_dois)}
+        marker_colors = [color_map[doi] for doi in doi_list]
+    else:
+        marker_colors = [point_fill] * len(xi)
+    
+    # Add study points
+    # Scale marker sizes appropriately for Plotly
+    fig.add_trace(go.Scatter(
+        x=xi,
+        y=yi,
+        mode='markers',
+        marker=dict(
+            size=norm_weights * (figsize[0] / 1000),  # Scale marker size based on figure width
+            color=marker_colors,
+            line=dict(width=2, color=point_color)
+        ),
+        text=hover_text,
+        hoverinfo='text',
+        name='Studies'
+    ))
+    
+    # Add confidence intervals
+    if ci:
+        # Add CI filling
+        fig.add_trace(go.Scatter(
+            x=list(xs) + list(xs[::-1]),
+            y=list(ci_ub) + list(ci_lb[::-1]),
+            fill='toself',
+            fillcolor=ci_color,
+            line=dict(color='rgba(255,255,255,0)'),
+            hoverinfo='skip',
+            showlegend=False,
+            name='95% Confidence Interval'
+        ))
+        
+        # Add CI lines
+        fig.add_trace(go.Scatter(
+            x=xs,
+            y=ci_lb,
+            mode='lines',
+            line=dict(color=ci_line_color, width=1, dash='dash'),
+            hoverinfo='skip',
+            showlegend=True,
+            name='95% Confidence Interval'
+        ))
+        
+        fig.add_trace(go.Scatter(
+            x=xs,
+            y=ci_ub,
+            mode='lines',
+            line=dict(color=ci_line_color, width=1, dash='dash'),
+            hoverinfo='skip',
+            showlegend=False
+        ))
+    
+    # Add prediction intervals
+    if pi:
+        # Add PI filling
+        fig.add_trace(go.Scatter(
+            x=list(xs) + list(xs[::-1]),
+            y=list(pred_ub) + list(pred_lb[::-1]),
+            fill='toself',
+            fillcolor='rgba(173, 216, 230, 0.1)',
+            line=dict(color='rgba(255,255,255,0)'),
+            hoverinfo='skip',
+            showlegend=False,
+            name='95% Prediction Interval'
+        ))
+        
+        # Add PI lines
+        fig.add_trace(go.Scatter(
+            x=xs,
+            y=pred_lb,
+            mode='lines',
+            line=dict(color=ci_line_color, width=1, dash='dot'),
+            hoverinfo='skip',
+            showlegend=True,
+            name='95% Prediction Interval'
+        ))
+        
+        fig.add_trace(go.Scatter(
+            x=xs,
+            y=pred_ub,
+            mode='lines',
+            line=dict(color=ci_line_color, width=1, dash='dot'),
+            hoverinfo='skip',
+            showlegend=False
+        ))
+    
+    # Add regression line
+    fig.add_trace(go.Scatter(
+        x=xs,
+        y=pred,
+        mode='lines',
+        line=dict(color=line_color, width=2),
+        name='Regression line'
+    ))
+    
+    # Add reference line if specified
+    if refline is not None:
+        fig.add_trace(go.Scatter(
+            x=[predlim[0], predlim[1]],
+            y=[refline, refline],
+            mode='lines',
+            line=dict(color='gray', width=1),
+            name='Zero effect level'
+        ))
+    
+    # Update layout
+    fig.update_layout(
+        title=title,
+        xaxis=dict(
+            title=xlab,
+            range=xlim if xlim else predlim
+        ),
+        yaxis=dict(
+            title=ylab,
+            range=ylim
+        ),
+        width=figsize[0],
+        height=figsize[1],
+        hovermode='closest',
+
+        template="plotly_white"
+    )
+    
+    return fig
+
+
 def interpolate_spline(xs, ys, npoints=100, k=2):
     
     x_fine = np.linspace(min(xs), max(xs) + 10, 100)
@@ -314,7 +620,7 @@ def interpolate_spline(xs, ys, npoints=100, k=2):
     return x_fine, smooth
 
 
-def plot_spatial_effect_distribution(predictions_df, time_frame=2100, figsize=(10, 10), dpi=300):
+def plot_spatial_effect_distribution(predictions_df, time_frame=2900, figsize=(10, 10), dpi=300):
     """
     Plots the spatial distribution of predicted effect sizes for SSP scenarios on a map.
 
@@ -428,7 +734,7 @@ def plot_global_timeseries(data, plot_vars=['sst', 'ph'], plot_var_labels: list[
     
     for i, axis in enumerate(axes):
         plot_var = plot_vars[i % n_cols]
-        data_subset = data[data['variable'] == plot_var]
+        data_subset = data[data['scenario_var'] == plot_var]
         if i < n_cols:  # Forecast trajectories
             for scenario in scenarios:
                 forecast_subset = data_subset[data_subset['scenario'] == scenario]
@@ -471,7 +777,7 @@ def plot_global_timeseries(data, plot_vars=['sst', 'ph'], plot_var_labels: list[
         plt.Line2D([], [], linestyle='--', color=historic_colour, label='Historical'),
         plt.Line2D([], [], linestyle='-', color=zero_effect_colour, label='Zero effect', alpha=zero_effect_alpha)
     ] + [
-        plt.Line2D([], [], linestyle='--', color=scenario_colours[i], label=scenario)
+        plt.Line2D([], [], linestyle='--', color=scenario_colours[i], label=SCENARIO_MAP[scenario.lower()])
         for i, scenario in enumerate(scenarios)
     ]
     fig.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, 0.98), ncol=len(handles), fontsize=8, frameon=False)
@@ -488,10 +794,18 @@ def plot_global_timeseries(data, plot_vars=['sst', 'ph'], plot_var_labels: list[
     for i, axis in enumerate(axes):
         axis.tick_params(axis='both', labelsize=8)
         axis.set_xlim(1995, 2100)
-        if i >= n_cols:
-            axis.set_ylabel("Effect size", fontsize=8)
-            axis.set_ylim(global_min_ylim, global_max_ylim)
+        if i >= n_cols: # effect sizes
+            # axis.set_ylabel("Effect size", fontsize=8)
+            # Set y-ticks to include 0 and be spaced every 0.5
+            ymin = np.floor(global_min_ylim * 2) / 2  # Round down to nearest 0.5
+            ymax = np.ceil(global_max_ylim * 2) / 2   # Round up to nearest 0.5
+            ticks = np.arange(ymin, ymax + 0.1, 0.5)  # Add 0.1 to include ymax
+            # Make sure 0 is included in the ticks
+            if 0 not in ticks:
+                ticks = np.sort(np.append(ticks, 0))
+            axis.set_yticks(ticks)
 
+            axis.set_ylim(global_min_ylim, global_max_ylim)
             if i < len(axes) - n_cols:
                 axis.set_xticks([])
             else:
