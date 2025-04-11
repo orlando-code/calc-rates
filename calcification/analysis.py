@@ -199,9 +199,19 @@ def calc_cooks_distance(data: pd.Series) -> pd.Series:
     """
     Calculate Cook's distance for a given data series.
     """
+    # if data is not numeric
+    if not pd.api.types.is_numeric_dtype(data):
+        # convert data to numeric
+        data = pd.to_numeric(data, errors='coerce')
+    
     # fit OLS model
     X = sm.add_constant(data)
-    model = sm.OLS(data, X).fit()
+    try:
+        model = sm.OLS(data, X).fit()
+    except ValueError:
+        # convert data to numeric if it is not already
+        data = pd.to_numeric(data, errors='coerce')
+        model = sm.OLS(data, X).fit()
     # calculate Cook's distance
     influence = model.get_influence()
     cooks_d = influence.cooks_distance[0]
@@ -444,7 +454,9 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
     effect_cols = ['delta_t', 'delta_ph', 
                    'cohens_d', 'cohens_d_var', 'hedges_g', 'hedges_g_var',
                    'relative_calcification', 'relative_calcification_var',
-                   'absolute_calcification', 'absolute_calcification_var',]
+                   'absolute_calcification', 'absolute_calcification_var',
+                   'st_relative_calcification', 'st_relative_calcification_var',
+                   'st_absolute_calcification', 'st_absolute_calcification_var',]
     for col in effect_cols:
         result_df[col] = np.nan
     
@@ -529,8 +541,7 @@ def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
         'calcification': ['mean', 'std'],
         'n': 'count'
     })
-    control_row = df.iloc[0]
-    control_row = control_row.copy()
+    control_row = df.iloc[0].copy()
     control_row['calcification'] = aggregation['calcification']['mean']
     control_row['calcification_sd'] = aggregation['calcification']['std']
     control_row['n'] = aggregation['n']['count']
@@ -550,6 +561,9 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     """
     mu_t, sd_t, n_t = treatment_row['calcification'], treatment_row['calcification_sd'], treatment_row['n']
     mu_c, sd_c, n_c = control_data['calcification'], control_data['calcification_sd'], control_data['n']
+    # standardised values
+    s_mu_t, s_sd_t, _ = treatment_row['st_calcification'], treatment_row['st_calcification_sd'], treatment_row['n']
+    s_mu_c, s_sd_c, _ = control_data['st_calcification'], control_data['st_calcification_sd'], control_data['n']
     t_in_c, ph_c = control_data['temp'], control_data['phtot']
     
     if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
@@ -566,12 +580,19 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     
     abs_effect, abs_var = calc_absolute_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)  # absolute differences
     
+    # absolute differences between standardised calcification
+    st_abs_effect, st_abs_var = calc_absolute_rate(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t)
+    # relative differences between standardised calcification
+    st_rc_effect, st_rc_var = (s_mu_t, s_sd_t) if isinstance(treatment_row['st_calcification_unit'], str) and 'delta' in treatment_row['st_calcification_unit'] else calc_relative_rate(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t)
+    
     # assign effect sizes
     row_copy.update({
         'cohens_d': d_effect, 'cohens_d_var': d_var,
         'hedges_g': hg_effect, 'hedges_g_var': hg_var,
         'relative_calcification': rc_effect, 'relative_calcification_var': rc_var,
-        'absolute_calcification': abs_effect, 'absolute_calcification_var': abs_var
+        'absolute_calcification': abs_effect, 'absolute_calcification_var': abs_var,
+        'st_relative_calcification': st_rc_effect, 'st_relative_calcification_var': st_rc_var,
+        'st_absolute_calcification': st_abs_effect, 'st_absolute_calcification_var': st_abs_var,
     })
     
     # calculate metadata
@@ -582,6 +603,10 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     row_copy['control_calcification_sd'] = sd_c
     row_copy['treatment_calcification'] = mu_t
     row_copy['treatment_calcification_sd'] = sd_t
+    row_copy['st_control_calcification'] = s_mu_c
+    row_copy['st_control_calcification_sd'] = s_sd_c
+    row_copy['st_treatment_calcification'] = s_mu_t
+    row_copy['st_treatment_calcification_sd'] = s_sd_t
     row_copy['treatment_n'] = n_t
     row_copy['control_n'] = n_c
     
@@ -628,7 +653,16 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     # save results
     save_cols = utils.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
     effects_df['year'] = pd.to_datetime(effects_df['year']).dt.strftime('%Y')  # cast year from pd.timestamp to integer
-    effects_df[save_cols].to_csv(config.tmp_data_dir / f"effect_sizes.csv", index=False)
+    # Check for missing columns in save_cols
+    missing_columns = [col for col in save_cols if col not in effects_df.columns]
+    if missing_columns:
+        print(f"\nWARNING: The following columns in save_cols are not in effects_df: {missing_columns}")
+        # Filter save_cols to only include columns that exist in effects_df
+        available_save_cols = [col for col in save_cols if col in effects_df.columns]
+        effects_df[available_save_cols].to_csv(config.tmp_data_dir / f"effect_sizes.csv", index=False)
+    else:
+        effects_df[save_cols].to_csv(config.tmp_data_dir / f"effect_sizes.csv", index=False)
+
     print(f"\nShape of dataframe with effect sizes: {effects_df.shape}")
     
     return effects_df
@@ -765,11 +799,13 @@ def generate_formula(effect_type: str, treatment: str=None, variables: list[str]
     return formula + " - 1" if not include_intercept else formula
 
 
-def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', treatment=None, necessary_vars: list[str] = None, formula: str=None) -> pd.DataFrame:
+def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_var=None, treatment=None, necessary_vars: list[str] = None, formula: str=None) -> pd.DataFrame:
     # TODO: get necessary variables more dynamically (probably via a mapping including factor)
     data = df.copy()
-    # specify model
     
+    effect_type_var = effect_type_var or f"{effect_type}_var"
+    
+    ### specify model
     if not formula:
         formula = generate_formula(effect_type, treatment, variables=necessary_vars)
 
@@ -778,7 +814,7 @@ def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', treatment=No
         data = data[data["treatment"] == treatment]
     n_investigation = len(data)
     # remove nans for subset effect_type
-    required_columns = [effect_type, f"{effect_type}_var", 'original_doi', 'ID'] + (necessary_vars or [])
+    required_columns = [effect_type, effect_type_var, 'original_doi', 'ID'] + (necessary_vars or [])
     data = data.dropna(subset=required_columns)
     n_nans = n_investigation - len(data)
     
@@ -818,6 +854,7 @@ import rpy2.robjects as ro
 def run_metafor_model(
     df: pd.DataFrame,
     effect_type: str = 'hedges_g',
+    effect_type_var: str = None,
     treatment: str = None,
     necessary_vars: list[str] = None,
     formula: str = None,
@@ -835,8 +872,9 @@ def run_metafor_model(
     Returns:
         ro.vectors.DataFrame: The results of the metafor model.
     """
+    effect_type_var = effect_type_var or f"{effect_type}_var"
     # preprocess the dataframe
-    formula, df = preprocess_df_for_meta_model(df, effect_type, treatment, necessary_vars, formula)
+    formula, df = preprocess_df_for_meta_model(df, effect_type, effect_type_var, treatment, necessary_vars, formula)
     print(f'Using formula {formula}')
     # df, outliers = remove_cooks_outliers(df, effect_type, nparams=nparams)
     
@@ -847,7 +885,7 @@ def run_metafor_model(
     print('\nRunning metafor model...')
     model = metafor.rma_mv(
         yi=ro.FloatVector(df_r.rx2(effect_type)),
-        V=ro.FloatVector(df_r.rx2(f"{effect_type}_var")),
+        V=ro.FloatVector(df_r.rx2(effect_type_var)),
         data=df_r,
         mods=ro.Formula(formula),
         random=ro.Formula("~ 1 | original_doi/ID")
@@ -878,9 +916,9 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
             for time_frame in time_frames:
                 if time_frame == 1995:
                     base = scenario_df[f'mean_historical_{scenario_var}_30y_ensemble'].mean()
-                    mean_scenario = base
-                    p10_scenario = scenario_df[f'percentile_10_historical_{scenario_var}_30y_ensemble'].mean()
-                    p90_scenario = scenario_df[f'percentile_90_historical_{scenario_var}_30y_ensemble'].mean()
+                    mean_scenario = base - base # think this causes issues?
+                    p10_scenario = scenario_df[f'percentile_10_historical_{scenario_var}_30y_ensemble'].mean() - base
+                    p90_scenario = scenario_df[f'percentile_90_historical_{scenario_var}_30y_ensemble'].mean() - base
                 else:
                     time_scenario_df = scenario_df[scenario_df['time_frame'] == time_frame]
                     mean_scenario = time_scenario_df[f'mean_{scenario_var}_20y_anomaly_ensemble'].mean()
