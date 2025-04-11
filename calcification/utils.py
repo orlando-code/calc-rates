@@ -86,7 +86,7 @@ def process_raw_data(df: pd.DataFrame, require_results: bool=True, selection_dic
     df = uniquify_multilocation_study_dois(df)  # for dois with multiple locations
     df = locations.assign_coordinates(df)  # assign coordinates to locations
     locations.save_locations_information(df)    # save locations information
-    df = locations.assign_ecoregions(df)  # assign ecoregions to locations
+    df = locations.assign_ecoregions(df)  # assign ecoregions to locations  # TODO: ecoregions losing rows?
     
     # create family, genus, species, and functional group columns from species binomials
     df = assign_taxonomical_info(df)
@@ -178,6 +178,11 @@ def map_units(df: pd.DataFrame) -> pd.DataFrame:
     map_dict = utils.read_yaml(config.resources_dir / "mapping.yaml")["unit_map"]
     inverted_map = {val: key for key, values in map_dict.items() for val in values}
     df['st_calcification_unit'] = df['calcification_unit'].map(inverted_map)
+    # if any calcification units are not in the map, raise error
+    if df['st_calcification_unit'].isnull().any():
+        missing_units = df.loc[df['st_calcification_unit'].isnull(), 'calcification_unit'].unique()
+        print(f"Missing units in mapping: {missing_units}") # TODO: replace with error
+    
     return df
 
 
@@ -324,7 +329,7 @@ def assign_functional_group(taxon_info):
     binomial = taxon_info.get('species', '').lower()
 
     if genus in ['jania', 'amphiroa']:
-        return 'Articulate coralline algae'
+        return 'Articulated coralline algae'
     
     # Crustose coralline algae
     if family in ['corallinaceae', 'sporolithaceae', 'hapalidiaceae', 'hydrolithaceae', 'lithophyllaceae', 'mesophyllumaceae', 'spongitidaceae', 'porolithaceae']:
@@ -386,7 +391,7 @@ def assign_core_groupings(taxon_info: dict) -> str:
     
     if taxon_info['functional_group'] in ['Crustose coralline algae', 'Calcareous algae'] or 'calcareous' in taxon_info['functional_group'].lower():
         return 'CCA'        
-    elif taxon_info['functional_group'] in ['Fleshy algae', 'Turf algae', 'Articulate coralline algae']:
+    elif taxon_info['functional_group'] in ['Fleshy algae', 'Turf algae', 'Articulated coralline algae']:
         return 'Other algae'
     elif taxon_info['functional_group'] in ['Hard coral', 'Soft coral']:
         return 'Coral'
@@ -733,17 +738,17 @@ def rate_conversion(
     - New standardized rate unit
     - Converted error value (if rate_error was provided)
     """
-    if rate_unit is None or rate_unit != rate_unit: # handle nans
+    if rate_unit is None or rate_unit != rate_unit: # handle nans in rate_unit
         if rate_error is not None:
-            return rate_val, "", rate_error
-        return rate_val, ""
+            return rate_val, rate_error, ""
+        return rate_val, "", ""
     
     try:    # split into numerator and denominator
         num_part, denom_part = parse_unit_components(rate_unit)
     except ValueError as e:
         if rate_error is not None:
-            return rate_val, str(e), rate_error
-        return rate_val, str(e)
+            return rate_val, rate_error, str(e)
+        return rate_val, "", str(e)
     
     original_val = rate_val    
     rate_val, new_num = convert_numerator(num_part, rate_val)    
@@ -776,9 +781,9 @@ def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd
     df = pd.read_csv(fp).drop(columns=['data_ID', 'Unnamed: 0']).set_index('doi')
     # rename columns to be less wordy
     df = df.replace(
-        {"2021_2040": 2040,
-        "2041_2060": 2060,
-        "2081_2100": 2100}
+        {"2021_2040": 2030,
+        "2041_2060": 2050,
+        "2081_2100": 2090}
         ).infer_objects(copy=False)
     
     var = 'ph' if 'ph' in str(fp.name) else 'sst' if 'sst' in str(fp.name) else None
