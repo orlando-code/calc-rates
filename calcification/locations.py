@@ -81,7 +81,6 @@ def assign_ecoregions(df: pd.DataFrame) -> pd.DataFrame:
     # load ecoregion data
     ecoregions_gdf = gpd.read_file(config.climatology_data_dir / "MEOW/meow_ecos.shp")
     ecoregions_gdf = ecoregions_gdf.to_crs(epsg=4326)
-    df = df.dropna(subset=["latitude", "longitude"])
     # generate geometry columnn and convert to geodataframe for matching
     df.loc[:, "geometry"] = gpd.points_from_xy(df["longitude"], df["latitude"])
     df = gpd.GeoDataFrame(df, geometry="geometry", crs=4326)
