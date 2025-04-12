@@ -669,11 +669,14 @@ def convert_numerator(num_part: str, rate_val: float) -> tuple[float, str]:
     if 'mol' in num_part_clean: # molar units
         prefix, base = extract_prefix(num_part_clean, 'mass')
         rate_val *= MOLAR_MASS_CACO3 * PREFIXES.get(prefix, 1.0)
-        new_unit = 'g'
+        # convert to mg
+        rate_val *= 1e-3
+        new_unit = 'mg'
     elif 'g' in num_part_clean: # mass units
         prefix, base = extract_prefix(num_part_clean, 'mass')
         rate_val *= PREFIXES.get(prefix, 1.0)
-        new_unit = 'g'
+        rate_val *= 1e-3   # convert to mg
+        new_unit = 'mg'
     elif 'm2' in num_part_clean:    # area units
         prefix, base = extract_prefix(num_part_clean, 'area')
         rate_val *= PREFIXES.get(prefix, 1.0) ** 2
