@@ -1,23 +1,19 @@
+# general
 import numpy as np
 import pandas as pd
-import xarray as xa
-from itertools import combinations
 from tqdm.auto import tqdm
 
 import statsmodels.api as sm
 
 # R
 import rpy2.robjects as ro
-from rpy2.robjects import pandas2ri, FloatVector
-import rpy2.robjects.packages as rpackages
-
-metafor = rpackages.importr("metafor")
-base = rpackages.importr("base")
-
+# from rpy2.robjects import pandas2ri
+# import rpy2.robjects.packages as rpackages
+metafor = ro.packages.importr("metafor")
+base = ro.packages.importr("base")
 
 # custom
 from calcification import utils, config
-import cbsyst.helpers as cbh
 
 ### core analysis calculations
 def calc_relative_rate(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None, epsilon=1e-6):
@@ -226,301 +222,22 @@ def calc_cooks_threshold(data: pd.Series, nparams: int) -> float:
     n = len(data)
     threshold = 2 * np.sqrt((nparams + 1) / (n - nparams - 1))
     return threshold
-    
-
-### determining treatment conditions
-def determine_control_conditions(df) -> dict:
-    """Identify the rows corresponding to min temperature and/or max pH.
-    
-    Args:
-        df (pd.DataFrame): Input dataframe with columns 'doi', 'temp', 'phtot', etc.
-        
-    Returns:
-        dict: Dictionary with control conditions for each treatment group.
-    """
-    grouped = df.groupby('treatment_group')
-
-    control_treatments = {}
-
-    for group, sub_df in grouped:
-        group = int(group)  # convert group to integer for semantics
-        min_temp = sub_df.loc[sub_df['temp'].idxmin()]['temp'] if not any(sub_df['phtot'].isna()) else None # Row with minimum temperature
-        max_pH = sub_df.loc[sub_df['phtot'].idxmax()]['phtot'] if not any(sub_df['phtot'].isna()) else None # Row with maximum pH
-
-        control_treatments[group] = {
-            'control_t_in': min_temp,
-            'control_phtot': max_pH,
-        }
-
-    return control_treatments
 
 
-def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: float, t_mapping: dict, ph_mapping: dict, irr_group: float) -> pd.DataFrame:
-    
-    # apply classification to each row in this group
-    for idx in df.index:
-        row = df.loc[idx]
-        
-        # get temperature cluster level (0 is control)
-        t_level = None
-        if not np.isnan(row['temp']) and control_T is not None:
-            t_cluster_idx = t_mapping.get(row['temp'])
-            control_cluster_idx = t_mapping.get(control_T)
-            if t_cluster_idx is not None and control_cluster_idx is not None:
-                t_level = t_cluster_idx - control_cluster_idx
-        
-        # get pH cluster level (0 is control)
-        ph_level = None
-        if not np.isnan(row['phtot']) and control_pH is not None:
-            ph_cluster_idx = ph_mapping.get(row['phtot'])
-            control_cluster_idx = ph_mapping.get(control_pH)
-            if ph_cluster_idx is not None and control_cluster_idx is not None:
-                ph_level = control_cluster_idx - ph_cluster_idx  # reverse order since higher pH is control
-        
-        # determine clusters for cases where there is only one of t or ph
-        if t_level is None and ph_level is not None:
-            t_level = 0
-        if ph_level is None and t_level is not None:
-            ph_level = 0
-                    
-        # determine if values are in control clusters   # TODO: not currently capturing rare case when studies have both T and pH varied from control with no intermediary values
-        is_control_T = t_level == 0 if t_level is not None else False
-        is_control_pH = ph_level == 0 if ph_level is not None else False
-        
-        # classify the treatment
-        if is_control_T and is_control_pH:
-            treatment = 'cTcP'
-        elif is_control_T:
-            treatment = 'cTtP'
-        elif is_control_pH:
-            treatment = 'tTcP'
-        elif not (is_control_T or is_control_pH):
-            treatment = 'tTtP'
-        else:
-            treatment = 'uncertain'
-            
-        # Update the treatment info in the result dataframe
-        df.loc[idx, 'treatment_group'] = treatment
-        df.loc[idx, 'treatment_level_t'] = t_level if t_level is not None else np.nan
-        df.loc[idx, 'treatment_level_ph'] = ph_level if ph_level is not None else np.nan
-        df.loc[idx, 'irr_group'] = irr_group
-
-    return df
-
-
-def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.05, irr_atol: float=30) -> pd.DataFrame:
-    """
-    Assign treatment groups to each row based on temperature and pH values,
-    recognizing multiple levels of treatments.
-    
-    Args:
-        df (pd.DataFrame): Input dataframe with columns 'doi', 'temp', 'phtot', etc.
-        t_atol (float): Absolute tolerance for temperature comparison.
-        pH_atol (float): Absolute tolerance for pH comparison.
-        irr_rtol (float): Relative tolerance for irradiance grouping.
-        
-    Returns:
-        pd.DataFrame: Original dataframe with added 'treatment_group' and 'treatment_level' columns.
-    """
-    result_df = df.copy()   # avoid modifying original dataframe
-    
-    # initialize treatment columns
-    result_df['treatment_group'] = pd.Series(dtype='object')
-    result_df['treatment_level_t'] = pd.Series(dtype='object')
-    result_df['treatment_level_ph'] = pd.Series(dtype='object')
-    result_df['irr_group'] = pd.Series(dtype='object')
-    
-    for study_doi, study_df in tqdm(df.groupby('doi'), desc="Assigning treatment groups", total=len(df['doi'].unique())):
-        study_with_irr_groups = group_irradiance(study_df, atol=irr_atol)   # group irradiance treatments
-        
-        # process each (irradiance group, species) combination separately
-        for (irr_group, species), group_df in study_with_irr_groups.groupby(['irr_group', 'species_types']):
-            if len(group_df) <= 1:  # skip if too few samples
-                continue
-                
-            # find control values (min T, max pH)
-            control_T = group_df['temp'].min() if not group_df['temp'].isna().all() else None
-            control_pH = group_df['phtot'].max() if not group_df['phtot'].isna().all() else None
-            
-            # cluster temperature values
-            t_values = group_df['temp'].dropna().unique()
-            t_clusters = cluster_values(t_values, t_atol)
-            
-            # cluster pH values
-            ph_values = group_df['phtot'].dropna().unique()
-            ph_clusters = cluster_values(ph_values, pH_atol)
-            
-            # map each value to its cluster index
-            t_mapping = {val: cluster_idx for cluster_idx, cluster in enumerate(t_clusters) for val in cluster}
-            ph_mapping = {val: cluster_idx for cluster_idx, cluster in enumerate(ph_clusters) for val in cluster}
-            
-            treatments_df = assign_treatment_groups(group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group)
-
-            # fill in result_df values with results from treatments_df
-            result_df = result_df.combine_first(treatments_df)
-            
-    result_df['treatment'] = result_df['treatment_group'].apply(
-        lambda x: 'temp_phtot' if isinstance(x, str) and 'tT' in x and 'tP' in x else 
-                 'temp' if isinstance(x, str) and 'tT' in x else 
-                 'phtot' if isinstance(x, str) and 'tP' in x else 
-                 'control' if isinstance(x, str) and x == 'cTcP' else np.nan
+def remove_cooks_outliers(df: pd.DataFrame, effect_type: str = 'hedges_g', nparams: int=3) -> pd.DataFrame:
+    data = df.copy()
+    # calculate cooks distance
+    cooks_threshold = calc_cooks_threshold(data[effect_type], nparams=nparams)
+    # calculate cooks distance
+    data["cooks_d"] = calc_cooks_distance(
+        data[effect_type]
     )
-    return result_df
 
-
-def assign_treatment_groups_multilevel_fast(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.1, irr_atol: float=30) -> pd.DataFrame:
-    """
-    Assign treatment groups to each row based on temperature and pH values,
-    recognizing multiple levels of treatments.
-    
-    Args:
-        df (pd.DataFrame): Input dataframe with columns 'doi', 'temp', 'phtot', etc.
-        t_atol (float): Absolute tolerance for temperature comparison.
-        pH_atol (float): Absolute tolerance for pH comparison.
-        irr_atol (float): Absolute tolerance for irradiance grouping.
-        
-    Returns:
-        pd.DataFrame: Original dataframe with added 'treatment_group' and 'treatment_level' columns.
-    """
-    result_df = df.copy()   # avoid modifying original dataframe
-    
-    # Pre-initialize columns with correct types
-    result_df['treatment_group'] = pd.NA
-    result_df['treatment_level_t'] = pd.NA
-    result_df['treatment_level_ph'] = pd.NA
-    result_df['irr_group'] = pd.NA
-    
-    # Process all DOIs in one pass for irradiance grouping
-    # Group irradiance values by study (DOI)
-    for doi, study_df in result_df.groupby('doi'):
-        # Apply irradiance grouping within each study
-        grouped_df = group_irradiance(study_df, atol=irr_atol)
-        # Update the result dataframe with the grouped irradiance values
-        result_df.loc[grouped_df.index, 'irr_group'] = grouped_df['irr_group']
-    
-    # Create a list to store processed dataframes
-    processed_dfs = []
-    
-    # Group by relevant factors to process in chunks
-    groupby_cols = ['doi', 'irr_group', 'species_types']
-    for (study_doi, irr_group, species), group_df in tqdm(
-        result_df.groupby(groupby_cols, dropna=False), 
-        desc="Assigning treatment groups",
-        total=result_df.groupby(groupby_cols, dropna=False).ngroups
-    ):
-        if len(group_df) <= 1:  # skip if too few samples
-            continue
-            
-        # find control values (min T, max pH)
-        control_T = group_df['temp'].min() if not group_df['temp'].isna().all() else None
-        control_pH = group_df['phtot'].max() if not group_df['phtot'].isna().all() else None
-        
-        # cluster temperature values
-        t_values = group_df['temp'].dropna().unique()
-        t_clusters = cluster_values(t_values, t_atol)
-        
-        # cluster pH values
-        ph_values = group_df['phtot'].dropna().unique()
-        ph_clusters = cluster_values(ph_values, pH_atol)
-        
-        # map each value to its cluster index
-        t_mapping = {val: cluster_idx for cluster_idx, cluster in enumerate(t_clusters) for val in cluster}
-        ph_mapping = {val: cluster_idx for cluster_idx, cluster in enumerate(ph_clusters) for val in cluster}
-        
-        # Process this group
-        treatments_df = assign_treatment_groups(group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group)
-        processed_dfs.append(treatments_df)
-    
-    # Combine all processed dataframes at once (faster than iterative combining)
-    if processed_dfs:
-        # Use index-based updating for better performance
-        combined_df = pd.concat(processed_dfs)
-        # Update the original DataFrame using loc indexing (more efficient)
-        for col in ['treatment_group', 'treatment_level_t', 'treatment_level_ph']:
-            result_df.loc[combined_df.index, col] = combined_df[col]
-    
-    # Calculate treatment column using vectorized operations instead of apply
-    conditions = [
-        (result_df['treatment_group'] == 'cTcP'),
-        (result_df['treatment_group'].str.contains('tT', na=False) & result_df['treatment_group'].str.contains('tP', na=False)),
-        (result_df['treatment_group'].str.contains('tT', na=False)),
-        (result_df['treatment_group'].str.contains('tP', na=False))
-    ]
-    choices = ['control', 'temp_phtot', 'temp', 'phtot']
-    result_df['treatment'] = np.select(conditions, choices, default='unknown')
-    # Replace 'unknown' with np.nan after the select operation
-    result_df.loc[result_df['treatment'] == 'unknown', 'treatment'] = np.nan
-    
-    return result_df
-
-
-def group_irradiance(df: pd.DataFrame, irr_col: float='irr', atol: float=30):
-    """
-    Assigns an 'irr_group' to values that are within absolute tolerance.
-    
-    Args:
-        df (pd.DataFrame): Input dataframe with an 'irr' column.
-        irr_col (str): Column name for irradiance values.
-        atol (float): Absolute tolerance for grouping.
-        
-    Returns:
-        pd.DataFrame: Dataframe with new 'irr_group' column.
-    """
-    df = df.copy()  # avoid overwriting
-    irr_values = df[irr_col].to_numpy(dtype=float)  # to apply mask
-    irr_groups = np.full(len(df), -1)   # set default group (for nan values)
-    
-    # get indices of non-NaN values and sort them by irradiance value
-    valid_idx = np.where(~np.isnan(irr_values))[0]
-    sorted_idx = valid_idx[np.argsort(irr_values[valid_idx])]
-    
-    # assign groups to valid values
-    if len(sorted_idx) > 0: # continue if there are valid values
-        group_id = 0
-        prev_irr = irr_values[sorted_idx[0]]
-        irr_groups[sorted_idx[0]] = group_id
-        
-        for i in sorted_idx[1:]:
-            if np.abs(irr_values[i] - prev_irr) > atol:
-                group_id += 1
-            irr_groups[i] = group_id
-            prev_irr = irr_values[i]
-    
-    df['irr_group'] = irr_groups
-    return df
-
-
-def cluster_values(values, tolerance: float) -> list:
-    """
-    Cluster values based on their proximity.
-    
-    Args:
-        values (array-like): Values to cluster.
-        tolerance (float): Tolerance for clustering.
-        
-    Returns:
-        list: List of clusters, where each cluster is a list of values.
-    """
-    if len(values) == 0:    # return empty list if no values
-        return []
-        
-    # sort values
-    sorted_values = np.sort(values)
-    
-    # initialize first cluster
-    clusters = [[sorted_values[0]]]
-    
-    # cluster remaining values
-    for val in sorted_values[1:]:
-        # check if value is sufficiently close to the last value in the current cluster
-        if np.abs(val - np.mean(clusters[-1])) <= tolerance:
-            # add to current (most recent) cluster
-            clusters[-1].append(val)
-        else:   # if not close enough
-            # start new cluster
-            clusters.append([val])
-    
-    return clusters
+    # remove outliers
+    data_no_outliers = data[data["cooks_d"] < cooks_threshold]
+    outliers = data[data["cooks_d"] >= cooks_threshold]
+    print(f"\nRemoved {len(outliers)} outlier(s) (from {len(data)} samples) based on Cook's distance threshold of {cooks_threshold:.2f}")
+    return data_no_outliers, outliers
 
 
 ### calculating treatment effects
@@ -573,56 +290,6 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
         return grouped_data
     else:
         raise ValueError("Invalid data type for grouped_data. Expected list or DataFrame.")
-
-# def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
-#     """
-#     Process a group of species data to calculate effect size.
-    
-#     Args:
-#         df: DataFrame containing data for a specific species
-    
-#     Returns:
-#         pandas.DataFrame: DataFrame with effect size calculations
-#     """
-    
-#     results_df = []
-#     # for each treatment value in pH, calculate effect size varying temperature
-#     grouped_by_ph = df.groupby('treatment_level_ph')
-#     grouped_by_t = df.groupby('treatment_level_t')
-    
-#     def process_group(group, control_level_col):
-#         control_level = min(group[control_level_col])
-#         control_df = group[group[control_level_col] == control_level]
-#         treatment_df = group[group[control_level_col] > control_level]
-        
-#         if treatment_df.empty:  # skip if there's no treatment data
-#             return
-
-#         # covered (better) before being passed
-#         # # aggregate control data if n > 1 (more precise than just taking first row)
-#         # control_data = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
-#         # # Aggregate treatment data if all n=1
-#         # if np.all(treatment_df.n == 1):
-#         #     treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T
-            
-            
-#         # update treatment label
-#         if control_level_col == "treatment_level_t":
-#             treatment_df.loc[:, 'treatment'] = 'temp'
-#         elif control_level_col == "treatment_level_ph":
-#             treatment_df.loc[:, 'treatment'] = 'phtot'
-            
-#         # calculate effect size varying treatment condition
-#         # First make sure we convert control_data DataFrame to Series if needed
-#         control_series = control_df.iloc[0] if isinstance(control_df, pd.DataFrame) else control_df
-#         # Calculate effect size for each row in treatment_df
-#         effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_series), axis=1)
-#         return effect_size
-    
-#     results_df.append(grouped_by_ph.apply(process_group, control_level_col='treatment_level_t', include_groups=False))
-#     results_df.append(grouped_by_t.apply(process_group, control_level_col='treatment_level_ph', include_groups=False))
-    
-#     return pd.concat(results_df).reset_index(drop=True)
 
 
 def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
@@ -817,6 +484,7 @@ def fit_curve(df, variable, effect_type, order):
     model = sm.OLS(df[effect_type], X).fit()
     return model
 
+
 def predict_curve(model, x, alpha=0.05):
     """
     Predict values using the fitted model with confidence intervals.
@@ -843,58 +511,7 @@ def predict_curve(model, x, alpha=0.05):
     return predicted, lower, upper
 
 
-### cbsyst sensitivity investigation
-def create_st_ft_sensitivity_array(param_combinations: list, pertubation_percentage: float, resolution: int=20) -> xa.DataArray:
-    
-    # check if more than three parameters are passed
-    if len(param_combinations[0]) != 3:
-        raise ValueError("param_combinations should be a list of tuples containing salinity, temperature, and pH_NBS values")
-    
-    for Sal, Temp, pH_NBS in tqdm(param_combinations):
-        ST_base = cbh.calc_ST(Sal)
-        FT_base = cbh.calc_FT(Sal)
-        
-        # define perturbation ranges for ST and FT
-        ST_values = np.linspace(ST_base-pertubation_percentage/100 * ST_base,  ST_base+pertubation_percentage/100 * ST_base, 20)
-        FT_values = np.linspace(FT_base-pertubation_percentage/100 * FT_base, FT_base+pertubation_percentage/100 * FT_base, 20)
-
-        # initialize empty array for pH_total values
-        pH_grid = np.zeros((20, 20))
-
-        for i, ST in enumerate(ST_values):
-            for j, FT in enumerate(FT_values):
-                pH_Total = cbh.pH_scale_converter(
-                    pH=pH_NBS, scale='NBS', ST=ST, FT=FT, Temp=Temp, Sal=Sal
-                ).get('pHtot', None)
-                pH_grid[i, j] = pH_Total
-        results_dict[(Sal, Temp, pH_NBS)] = pH_grid.copy()
-
-    # extract unique values for each dimension
-    Sal_values = sorted(set(k[0] for k in results_dict.keys()))
-    Temp_values = sorted(set(k[1] for k in results_dict.keys()))
-    pH_NBS_values = sorted(set(k[2] for k in results_dict.keys()))
-    # store arrays with dimensions metadata
-    data_array = np.empty((len(Sal_values), len(Temp_values), len(pH_NBS_values), len(ST_values), len(FT_values)))
-    for (v1, v2, v3), arr in results_dict.items():
-        i = Sal_values.index(v1)
-        j = Temp_values.index(v2)
-        k = pH_NBS_values.index(v3)
-        data_array[i, j, k, :, :] = arr
-
-    return xa.DataArray(
-        data_array,
-        dims=["salinity", "temperature", "ph_nbs", "ST", "FT"],
-        coords={
-            "salinity": Sal_values,
-            "temperature": Temp_values,
-            "ph_nbs": pH_NBS_values,
-            "ST": ST_values,
-            "FT": FT_values,
-        },
-        name="pH_Total"
-    )
-
-
+### Meta-analysis
 def generate_formula(effect_type: str, treatment: str=None, variables: list[str] = None, include_intercept: bool = False) -> str:
     if variables is None:
         variables = []
@@ -958,24 +575,6 @@ def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_
     return formula, data
 
 
-def remove_cooks_outliers(df: pd.DataFrame, effect_type: str = 'hedges_g', nparams: int=3) -> pd.DataFrame:
-    data = df.copy()
-    # calculate cooks distance
-    cooks_threshold = calc_cooks_threshold(data[effect_type], nparams=nparams)
-    # calculate cooks distance
-    data["cooks_d"] = calc_cooks_distance(
-        data[effect_type]
-    )
-
-    # remove outliers
-    data_no_outliers = data[data["cooks_d"] < cooks_threshold]
-    outliers = data[data["cooks_d"] >= cooks_threshold]
-    print(f"\nRemoved {len(outliers)} outlier(s) (from {len(data)} samples) based on Cook's distance threshold of {cooks_threshold:.2f}")
-    return data_no_outliers, outliers
-
-
-import rpy2.robjects as ro
-
 def run_metafor_model(
     df: pd.DataFrame,
     effect_type: str = 'hedges_g',
@@ -1004,7 +603,7 @@ def run_metafor_model(
     # df, outliers = remove_cooks_outliers(df, effect_type, nparams=nparams)
     
     # convert df to R dataframe
-    df_r = pandas2ri.py2rpy(df)
+    df_r = ro.pandas2ri.py2rpy(df)
     
     # run the metafor model
     print('\nRunning metafor model...')
@@ -1018,46 +617,6 @@ def run_metafor_model(
     print('Model fitting complete.')
     return model, base.summary(model), df
 
-
-def aggregate_treatments_with_individual_samples(df: pd.DataFrame) -> pd.DataFrame:
-    aggregated_df = df.groupby(['doi', 'species_types', 'treatment_level_ph', 'treatment_level_t', 'calcification_unit']).filter(
-        lambda group: (group['n'] == 1).all()
-    ).groupby(['doi', 'species_types', 'treatment_level_ph', 'treatment_level_t', 'calcification_unit']).agg(
-        ecoregion=('ecoregion', 'first'), # metadata
-        lat_zone=('lat_zone', 'first'),
-        latitude=('latitude', 'first'),
-        longitude=('longitude', 'first'),
-        location=('location', 'first'),
-        taxa=('taxa', 'first'),
-        genus=('genus', 'first'),
-        species=('species', 'first'),
-        family=('family', 'first'),
-        authors=('authors', 'first'),
-        year=('year', 'first'),
-        treatment_group=('treatment_group', 'first'),
-        treatment=('treatment', 'first'),
-        dic=('dic', 'mean'),    # carbonate chemistry
-        dic_sd=('dic', 'std'),
-        pco2=('pco2', 'mean'),
-        pco2_sd=('pco2', 'std'),
-        phtot=('phtot', 'mean'),
-        phtot_sd=('phtot', 'std'),
-        temp=('temp', 'mean'),
-        temp_sd=('temp', 'std'),
-        sal=('sal', 'mean'),
-        sal_sd=('sal', 'std'),
-        calcification=('calcification', 'mean'),    # calcification
-        calcification_sd=('calcification', 'std'),
-        st_calcification=('st_calcification', 'mean'),
-        st_calcification_sd=('st_calcification', 'std'),
-        st_calcification_unit=('st_calcification_unit', 'first'),
-        n=('n', 'count')
-    ).reset_index()
-    # remove rows with n=1
-    df_no_ones = df[~df['doi'].isin(aggregated_df['doi'])]
-    # Append the aggregated data to the DataFrame
-    df_no_ones = pd.concat([df_no_ones, aggregated_df], ignore_index=True)
-    return df_no_ones
 
 def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var: str = "sst"):
     # Get constant terms from the model matrix (excluding intercept/first column)
@@ -1106,7 +665,7 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
 
     # Convert to R matrix (newmods)
     newmods_np = np.array(prediction_rows, dtype=float)
-    newmods_r = ro.r.matrix(FloatVector(newmods_np.flatten()), nrow=newmods_np.shape[0], byrow=True)
+    newmods_r = ro.r.matrix(ro.FloatVector(newmods_np.flatten()), nrow=newmods_np.shape[0], byrow=True)
 
     # Predict all at once in R
     predictions_r = ro.r('predict')(model, newmods=newmods_r, digits=2)
@@ -1117,6 +676,9 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
         metadata_rows[i]['predicted_effect_size'] = val
 
     return metadata_rows
+
+
+### DEPRECATED
 # def compute_heds
     # def calculate_effect_size(df1_sample, df2_sample, var, group1, group2):
     #     other_var = 'temp' if var == 'phtot' else 'phtot'
@@ -1486,3 +1048,54 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
 #         float: pooled standard deviation
 #     """
 #     return np.sqrt((sd1 ** 2 + sd2 ** 2) / 2)
+
+
+# def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
+#     """
+#     Process a group of species data to calculate effect size.
+    
+#     Args:
+#         df: DataFrame containing data for a specific species
+    
+#     Returns:
+#         pandas.DataFrame: DataFrame with effect size calculations
+#     """
+    
+#     results_df = []
+#     # for each treatment value in pH, calculate effect size varying temperature
+#     grouped_by_ph = df.groupby('treatment_level_ph')
+#     grouped_by_t = df.groupby('treatment_level_t')
+    
+#     def process_group(group, control_level_col):
+#         control_level = min(group[control_level_col])
+#         control_df = group[group[control_level_col] == control_level]
+#         treatment_df = group[group[control_level_col] > control_level]
+        
+#         if treatment_df.empty:  # skip if there's no treatment data
+#             return
+
+#         # covered (better) before being passed
+#         # # aggregate control data if n > 1 (more precise than just taking first row)
+#         # control_data = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
+#         # # Aggregate treatment data if all n=1
+#         # if np.all(treatment_df.n == 1):
+#         #     treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T
+            
+            
+#         # update treatment label
+#         if control_level_col == "treatment_level_t":
+#             treatment_df.loc[:, 'treatment'] = 'temp'
+#         elif control_level_col == "treatment_level_ph":
+#             treatment_df.loc[:, 'treatment'] = 'phtot'
+            
+#         # calculate effect size varying treatment condition
+#         # First make sure we convert control_data DataFrame to Series if needed
+#         control_series = control_df.iloc[0] if isinstance(control_df, pd.DataFrame) else control_df
+#         # Calculate effect size for each row in treatment_df
+#         effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_series), axis=1)
+#         return effect_size
+    
+#     results_df.append(grouped_by_ph.apply(process_group, control_level_col='treatment_level_t', include_groups=False))
+#     results_df.append(grouped_by_t.apply(process_group, control_level_col='treatment_level_ph', include_groups=False))
+    
+#     return pd.concat(results_df).reset_index(drop=True)

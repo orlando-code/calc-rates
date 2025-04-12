@@ -1,11 +1,14 @@
 # general
-import re
 import numpy as np
 import pandas as pd
+import re
+import string
+import itertools
 from tqdm.auto import tqdm
 # spatial
 import googlemaps
 import geopandas as gpd
+
 # custom
 from calcification import utils, config
 
@@ -179,3 +182,38 @@ def standardize_coordinates(coord_string):
         avg_lat = np.mean([c[0] for c in decimal_coords if c[0] is not None])
         avg_lng = np.mean([c[1] for c in decimal_coords if c[1] is not None])
         return (avg_lat, avg_lng)
+    
+    
+def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
+    """Uniquify DOIs for studies with multiple locations. N.B. requires 'location', 'coords', and 'cleaned_coords' columns.
+    """
+    temp_df = df.copy()
+    temp_df['original_doi'] = temp_df['doi']
+    temp_df['location_lower'] = temp_df['location'].str.lower() # lower to make not case sensitive
+    locs_df = temp_df.drop_duplicates(['doi', 'location_lower', 'coords', 'cleaned_coords'])    # drop duplicates to get truly unique
+
+    locs_df.loc[:,'doi'] = utils.uniquify_repeated_values(locs_df.doi)
+
+    temp_df = temp_df.merge(locs_df['doi'], how='left', left_index=True, right_index=True, suffixes=("_old",""))
+    # drop original doi column (now redundant)
+    temp_df.drop(columns=['doi_old'], inplace=True)
+    # group by original doi to fill down the new, uniquified doi
+    temp_df['doi'] = temp_df.groupby('original_doi')['doi'].ffill()
+    return temp_df
+
+
+def uniquify_repeated_values(vals: list, uniquify_str: str='LOC') -> list:
+    """
+    Append a unique suffix to repeated values in a list.
+    
+    Parameters:
+        vals (list): List of values.
+    
+    Returns:
+        list: List of values with unique suffixes.
+    """
+    def zip_letters(l):
+        """Zip a list of strings with uppercase letters."""
+        al = string.ascii_uppercase
+        return [f'-{uniquify_str}-'.join(i) for i in zip(l, al)] if len(l) > 1 else l
+    return [j for _, i in itertools.groupby(vals) for j in zip_letters(list(i))]
