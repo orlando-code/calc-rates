@@ -1,5 +1,6 @@
 # general
 from tqdm.auto import tqdm
+import pandas as pd
 
 # querying api
 import requests
@@ -19,7 +20,7 @@ def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
     if not (config.resources_dir / 'species_mapping.yaml').exists():
         create_species_mapping_yaml(df.species_types.unique())
     else:
-        print(f'Using species mapping in {config.resources_dir / 'species_mapping.yaml'}.')
+        print(f'Using species mapping in {config.resources_dir / 'species_mapping.yaml'}')
     species_mapping = file_ops.read_yaml(config.resources_dir / 'species_mapping.yaml')
     # extract nested dictionary values for each species
     species_fields = ['family', 'functional_group', 'core_grouping']
