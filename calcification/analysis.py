@@ -1,19 +1,20 @@
 # general
+import os
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
-
 import statsmodels.api as sm
 
 # R
 import rpy2.robjects as ro
+import rpy2.robjects.packages as rpackages
 # from rpy2.robjects import pandas2ri
-# import rpy2.robjects.packages as rpackages
-metafor = ro.packages.importr("metafor")
-base = ro.packages.importr("base")
+metafor = rpackages.importr("metafor")
+base = rpackages.importr("base")
 
 # custom
-from calcification import utils, config
+from calcification import config, processing, file_ops
+
 
 ### core analysis calculations
 def calc_relative_rate(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None, epsilon=1e-6):
@@ -282,12 +283,17 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
         # TODO: fix this: still raising the futurewarning error
         valid_dfs = [df for df in grouped_data if df is not None and not df.empty and not df.isna().all().all()]
         if valid_dfs:
-            return pd.concat(valid_dfs)
+            df = pd.concat(valid_dfs)
+            df.loc[:,"ID"] = df.index
         else:
             # Return empty DataFrame with same columns and dtypes as expected output
-            return pd.DataFrame(columns=df.columns if len(grouped_data) > 0 and grouped_data[0] is not None else None)
+            df = pd.DataFrame(columns=df.columns if len(grouped_data) > 0 and grouped_data[0] is not None else None)
+            df.loc[:,"ID"] = df.index
+        return df
     elif isinstance(grouped_data, pd.DataFrame):
-        return grouped_data
+        df = grouped_data
+        df.loc[:,"ID"] = df.index
+        return df
     else:
         raise ValueError("Invalid data type for grouped_data. Expected list or DataFrame.")
 
@@ -376,6 +382,9 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     
     abs_effect, abs_var = calc_absolute_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)  # absolute differences
     
+    st_d_effect, st_d_var = calc_cohens_d(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t) # standardised cohen's d
+    st_hg_effect, st_hg_var = calc_hedges_g(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t)   # standardised hedges' g
+    
     # absolute differences between standardised calcification
     st_abs_effect, st_abs_var = calc_absolute_rate(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t)
     # relative differences between standardised calcification
@@ -424,26 +433,26 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
         pd.DataFrame: DataFrame with calculated effect sizes
     """
     # load and process carbonate chemistry data
-    carbonate_df = utils.populate_carbonate_chemistry(raw_data_fp, data_sheet_name, selection_dict=selection_dict)
+    carbonate_df = processing.populate_carbonate_chemistry(raw_data_fp, data_sheet_name, selection_dict=selection_dict)
     
     # prepare for alignment with climatology by uniquifying DOIs
     # carbonate_df = utils.uniquify_multilocation_study_dois(carbonate_df)
     print(f"\nShape of dataframe with all rows marked for inclusion: {carbonate_df.shape}")
     
     # save selected columns of carbonate dataframe to file for reference
-    carbonate_save_fields = utils.read_yaml(config.resources_dir / 'mapping.yaml')["carbonate_save_columns"]
+    carbonate_save_fields = file_ops.read_yaml(config.resources_dir / 'mapping.yaml')["carbonate_save_columns"]
     carbonate_df[carbonate_save_fields].to_csv(config.tmp_data_dir / 'carbonate_chemistry.csv', index=False)
 
     # assign treatment groups
-    carbonate_df_tgs = assign_treatment_groups_multilevel(carbonate_df)
+    carbonate_df_tgs = processing.assign_treatment_groups_multilevel(carbonate_df)
 
-    carbonate_df_tgs_no_ones = aggregate_treatments_with_individual_samples(carbonate_df_tgs)
+    carbonate_df_tgs_no_ones = processing.aggregate_treatments_with_individual_samples(carbonate_df_tgs)
     # calculate effect size
     print(f"\nCalculating effect sizes...")
     effects_df = calculate_effect_for_df(carbonate_df_tgs_no_ones).reset_index(drop=True)
     
     # save results
-    save_cols = utils.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
+    save_cols = file_ops.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
     effects_df['year'] = pd.to_datetime(effects_df['year']).dt.strftime('%Y')  # cast year from pd.timestamp to integer
     # Check for missing columns in save_cols
     missing_columns = [col for col in save_cols if col not in effects_df.columns]
@@ -461,7 +470,7 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
 
 
 ### curve fitting
-def fit_curve(df, variable, effect_type, order):
+def fit_curve(df: pd.DataFrame, variable: str, effect_type: str, order: int) -> sm.regression.linear_model.RegressionResultsWrapper:
     """
     Fit a polynomial curve to the data.
 
@@ -527,7 +536,7 @@ def generate_formula(effect_type: str, treatment: str=None, variables: list[str]
     
     # Remove duplicates and process variables
     variables = list(set(variables))
-    variable_mapping = utils.read_yaml(config.resources_dir / 'mapping.yaml')["meta_model_factor_variables"]
+    variable_mapping = file_ops.read_yaml(config.resources_dir / 'mapping.yaml')["meta_model_factor_variables"]
     
     # Split into factor and regular variables
     factor_vars = [f"factor({v})" for v in variables if v in variable_mapping]
@@ -539,6 +548,27 @@ def generate_formula(effect_type: str, treatment: str=None, variables: list[str]
     
     # Remove intercept if specified
     return formula + " - 1" if not include_intercept else formula
+
+
+def get_formula_components(formula):
+    """
+    Extracts the response variable, predictors, and intercept flag from a formula string.
+    """
+    formula_comps = {}
+    response_part, predictor_part = formula.split('~')
+    formula_comps['response'] = response_part.strip()
+
+    # Clean and normalize predictor part
+    predictor_part = predictor_part.replace(' ', '').replace('-1', '+intercept_off')  # temporarily mark intercept removal
+    predictors_raw = predictor_part.split('+')
+
+    # Determine intercept
+    intercept = 'intercept_off' not in predictors_raw
+    predictors_raw = [p for p in predictors_raw if p != 'intercept_off']
+    formula_comps['predictors'] = [p for p in predictors_raw if p]  # remove empty strings
+    formula_comps['intercept'] = intercept
+
+    return formula_comps
 
 
 def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_var=None, treatment=None, necessary_vars: list[str] = None, formula: str=None) -> pd.DataFrame:
@@ -558,6 +588,15 @@ def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_
     # remove nans for subset effect_type
     required_columns = [effect_type, effect_type_var, 'original_doi', 'ID'] + (necessary_vars or [])
     data = data.dropna(subset=required_columns)
+    
+    # Ensure all numeric columns are explicitly converted to correct type
+    for col in data.columns:
+        data[col] = processing.safe_to_numeric(data[col])
+    # convert any object columns to strings
+    for col in data.select_dtypes(include=['object']).columns:
+        data[col] = data[col].astype(str)
+        
+        
     n_nans = n_investigation - len(data)
     
     ### summarise processing
@@ -575,7 +614,7 @@ def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_
     return formula, data
 
 
-def run_metafor_model(
+def run_metafor_mv(
     df: pd.DataFrame,
     effect_type: str = 'hedges_g',
     effect_type_var: str = None,
@@ -599,11 +638,21 @@ def run_metafor_model(
     effect_type_var = effect_type_var or f"{effect_type}_var"
     # preprocess the dataframe
     formula, df = preprocess_df_for_meta_model(df, effect_type, effect_type_var, treatment, necessary_vars, formula)
-    print(f'Using formula {formula}')
-    # df, outliers = remove_cooks_outliers(df, effect_type, nparams=nparams)
+    print(f'Using formula {formula}')    
+    # activate R conversion
+    ro.pandas2ri.activate()
     
-    # convert df to R dataframe
-    df_r = ro.pandas2ri.py2rpy(df)
+    all_necessary_vars = ['original_doi', 'ID'] + (necessary_vars or []) + [effect_type, effect_type_var] + ['delta_ph' if treatment == 'phtot' else 'delta_t']
+    # ensure original_doi is string type to avoid conversion issues
+    df = df.copy()
+    df['original_doi'] = df['original_doi'].astype(str)
+    
+
+    
+    
+    
+    df_subset = df[all_necessary_vars]
+    df_r = ro.pandas2ri.py2rpy(df_subset)
     
     # run the metafor model
     print('\nRunning metafor model...')
@@ -615,7 +664,73 @@ def run_metafor_model(
         random=ro.Formula("~ 1 | original_doi/ID")
     )
     print('Model fitting complete.')
-    return model, base.summary(model), df
+    return model, base.summary(model), formula, df
+
+
+def run_parallel_dredge(df, global_formula=None, effect_type='hedges_g', x_var='temp', n_cores=16):
+    """TODO: get actually working in parallel
+    Runs a parallel dredge analysis using MuMIn in R.
+
+    Parameters:
+        df (rpy2.robjects.vectors.DataFrame): The dataframe in R format.
+        effect_type (str): The effect type (e.g., 'hedges_g').
+        x_var (str): The independent variable (e.g., 'delta_t').
+        n_cores (int): Number of cores for parallel processing.
+
+    Returns:
+        pandas.DataFrame: The dredge result converted to a pandas DataFrame.
+    """
+    os.environ['LC_ALL'] = 'en_US.UTF-8'  # Set locale to UTF-8
+
+    # Assign variables to R environment
+    ro.r.assign("df_r", ro.pandas2ri.py2rpy(df))    # convert to R dataframe
+    df_r = ro.pandas2ri.py2rpy(df)
+    ro.r.assign("effect_col", effect_type)
+    ro.r.assign("var_col", f"{effect_type}_var")
+    ro.r.assign("original_doi", df_r.rx2("original_doi"))
+    ro.r.assign("ID", df_r.rx2("ID"))
+    
+    # set up formula
+    global_formula = f"{effect_type} ~ {x_var} - 1" if global_formula is None else global_formula
+    print(global_formula)
+    ro.r.assign("global_formula", ro.Formula(global_formula))
+
+    # Run the R code for parallel dredge
+    ro.r(f"""
+    # Set up for MuMIn
+    eval(metafor:::.MuMIn)
+
+    global_model <- rma.mv(
+        yi = df_r[[effect_col]],
+        V = df_r[[var_col]], 
+        mods = global_formula,
+        random = ~ 1 | original_doi/ID,
+        data=df_r,
+    )
+    # Create cluster
+    clu <- parallel::makeCluster({n_cores})
+    # Load packages on each worker
+    parallel::clusterEvalQ(clu, {{
+      library(metafor)
+      library(MuMIn)
+    }})
+
+    # Export required variables to each worker
+    parallel::clusterExport(clu, varlist = c("df_r", "effect_col", "var_col", "global_formula", "original_doi", "ID"))
+
+    dredge_result <- MuMIn::dredge(global_model)
+
+    # Stop the cluster
+    parallel::stopCluster(clu)
+    """)
+
+    # Retrieve the dredge result and convert to pandas DataFrame
+    dredge_result = ro.r("dredge_result")
+    # Convert to pandas DataFrame
+    ro.pandas2ri.activate()
+    df = ro.pandas2ri.rpy2py(dredge_result)
+    # assign any values of '-2147483648' to NaN (R's placeholder for NA in string columns)
+    return df.replace(-2147483648, np.nan)
 
 
 def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var: str = "sst"):
