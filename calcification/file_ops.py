@@ -19,27 +19,36 @@ def read_yaml(yaml_fp) -> dict:
         except yaml.YAMLError as exc:
             print(exc)
             return None
+        
+        
+def _convert_numpy(obj):
+    """Convert numpy types to native Python types for YAML serialization.
+    
+    Args:
+        obj: Object that might contain numpy data types
+        
+    Returns:
+        Object with numpy types converted to Python native types
+    """
+    if isinstance(obj, dict):
+        return {k: _convert_numpy(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_convert_numpy(i) for i in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.number):
+        return obj.item()
+    elif isinstance(obj, (np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.int32, np.int64)):
+        return int(obj)
+    else:
+        return obj
 
 
 def write_yaml(data: dict, fp="unnamed.yaml") -> None:
     """Safe writing to yaml files"""
     # Convert numpy values to Python native types before serialization
-    def _convert_numpy(obj):
-        if isinstance(obj, dict):
-            return {k: _convert_numpy(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [_convert_numpy(i) for i in obj]
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, np.number):
-            return obj.item()
-        elif isinstance(obj, (np.float32, np.float64)):
-            return float(obj)
-        elif isinstance(obj, (np.int32, np.int64)):
-            return int(obj)
-        else:
-            return obj
-            
     converted_data = _convert_numpy(data)
     with open(fp, "w") as file:
         yaml.dump(converted_data, file)
@@ -47,8 +56,9 @@ def write_yaml(data: dict, fp="unnamed.yaml") -> None:
 
 def append_to_yaml(data: dict, fp="unnamed.yaml") -> None:
     """Append to yaml"""
+    converted_data = _convert_numpy(data)
     with open(fp, "a") as file:
-        yaml.dump(data, file)
+        yaml.dump(converted_data, file)
 
 
 def ensure_r_package_imported(package_name):
