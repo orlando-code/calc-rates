@@ -76,7 +76,7 @@ def cluster_values(values, tolerance: float) -> list:
     # cluster remaining values
     for val in sorted_values[1:]:
         # check if value is sufficiently close to the last value in the current cluster
-        if np.abs(val - np.mean(clusters[-1])) <= tolerance:
+        if np.abs(val - np.mean(clusters[-1])) < tolerance:
             # add to current (most recent) cluster
             clusters[-1].append(val)
         else:   # if not close enough
@@ -87,6 +87,8 @@ def cluster_values(values, tolerance: float) -> list:
 
 
 def aggregate_treatments_with_individual_samples(df: pd.DataFrame) -> pd.DataFrame:
+    """For treatments with only one sample (most often those for which raw, sample-level data was extracted), aggregate the data to get means and standard deviations of the treatment groups.
+    """
     aggregated_df = df.groupby(['doi', 'species_types', 'treatment_level_ph', 'treatment_level_t', 'calcification_unit']).filter(
         lambda group: (group['n'] == 1).all()
     ).groupby(['doi', 'species_types', 'treatment_level_ph', 'treatment_level_t', 'calcification_unit']).agg(
@@ -99,6 +101,7 @@ def aggregate_treatments_with_individual_samples(df: pd.DataFrame) -> pd.DataFra
         genus=('genus', 'first'),
         species=('species', 'first'),
         family=('family', 'first'),
+        core_grouping=('core_grouping', 'first'),
         authors=('authors', 'first'),
         year=('year', 'first'),
         treatment_group=('treatment_group', 'first'),
@@ -230,65 +233,60 @@ def process_raw_data(df: pd.DataFrame, require_results: bool=True, selection_dic
     
     return df
 
+
 ### carbonate chemistry
 def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     df = process_raw_data(pd.read_excel(fp, sheet_name=sheet_name), require_results=False, selection_dict=selection_dict)
     ### load measured values
     print("Loading measured values...")
-    print('1:', df.shape)
     measured_df = file_ops.get_highlighted(fp, sheet_name=sheet_name)    # keeping all cols
-    print('2:', measured_df.shape)
     # measured_df = process_raw_data(measured_df, require_results=False, selection_dict=selection_dict)
     measured_df = preprocess_df(measured_df, selection_dict=selection_dict)
-    print('3:', measured_df.shape)
     
     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
-    print("Calculating total pH values...")
-    # if phtot and phnbs are both nan, calculate phtot from temp, salinity, dic, and ta
-    measured_df.loc[:, 'phtot'] = measured_df.apply(
-        lambda row: cb.cbsyst.Csys(
-            TA=row['ta'], DIC=row['dic'], T_in=row['temp'], S_in=row['sal'] if pd.notna(row['sal']) else 35,
-        ).get('pHtot', None) if pd.isna(row['phnbs']) and pd.isna(row['phtot']) and pd.notna(row['temp']) and pd.notna(row['dic']) and pd.notna(row['ta'])
-        else np.nan,
-        axis=1
-    )
-    print('4:', measured_df.shape)
     # if one of ph is provided, ensure total ph is calculated
-    measured_df.loc[:, 'phtot'] = measured_df.apply(
+    # Only convert pHnbs to pHtot if pHtot is NaN and pHnbs is available
+    mask_missing_phtot_with_nbs = measured_df['phtot'].isna() & measured_df['phnbs'].notna() & measured_df['temp'].notna()
+    measured_df.loc[mask_missing_phtot_with_nbs, 'phtot'] = measured_df[mask_missing_phtot_with_nbs].apply(
         lambda row: cbh.pH_scale_converter(
             pH=row['phnbs'], scale='NBS', Temp=row['temp'], Sal=row['sal'] if pd.notna(row['sal']) else 35
-        ).get('pHtot', None) if pd.notna(row['phnbs']) and pd.notna(row['temp'])
-        else row['phtot'],
+        ).get('pHtot', None),
         axis=1
     )
-    print('5:', measured_df.shape)
+    
+    # Only calculate pHtot from DIC and TA if pHtot is still NaN and required parameters are available
+    mask_missing_phtot_with_carb = measured_df['phtot'].isna() & measured_df['dic'].notna() & measured_df['ta'].notna() & measured_df['temp'].notna()
+    if mask_missing_phtot_with_carb.any():
+        measured_df.loc[mask_missing_phtot_with_carb, 'phtot'] = measured_df[mask_missing_phtot_with_carb].apply(
+            lambda row: cb.Csys(
+                TA=row['ta'], DIC=row['dic'], T_in=row['temp'], S_in=row['sal'] if pd.notna(row['sal']) else 35
+            ).pHtot[0],
+            axis=1
+        )
 
     ### calculate carbonate chemistry
     carb_metadata = file_ops.read_yaml(config.resources_dir / "mapping.yaml")
     carb_chem_cols = carb_metadata['carbonate_chemistry_cols']
     out_values = carb_metadata['carbonate_chemistry_params']
     carb_df = measured_df[carb_chem_cols].copy()
-    print('6:', carb_df.shape)
 
     # apply function row-wise
     tqdm.pandas(desc="Calculating carbonate chemistry")
 
     carb_df.loc[:, out_values] = carb_df.progress_apply(lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1)
-    print('7:', carb_df.shape)
     return df.combine_first(carb_df)
 
 
 def calculate_carb_chem(row, out_values: list) -> dict:
-    """Calculate carbonate chemistry parameters and return a dictionary."""  
+    """(Re)calculate carbonate chemistry parameters and return a dictionary.""" 
     try:
         out_dict = cb.Csys(
             pHtot=row['phtot'],
             TA=row['ta'],
             T_in=row['temp'],
-            S_in=row['sal'],
+            S_in=35 if pd.isna(row['sal']) else row['sal'],
         )
         out_dict = {key.lower(): value for key, value in out_dict.items()}  # lower the keys of the dictionary to ensure case-insensitivity
-
         return {
             key: (out_dict.get(key.lower(), None)[0] if isinstance(out_dict.get(key.lower()), (list, np.ndarray)) else out_dict.get(key.lower(), None))
             for key in out_values
@@ -411,9 +409,8 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
     result_df['treatment_level_ph'] = pd.NA
     result_df['irr_group'] = pd.NA
     
-    # Process all DOIs in one pass for irradiance grouping
-    # Group irradiance values by study (DOI)
-    for doi, study_df in result_df.groupby('doi'):
+    # process all DOIs in one pass for irradiance grouping
+    for doi, study_df in result_df.groupby('doi'):  # group irradiance values by study (DOI)
         # Apply irradiance grouping within each study
         grouped_df = group_irradiance(study_df, atol=irr_atol)
         # Update the result dataframe with the grouped irradiance values
@@ -452,15 +449,11 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
         treatments_df = assign_treatment_groups(group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group)
         processed_dfs.append(treatments_df)
     
-    # Combine all processed dataframes at once (faster than iterative combining)
     if processed_dfs:
-        # Use index-based updating for better performance
-        combined_df = pd.concat(processed_dfs)
-        # Update the original DataFrame using loc indexing (more efficient)
-        for col in ['treatment_group', 'treatment_level_t', 'treatment_level_ph']:
+        combined_df = pd.concat(processed_dfs)  # concatenating on index
+        for col in ['treatment_group', 'treatment_level_t', 'treatment_level_ph']:  # update original DataFrame using loc indexing (more efficient)
             result_df.loc[combined_df.index, col] = combined_df[col]
-    
-    # Calculate treatment column using vectorized operations instead of apply
+    # vectorized updating
     conditions = [
         (result_df['treatment_group'] == 'cTcP'),
         (result_df['treatment_group'].str.contains('tT', na=False) & result_df['treatment_group'].str.contains('tP', na=False)),
@@ -473,8 +466,6 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
     result_df.loc[result_df['treatment'] == 'unknown', 'treatment'] = np.nan
     
     return result_df
-
-
 
 
 ### climatology
@@ -497,7 +488,7 @@ def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd
 
     # load locations yaml as dataframe
     locations_fp = config.resources_dir / 'locations.yaml'
-    locations_df = pd.DataFrame(utils.file_ops.read_yaml(locations_fp)).T
+    locations_df = pd.DataFrame(file_ops.read_yaml(locations_fp)).T
     # reorder columns to be latitude, longitude, location
     locations_df = locations_df[['latitude', 'longitude', 'location']]
 
