@@ -8,27 +8,43 @@ from tqdm.auto import tqdm
 # spatial
 import googlemaps
 import geopandas as gpd
-
 # custom
-from calcification import utils, config
+from calcification import file_ops, config
+
 
 ### spatial
 def get_google_maps_coordinates(locations: list[str]) -> dict:
-
+    """
+    Get coordinates for a list of locations using Google Maps API. Checks if coordinates are already present in a yaml file.
+    If not, it will append a new yaml file with the coordinates.
+    """
     if (config.resources_dir / 'gmaps_locations.yaml').exists():
-        print(f"Using locations in {config.resources_dir / 'gmaps_locations.yaml'}")
-        gmaps_coords = utils.read_yaml(config.resources_dir / 'gmaps_locations.yaml')
-    else:
+        # read in coordinates from current yaml (values in dictionary of yaml)
+        gmaps_coords = file_ops.read_yaml(config.resources_dir / 'gmaps_locations.yaml')
+        coord_keys = gmaps_coords.keys()
+        # check if all locations are in the yaml file
+        # Use set difference to find locations not in yaml coords
+        extra_locations = set(locations) - set(coord_keys)
+        if extra_locations:
+            print(f"Found extra locations (not already in {config.resources_dir / 'gmaps_locations.yaml'}")
+        else:
+            print(f"Using locations in {config.resources_dir / 'gmaps_locations.yaml'}")
+            return gmaps_coords
+    
+    ### if necessary, generate or append to a locations yaml file
+    if not (config.resources_dir / 'gmaps_locations.yaml').exists():
+        # create new yaml file
         print(f"Creating gmaps_locations.yaml file in {config.resources_dir}")
-        # get coordinates for these locations using Google Maps API
-        gmaps_coords = {}
-        GMAPS_API_KEY = utils.read_yaml(config.resources_dir / "api_keys.yaml")['google_maps_api']
-        gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
+        
+    # get coordinates for these locations using Google Maps API
+    gmaps_coords = {}
+    GMAPS_API_KEY = file_ops.read_yaml(config.resources_dir / "api_keys.yaml")['google_maps_api']
+    gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
 
-        for loc in tqdm(locations, desc="Querying Google Maps to retrieve coordinates of locations"):
-            gmaps_coords[loc] = tuple(get_coord_pair_from_google_maps(loc, gmaps_client).values)   # slightly hacky formatting since originally written for processing dataframe column
-        # save locations to yaml file
-        utils.write_yaml(gmaps_coords, config.resources_dir / 'gmaps_locations.yaml')
+    for loc in tqdm(locations, desc="Querying Google Maps to retrieve coordinates of locations"):
+        gmaps_coords[loc] = tuple(get_coord_pair_from_google_maps(loc, gmaps_client).values)   # slightly hacky formatting since originally written for processing dataframe column
+    # save locations to yaml file
+    file_ops.append_to_yaml(gmaps_coords, config.resources_dir / 'gmaps_locations.yaml')
     return gmaps_coords
     
     
@@ -54,6 +70,13 @@ def get_coord_pair_from_google_maps(location_name: str, gmaps_client) -> pd.Seri
 
 
 def assign_coordinates(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assign coordinates to locations in the DataFrame. This function will:
+    1. Check if coordinates are already present in the 'coords' column.
+    2. If not, it will check the 'cleaned_coords' column.
+    3. If 'cleaned_coords' is NaN, it will use the Google Maps API to get coordinates.
+    4. If 'cleaned_coords' is not NaN, it will convert them to decimal degrees.
+    """
     ### get locations for which there are no coordinates (from location, where cleaned_coords is NaN)
     locs = df.loc[df['cleaned_coords'].isna(), 'location'].unique()
     temp_df = df.copy()
@@ -102,13 +125,13 @@ def save_locations_information(df: pd.DataFrame) -> None:
         # send to dictionary
         locs_df = df.drop_duplicates(['doi'], keep='first')[['doi', 'location', 'latitude', 'longitude']].set_index('doi')
         # save dictionary to yaml
-        utils.write_yaml(locs_df.to_dict(orient='index'), config.resources_dir / "locations.yaml")
+        file_ops.write_yaml(locs_df.to_dict(orient='index'), config.resources_dir / "locations.yaml")
         print(f'Saved locations to {config.resources_dir / "locations.yaml"}')
         locs_df.to_csv(config.resources_dir / "locations.csv", index=True, index_label='doi')
         print(f'Saved locations to {config.resources_dir / "locations.csv"}')
     
 
-def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
+def dms_to_decimal(degrees: float, minutes: float | int=0, seconds: float | int=0, direction: str='') -> float:
     """Convert degrees, minutes, and seconds to decimal degrees."""
     try:
         degrees, minutes, seconds = float(degrees), float(minutes), float(seconds)
@@ -124,7 +147,7 @@ def dms_to_decimal(degrees, minutes=0, seconds=0, direction=''):
         return None
 
 
-def standardize_coordinates(coord_string):
+def standardize_coordinates(coord_string: str) -> tuple[float, float] | None:
     """Convert various coordinate formats into decimal degrees."""
     # check if not string (already decimal degrees)
     if not isinstance(coord_string, str):
@@ -192,7 +215,7 @@ def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
     temp_df['location_lower'] = temp_df['location'].str.lower() # lower to make not case sensitive
     locs_df = temp_df.drop_duplicates(['doi', 'location_lower', 'coords', 'cleaned_coords'])    # drop duplicates to get truly unique
 
-    locs_df.loc[:,'doi'] = utils.uniquify_repeated_values(locs_df.doi)
+    locs_df.loc[:,'doi'] = uniquify_repeated_values(locs_df.doi)
 
     temp_df = temp_df.merge(locs_df['doi'], how='left', left_index=True, right_index=True, suffixes=("_old",""))
     # drop original doi column (now redundant)
