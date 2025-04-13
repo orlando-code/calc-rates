@@ -1,8 +1,9 @@
+# general
 import re
-
+import pandas as pd
 
 # custom
-from calcification import file_ops
+from calcification import file_ops, config
 
 ### global constants
 MOLAR_MASS_CACO3 = 100.0869    # g/mol
@@ -56,12 +57,12 @@ def convert_numerator(num_part: str, rate_val: float) -> tuple[float, str]:
         prefix, base = extract_prefix(num_part_clean, 'mass')
         rate_val *= MOLAR_MASS_CACO3 * PREFIXES.get(prefix, 1.0)
         # convert to mg
-        rate_val *= 1e-3
+        rate_val *= 1e3
         new_unit = 'mg'
     elif 'g' in num_part_clean: # mass units
         prefix, base = extract_prefix(num_part_clean, 'mass')
         rate_val *= PREFIXES.get(prefix, 1.0)
-        rate_val *= 1e-3   # convert to mg
+        rate_val *= 1e3   # convert to mg
         new_unit = 'mg'
     elif 'm2' in num_part_clean:    # area units
         prefix, base = extract_prefix(num_part_clean, 'area')
