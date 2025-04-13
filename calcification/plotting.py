@@ -3,10 +3,15 @@ import matplotlib
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from matplotlib import gridspec
-import seaborn as sns
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import seaborn as sns    
+    
 # spatial
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import geopandas as gpd
+from shapely.geometry import Point
 
 # R
 import rpy2.robjects as ro
@@ -136,11 +141,11 @@ class Polynomial:
         return 'x' if power == 1 else 'x^{0}'.format(power) if power != 0 else ''
     
 
-def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True, 
+def meta_regplot(model, model_comps: tuple, x_mod:str, level=95, ci=True, pi=True, shade=True, 
                  point_size="seinv", point_color='black', point_fill='white', colorby: list=None,
                  line_color='blue', ci_color='lightblue', ci_line_color='blue',
                  xlab=None, ylab=None, xlim=None, ylim=None, predlim=None,
-                 refline=0, figsize=(10, 7), title=None):
+                 refline=0, figsize=(10, 7), title=None, ax=None, future_global_anomaly_df=None, scenario_var=None):
     """
     Create a meta-regression plot from an rma.mv or rma object.
     
@@ -166,18 +171,21 @@ def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True,
         refline (float, optional): Reference line to add at specific y-value.
         figsize (tuple, default=(10, 7)): Figure size (width, height) in inches.
         title (str, optional): Plot title.
+        ax (matplotlib.axes._axes.Axes, optional): Existing axis to plot on. If None, a new figure and axis will be created.
         
     Returns:
         fig, ax (matplotlib.figure.Figure, matplotlib.axes._axes.Axes): Matplotlib figure and axis objects.
     """    
     ### process
     pandas2ri.activate()    # enable automatic conversion between R and pandas
-    
+    # get index of x_mod in predictors
+    mod_pos = model_comps['predictors'].index(x_mod) if isinstance(x_mod, str) else 0
+        
     # extract model components
     yi = np.array(model.rx2('yi.f'))
     vi = np.array(model.rx2('vi.f'))
     X = np.array(model.rx2('X.f'))    
-    xi = X[:, mod_pos]  # TODO: determine this better dynamically
+    xi = X[:, mod_pos]
     
     mask = ~np.isnan(yi) & ~np.isnan(vi) & ~np.isnan(xi).any(axis=0)    # handle missing values
     if not all(mask):
@@ -263,7 +271,10 @@ def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True,
         ci_ub = pred + 1.96 * 0.5  # Rough approximation
     
     ### plot
-    fig, ax = plt.subplots(figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
     
     if isinstance(point_color, str):
         point_color = [point_color] * len(xi)
@@ -292,37 +303,82 @@ def meta_regplot(model, mod_pos=None, level=95, ci=True, pi=True, shade=True,
         
         ax.fill_between(xs, ci_lb, ci_ub, color=poly_color, alpha=0.3)
     
-    if ci:  # add confidence interval lines
+    if ci:  # add confidence interval lines
         ax.plot(xs, ci_lb, color=ci_line_color, linestyle='--', linewidth=1)
         ax.plot(xs, ci_ub, color=ci_line_color, linestyle='--', linewidth=1)
-    if pi:  # add prediction interval lines
+    if pi:  # add prediction interval lines
         ax.plot(xs, pred_lb, color=ci_line_color, linestyle=':', linewidth=1)
         ax.plot(xs, pred_ub, color=ci_line_color, linestyle=':', linewidth=1)
         if shade:
             ax.fill_between(xs, pred_lb, pred_ub, color=ci_color, alpha=0.1)
     
-    
-    plt.scatter([], [], edgecolor=point_color[0], facecolor=point_fill[0], alpha=0.8, label='Studies')
-    ax.plot(xs, pred, color=line_color, linewidth=2, label='Regression line')    # plot regression line
-    plt.plot([],[], linestyle='--', color=ci_line_color, label='95% Confidence interval') if ci else None
-    plt.plot([],[], linestyle=':', color=ci_line_color, label='95% Prediction interval') if pi else None
+    ax.scatter([], [], edgecolor=point_color[0], facecolor=point_fill[0], alpha=0.8, label='Studies')
+    # Get coefficients and create a polynomial string for the legend
+    coeffs = np.array(model.rx2('b'))
+    polynomial = Polynomial(coeffs[mod_pos])
+    ax.plot(xs, pred, color=line_color, linewidth=2, label=f'Regression line: {polynomial}{x_mod}')    # plot regression line with equation
+
+    ax.plot([],[], linestyle='--', color=ci_line_color, label='95% Confidence interval') if ci else None
+    ax.plot([],[], linestyle=':', color=ci_line_color, label='95% Prediction interval') if pi else None
     
     ### formatting
     ax.axhline(y=refline, color='gray', label='Zero effect level', linestyle='-', linewidth=1) if refline is not None else None    # add reference line
-    ax.set_xlabel(xlab, fontsize=12) if xlab else None
-    ax.set_ylabel(ylab, fontsize=12) if ylab else None
+    ax.set_xlabel(xlab if xlab else model_comps['predictors'][mod_pos], fontsize=12)
+    ax.set_ylabel(ylab if ylab else f'Effect size ({model_comps['response']})', fontsize=12)
     ax.set_title(title, fontsize=14) if title else None
     ax.set_xlim(xlim) if xlim else predlim if predlim else None
     ax.set_ylim(ylim) if ylim else None    
     ax.grid(True, linestyle='--', alpha=0.3)
 
     ax.legend(fontsize=10)
-    fig.tight_layout()
+
+    if ax is None:  # Only apply tight_layout if we created a new figure
+        fig.tight_layout()
     
     return fig, ax
 
 
-def meta_regplot_plotly(model, mod_pos=None, level=95, ci=True, pi=True, 
+def add_climatology_lines_to_plot(ax, future_global_anomaly_df, scenario_var, xlim):
+    scenarios = future_global_anomaly_df['scenario'].unique()
+    scenario_colours = sns.color_palette("Reds", len(scenarios))
+    scenario_colour_dict = {scenario: scenario_colours[i] for i, scenario in enumerate(scenarios)}
+    original_ylim = ax.get_ylim()  # Get the original y-axis limits
+    scenario_lines = []
+    for scenario in scenarios:
+        # Add climatology lines to the plot
+        predicted_effect_sizes = future_global_anomaly_df[
+            (future_global_anomaly_df['time_frame'] == 2090) &
+            (future_global_anomaly_df['scenario'] == scenario)
+        ][:][f'mean_{scenario_var}_anomaly']
+
+        # Plot vertical lines for each predicted effect size
+        for effect_size in predicted_effect_sizes:
+            line = ax.vlines(
+                x=effect_size,
+                ymin=original_ylim[0],  # Use the fixed original y-axis minimum
+                ymax=original_ylim[1],  # Use the fixed original y-axis maximum
+                color=scenario_colour_dict[scenario],
+                linestyle='--',  
+                label=SCENARIO_MAP[scenario],  
+                zorder=5, 
+            )
+            scenario_lines.append(line)
+    # Crop to y lim
+    ax.set_ylim(original_ylim[0], original_ylim[1])
+    # Add second legend for the climatology lines
+    # legend1 = ax.get_legend()
+    # legend2 = plt.legend(
+    #     handles=scenario_lines, 
+    #     title='SSP scenarios', 
+    #     loc='lower left', 
+    # )
+    # # Add the new legend to the graph along with the original
+    # ax.add_artist(legend1)
+    # ax.add_artist(legend2)
+    return ax
+
+
+def meta_regplot_plotly(model, model_comps: tuple, x_mod:str, level=95, ci=True, pi=True,   # TODO: finish updating this
                       point_size="seinv", point_color='black', point_fill='white', 
                       doi_list=None,
                       line_color='blue', ci_color='rgba(173, 216, 230, 0.3)', ci_line_color='blue',
@@ -357,13 +413,6 @@ def meta_regplot_plotly(model, mod_pos=None, level=95, ci=True, pi=True,
     Returns:
         plotly.graph_objects.Figure: Interactive Plotly figure
     """
-    import numpy as np
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    import pandas as pd
-    from rpy2.robjects import pandas2ri
-    import rpy2.robjects as ro
-    
     # Enable automatic conversion between R and pandas
     pandas2ri.activate()
     
@@ -612,21 +661,21 @@ def meta_regplot_plotly(model, mod_pos=None, level=95, ci=True, pi=True,
     return fig
 
 
-def interpolate_spline(xs, ys, npoints=100, k=2):
-    
+def interpolate_spline(xs: np.ndarray, ys: np.ndarray, npoints=100, k=2):
+    """Interpolates a spline for given x and y values."""
     x_fine = np.linspace(min(xs), max(xs) + 10, 100)
     spline = interpolate.splrep(xs, ys, k=k)
     smooth = interpolate.splev(x_fine, spline)
     return x_fine, smooth
 
 
-def plot_spatial_effect_distribution(predictions_df, time_frame=2900, figsize=(10, 10), dpi=300):
+def plot_spatial_effect_distribution(predictions_df, var_to_plot: str = 'predicted_effect_size', time_frame=2090, figsize=(10, 10), dpi=300, title:str='Spatial distribution of predicted effect sizes for SSP scenarios', cbar_label:str='Predicted Effect Size (Hedges\' g)', reverse_cmap:bool=False):
     """
     Plots the spatial distribution of predicted effect sizes for SSP scenarios on a map.
 
     Parameters:
         predictions_df (pd.DataFrame): DataFrame containing predictions with columns ['longitude', 'latitude', 'scenario', 'time_frame', 'predicted_effect_size'].
-        time_frame (int): The time frame to filter the data for plotting (default is 2100).
+        time_frame (int): The time frame to filter the data for (default is 2100).
         figsize (tuple): Size of the figure (default is (10, 10)).
         dpi (int): Resolution of the figure (default is 300).
     # TODO: future thoughts
@@ -638,39 +687,36 @@ def plot_spatial_effect_distribution(predictions_df, time_frame=2900, figsize=(1
     # Create figure
     fig, axes = plt.subplots(len(ssp_scenarios), 1, figsize=figsize, subplot_kw={'projection': ccrs.PlateCarree()}, dpi=dpi)
 
-    # Normalize color map to the range of predicted effect sizes
-    min_effects = predictions_df['predicted_effect_size'].min()
-    max_effects = predictions_df['predicted_effect_size'].max()
+    mean_predictions_df = predictions_df[predictions_df['percentile'] == "mean"]
+    # Normalize color map to the range of predicted effect sizes    
+    min_effects, max_effects = mean_predictions_df[var_to_plot].min(), mean_predictions_df[var_to_plot].max()
 
     for i, (name, scenario) in enumerate(zip(['SSP 1-2.6', 'SSP 2-4.5', 'SSP 3-7.0', 'SSP 5-8.5'], ssp_scenarios)):
         # Add map features
-        axes[i].set_extent([-180, 180, -40, 40], crs=ccrs.PlateCarree())
-        axes[i].add_feature(cfeature.LAND)
-        axes[i].add_feature(cfeature.OCEAN, alpha=0.3)
-        axes[i].add_feature(cfeature.COASTLINE, edgecolor='lightgray', zorder=-1)
-        axes[i].add_feature(cfeature.BORDERS, linestyle=':', edgecolor='gray', alpha=0.2)
+        axes[i] = format_geo_axes(axes[i], extent=[-180, 180, -40, 40])
 
         # Filter data for the specific scenario and time frame
-        data_to_plot = predictions_df[(predictions_df['scenario'] == scenario) & (predictions_df['time_frame'] == time_frame)]
+        data_to_plot = mean_predictions_df[(mean_predictions_df['scenario'] == scenario) & (mean_predictions_df['time_frame'] == time_frame)]
+        # get the mean values
+        # data_to_plot = data_to_plot[data_to_plot['percentile'] == "mean"]
+        
         if data_to_plot.empty:
             raise ValueError(f"No data available for scenario {scenario} at time frame {time_frame}.")
-            continue
-        data_to_plot = data_to_plot.sort_values(by='predicted_effect_size', ascending=True)
+        data_to_plot = data_to_plot.sort_values(by=var_to_plot, ascending=True)
 
-        # Normalize color map
-        norm = plt.Normalize(vmin=min_effects, vmax=max_effects)
+        norm = plt.Normalize(vmin=min_effects, vmax=max_effects)    # normalise colour map
 
-        # Plot scatter points
         sc = axes[i].scatter(
             data_to_plot['longitude'],
             data_to_plot['latitude'],
-            c=data_to_plot['predicted_effect_size'],
-            cmap=plt.cm.Reds_r,
+            c=data_to_plot[var_to_plot],
+            cmap=plt.cm.Reds_r if reverse_cmap else plt.cm.Reds,
             norm=norm,
-            s=10,
+            s=5,
             edgecolor='k',
             linewidth=0.3,
             transform=ccrs.PlateCarree(),
+            alpha=0.8,
         )
 
         # Add title to the left of each axis
@@ -680,10 +726,10 @@ def plot_spatial_effect_distribution(predictions_df, time_frame=2900, figsize=(1
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.15)  # Make room for colorbar at bottom
     cbar_ax = fig.add_axes([0.125, 0.1, 0.75, 0.02])  # [lower-left-x, lower-left-y, width, height]
-    fig.colorbar(sc, cax=cbar_ax, orientation='horizontal', label='Predicted Effect Size (Hedges\' g)')
+    fig.colorbar(sc, cax=cbar_ax, orientation='horizontal', label=cbar_label)
     cbar_ax.tick_params(labelsize=8)  # Adjust colorbar tick size
 
-    plt.suptitle('Spatial distribution of predicted effect sizes for SSP scenarios', fontsize=8)
+    plt.suptitle(title, fontsize=8)
     plt.show()
     
     return fig, axes
@@ -830,6 +876,335 @@ def save_fig(
     print(f"Figure saved to {fig_fp}")
     
     
+### single-use functions, here for tidyness
+def plot_study_timeseries(df: pd.DataFrame, ax=None, colorby='core_grouping') -> plt.Axes:
+    """
+    Plot the temporal distribution of studies and observation counts.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(9, 3), dpi=300)
+
+    # Drop NA from year columns
+    dates_df = df.dropna(subset=["year"])
+
+    # Count occurrences of year of each doi
+    year_counts = df.groupby('year')['doi'].nunique()
+
+    # Define smaller font size for most elements
+    small_fontsize = 0.8 * plt.rcParams['font.size']
+
+    # Create the bar chart
+    ax.bar(year_counts.index, year_counts.values, color='royalblue', width=150, alpha=0.5, edgecolor='black', linewidth=0.5)
+    ax.set_ylabel("Number of studies", fontsize=plt.rcParams['font.size'])
+    ax.tick_params(axis='both', which='major', labelsize=small_fontsize)
+
+    # Set y-ticks to appear every 5 units
+    max_count = year_counts.max()
+    y_ticks = np.arange(0, max_count + 5, 5)
+    ax.set_yticks(y_ticks)
+    ax.set_yticklabels(y_ticks, fontsize=small_fontsize)
+
+    ax.grid(axis='y', linestyle='--', alpha=0.6)
+
+    # Group df by selected group
+    grouped_df = df.groupby([colorby, 'year'])
+
+    # Sum total n for each unique group and by year
+    group_counts = grouped_df['n'].sum()
+
+    # Plot number of observations each year, by selected group
+    unique_group = df[colorby].unique()
+    n_ax = ax.twinx()
+    group_palette = sns.color_palette("colorblind", len(unique_group))
+    group_color_map = dict(zip(unique_group, group_palette))
+
+    for group in unique_group:
+        group_data = group_counts[group_counts.index.get_level_values(colorby) == group]
+        n_ax.scatter(group_data.index.get_level_values('year'), group_data.values,
+                     color=group_color_map[group], alpha=1, s=20, label=group, edgecolor='white', linewidth=0.5)
+
+    n_ax.set_ylabel("Number of observations", rotation=-90, labelpad=12, fontsize=plt.rcParams['font.size'])
+    n_ax.tick_params(axis='y', labelsize=small_fontsize)
+
+    # Align y-axis ticks with the bar chart
+    max_observations = group_counts.max()
+    n_yticks = np.arange(0, 4001, 1000)
+    n_ax.set_yticks(n_yticks)
+    n_ax.set_yticklabels(n_yticks, fontsize=small_fontsize)
+
+    # Create compact legend with smaller font
+    legend = n_ax.legend(title=colorby.capitalize().replace('_', ' '),
+                         loc='upper left',
+                         fontsize=small_fontsize,
+                         framealpha=0.7,
+                         title_fontsize=small_fontsize)
+    legend.get_title().set_ha('left')
+
+    plt.xlabel('Year', fontsize=plt.rcParams['font.size'])
+    plt.title("Temporal distribution of studies", fontsize=plt.rcParams['font.size'])
+    plt.tight_layout()
+    return ax
+
+
+def create_faceted_dotplot_with_percentages(df: pd.DataFrame, top_n: int = 10, groupby: str = 'taxa', omission_threshold: int = 10) -> plt.Figure:
+    """
+    Create a faceted dotplot with percentages for the top N species in each taxonomic group.
+    """
+    count_df = df.groupby(['species', 'genus', groupby])['n'].sum().reset_index()
+    
+    # Get taxa that meet the omission threshold
+    group_counts = count_df.groupby(groupby)['n'].sum()
+    unique_in_group = sorted([group for group in group_counts.index 
+                          if group_counts[group] >= omission_threshold])
+    n_in_group = len(unique_in_group)
+    
+    fig, axes = plt.subplots(1, n_in_group, figsize=(5 * n_in_group, 10), sharey=False)
+    
+    if n_in_group == 1:
+        axes = [axes]
+    
+    for i, group in enumerate(unique_in_group):
+        ax = axes[i]
+        
+        group_data = count_df[count_df[groupby] == group].copy()
+        total_count = group_data['n'].sum()
+        
+        group_data.n = group_data.n.astype(int)
+        topn = group_data.nlargest(top_n, 'n')
+        other_species = group_data[~group_data['species'].isin(topn['species'])]
+        
+        if len(other_species) > 0:
+            other_count = other_species['n'].sum()
+            other_percentage = (other_count / total_count) * 100
+            
+            other_sum = pd.DataFrame({
+                'species': [f'Other ({len(other_species)} species)'],
+                'genus': ['Various'],
+                groupby: [group],
+                'n': [other_count]
+            })
+            
+            plot_data = pd.concat([topn, other_sum], ignore_index=True)
+        else:
+            plot_data = topn
+        
+        plot_data['species_label'] = plot_data.apply(
+            lambda row: f"{row['species']} ({(row['n']/total_count*100):.1f}%)", axis=1
+        )
+        
+        plot_data = plot_data.sort_values('n', ascending=True)
+        
+        unique_genera = sorted(plot_data['genus'].unique())
+        genus_palette = dict(zip(unique_genera, sns.color_palette("Spectral", len(unique_genera))))
+        # specify 'various' genus as black
+        genus_palette['Various'] = 'black'
+        
+        colors = [genus_palette[genus] for genus in plot_data['genus']]
+        y_positions = range(len(plot_data))
+        ax.scatter(plot_data['n'], y_positions, c=colors, s=100)
+        
+        # add count labels
+        for j, (_, row) in enumerate(plot_data.iterrows()):
+            ax.text(row['n'] + 0.02 * ax.get_xlim()[1] + len(str(row['n']))*0.02*ax.get_xlim()[1], j, f"{row['n']}", va='center')
+        for j, (_, row) in enumerate(plot_data.iterrows()):
+            ax.plot([0, row['n']], [j, j], 'gray', alpha=0.3)
+        
+        # formatting
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(plot_data['species_label'])
+        max_count = plot_data['n'].max()
+        ax.set_xlim(0, max_count * 1.3)  # extra space for the count labels
+        ax.grid(axis='x', linestyle='--', alpha=0.7)
+        ax.set_xlabel('Count', fontsize=12)
+        if i == 0:
+            ax.set_ylabel('Species', fontsize=12)
+        # legend
+        legend_handles = [Line2D([0], [0], marker='o', color='w',
+                              markerfacecolor=genus_palette[genus], markersize=10)
+                         for genus in unique_genera]
+        
+        total_species = len(group_data)
+        ax.set_title(f'{group.capitalize()}\n(Total: {int(total_count)} samples, {total_species} species)', fontsize=14)
+        ax.legend(legend_handles, unique_genera, 
+                 title='Genus', loc='lower right')
+    
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.9)
+    plt.suptitle(f'Top {int(top_n)} Species Counts by Taxonomic Group', fontsize=16)
+    
+    return fig
+
+
+
+def plot_filtered_meow_regions(filter_dict: dict={'Lat_Zone': 'Tropical'}, 
+                               extent=(-180, 180, -40, 40),
+                               figsize=(15, 10),
+                               dpi=300,
+                               cmap='viridis'):
+    """
+    Plots filtered marine ecoregions of the world (MEOW) on a map.
+
+    Parameters:
+    - filter_dict: Dictionary specifying column_name: value pairs to filter the MEOW shapefile.
+    - extent: Tuple specifying the map extent in the format (min_lon, max_lon, min_lat, max_lat).
+    - figsize: Figure size as (width, height) in inches.
+    - dpi: Resolution in dots per inch.
+    - cmap: Colormap to use for the regions.
+
+    Returns:
+    - fig, ax: Matplotlib figure and axis objects for further customization.
+    """
+    # Read in shapefiles from directory
+    gdf = gpd.read_file(config.climatology_data_dir / "MEOW" / "meow_ecos.shp")
+    
+    # Filter areas_df based on filter_dict
+    if filter_dict:
+        for col, value in filter_dict.items():
+            gdf = gdf[gdf[col] == value]
+
+    # Create figure and axis
+    fig, ax = plt.subplots(1, 1, figsize=figsize, subplot_kw={'projection': ccrs.PlateCarree()}, dpi=dpi)
+
+    ax = format_geo_axes(ax, extent=extent)
+
+    # Plot filtered areas on world map
+    gdf.plot(ax=ax, column='REALM', legend=True, 
+             cmap=cmap, alpha=0.5, 
+             legend_kwds={'bbox_to_anchor': (0.5, -0.3),
+                          'ncol': gdf.REALM.nunique(),
+                          'loc': 'lower center',
+                          'fontsize': 8})
+
+    # Add gridlines
+    gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
+    gl.xlabel_style = {'size': 8}
+    gl.ylabel_style = {'size': 8}
+    gl.top_labels = False
+    gl.right_labels = False
+
+    return fig, ax
+
+
+def plot_areas_with_study_locations(df, filter_dict: dict={'Lat_Zone': 'Tropical'}, extent=(-180, 180, -40, 40)):
+    """
+    Plots areas and study locations on a world map.
+
+    Parameters:
+    - df: pandas.DataFrame containing study locations with latitude and longitude.
+    - filter_dict: Dictionary specifying column_name: value pairs to filter areas_df.
+    - extent: Tuple specifying the map extent in the format (min_lon, max_lon, min_lat, max_lat).
+    """
+    # Create base map with filtered regions
+    fig, ax = plot_filtered_meow_regions(filter_dict=filter_dict, extent=extent)
+
+    # Plot study locations
+    locs_df = df.drop_duplicates('doi', keep='first')
+    for i, (doi, data) in enumerate(locs_df.iterrows()):
+        # Convert coordinates to float if needed
+        lat = float(data["latitude"]) if isinstance(data["latitude"], str) else data["latitude"]
+        lon = float(data["longitude"]) if isinstance(data["longitude"], str) else data["longitude"]
+
+        # Only plot if coordinates are valid
+        if pd.notna(lat) and pd.notna(lon):
+            ax.plot(lon, lat, 'o', markeredgecolor='white', markersize=5, 
+                    color='red', transform=ccrs.PlateCarree())
+
+    # Add title
+    ax.set_title('Spatial distribution of studies', fontsize=10)
+    
+    plt.show()
+    
+    return fig, ax
+    
+    
+def format_geo_axes(ax: plt.Axes, extent: tuple | list = (-180, 180, -40, 50)) -> plt.Axes:
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+    ax.add_feature(cfeature.LAND, facecolor='white')
+    ax.add_feature(cfeature.OCEAN, alpha=0.3)
+    ax.add_feature(cfeature.COASTLINE, edgecolor='lightgray', zorder=-1)
+    ax.add_feature(cfeature.BORDERS, linestyle=':', edgecolor='gray', alpha=0.1, zorder=-1)
+
+    return ax
+
+
+def plot_effect_size_distributions(df, effect_sizes=['cohens_d', 'hedges_g', 'relative_calcification', 'absolute_calcification', 'st_relative_calcification', 'st_absolute_calcification'], outlier_limits=None, title='Effect Size Distributions'):
+    """
+    Plots histograms and boxplots for the given effect sizes in the dataframe.
+
+    Parameters:
+    - df (pd.DataFrame): The dataframe containing the effect size data.
+    - effect_sizes (list): List of effect size column names to plot.
+    - outlier_limits (tuple): Optional tuple (lower_limit, upper_limit) to filter outliers.
+    """
+    fig, axes = plt.subplots(len(effect_sizes), 1, figsize=(5, 8), dpi=300)
+
+    for i, effect_size in enumerate(effect_sizes):
+        ax = axes[i]
+        data = df[effect_size].dropna()
+
+        # Remove outliers if limits are provided
+        if outlier_limits:
+            lower_limit, upper_limit = outlier_limits
+            data = data[(data > lower_limit) & (data < upper_limit)]
+
+        # Plot histogram
+        ax.hist(data, bins=100, color='skyblue', edgecolor='black')
+        ax.set_xlabel(effect_size, fontsize=6)
+        ax.set_ylabel('Frequency', fontsize=6)
+        ax.grid(ls='--', alpha=0.5)
+        ax.vlines(0, *ax.get_ylim(), color='red', linestyle='--', linewidth=1)
+
+        # Add boxplot above using divider
+        divider = make_axes_locatable(ax)
+        box_ax = divider.append_axes("top", size="20%", pad=0.01, sharex=ax)
+        box_ax.boxplot(data, vert=False, patch_artist=True,
+                       boxprops=dict(facecolor='lightgray'))
+        box_ax.axis('off')
+        for outlier in box_ax.findobj(match=plt.Line2D):
+            outlier.set_markersize(3)
+            outlier.set_alpha(0.1)
+
+        # Optional: log scale if necessary
+        if max([p.get_height() for p in ax.patches]) > 10:
+            ax.set_yscale('log')
+
+        ax.tick_params(axis='both', which='major', labelsize=6)
+
+    plt.suptitle(title, fontsize=8)
+    plt.tight_layout()
+
+
+def set_up_regression_plot(var:str):
+    if var == 'phtot':
+        xlab = '$\\Delta$ pH'
+        xlim = (-1, 0)
+        predlim = (-1, 0)
+        scenario_var = 'ph'
+    elif var == 'temp':
+        xlab = '$\\Delta$ Temperature ($^\\circ C$)'
+        xlim = (0,11)
+        predlim = None
+        scenario_var = 'sst'
+    return xlab, xlim, predlim, scenario_var
+
+
+def plot_contour(ax, x, y, df, title, legend_label='Calcification Rate'):
+    # Create a grid of points
+    X, Y = np.meshgrid(x, y)
+    Z = np.zeros_like(X)
+    for i in range(len(X)): # interpolate the data to create a smooth contour plot
+        for j in range(len(Y)):
+            # Find the nearest data point
+            nearest_idx = ((df['temp'] - X[i, j])**2 + (df['phtot'] - Y[i, j])**2).idxmin()
+            Z[i, j] = df.loc[nearest_idx, 'st_calcification']
+
+    # Plot the contour
+    contour = ax.contourf(X, Y, Z, levels=20, cmap='viridis')
+    ax.set_xlabel('Temperature ($^\\circ C$)')
+    ax.set_ylabel('pH$_T$')
+    ax.set_title(title)
+    plt.colorbar(contour, label=legend_label)
+
 ### DEPRECATED
 # def generic_plot_stacked_hist(df: pd.DataFrame, ax: matplotlib.axes.Axes, filter_col_name: str, filter_col_val: str | float, response_col_name: str, group_col_name: str, group_values_list: list, color_map: dict, title: str="no title") -> None:
 #     """
