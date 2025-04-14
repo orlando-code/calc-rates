@@ -16,7 +16,10 @@ from shapely.geometry import Point
 # R
 import rpy2.robjects as ro
 from rpy2.robjects import pandas2ri
-
+from rpy2.robjects.packages import importr
+metafor = importr('metafor')
+grdevices = importr('grDevices')
+    
 # stats
 import numpy as np
 import pandas as pd
@@ -195,9 +198,9 @@ def meta_regplot(model, model_comps: tuple, x_mod:str, level=95, ci=True, pi=Tru
     
     # create weight vector for point sizes
     if point_size == "seinv":
-        weights = 1 / np.sqrt(vi)
+        weights = 1 / np.sqrt(vi + 0.001)   # correct for no apparent variance
     elif point_size == "vinv":
-        weights = 1 / vi
+        weights = 1 / vi + 0.001    # correct for no apparent variance
     elif isinstance(point_size, (list, np.ndarray)):
         weights = np.array(point_size)
     else:
@@ -215,7 +218,6 @@ def meta_regplot(model, model_comps: tuple, x_mod:str, level=95, ci=True, pi=Tru
     range_xi = max(xi) - min(xi)    # create sequence of x values for the regression line
     predlim = (min(xi) - 0.1*range_xi, max(xi) + 0.1*range_xi) if predlim is None else predlim
     xs = np.linspace(predlim[0], predlim[1], 1000)
-    print(predlim)
     
     r_xs = ro.FloatVector(xs)
     
@@ -687,7 +689,8 @@ def plot_spatial_effect_distribution(predictions_df, var_to_plot: str = 'predict
     # Create figure
     fig, axes = plt.subplots(len(ssp_scenarios), 1, figsize=figsize, subplot_kw={'projection': ccrs.PlateCarree()}, dpi=dpi)
 
-    mean_predictions_df = predictions_df[predictions_df['percentile'] == "mean"]
+    # mean_predictions_df = predictions_df[predictions_df['percentile'] == "mean"]
+    mean_predictions_df = predictions_df.copy()
     # Normalize color map to the range of predicted effect sizes    
     min_effects, max_effects = mean_predictions_df[var_to_plot].min(), mean_predictions_df[var_to_plot].max()
 
@@ -843,13 +846,13 @@ def plot_global_timeseries(data, plot_vars=['sst', 'ph'], plot_var_labels: list[
         if i >= n_cols: # effect sizes
             # axis.set_ylabel("Effect size", fontsize=8)
             # Set y-ticks to include 0 and be spaced every 0.5
-            ymin = np.floor(global_min_ylim * 2) / 2  # Round down to nearest 0.5
-            ymax = np.ceil(global_max_ylim * 2) / 2   # Round up to nearest 0.5
-            ticks = np.arange(ymin, ymax + 0.1, 0.5)  # Add 0.1 to include ymax
-            # Make sure 0 is included in the ticks
-            if 0 not in ticks:
-                ticks = np.sort(np.append(ticks, 0))
-            axis.set_yticks(ticks)
+            # ymin = np.floor(global_min_ylim * 2) / 2  # Round down to nearest 0.5
+            # ymax = np.ceil(global_max_ylim * 2) / 2   # Round up to nearest 0.5
+            # ticks = np.arange(ymin, ymax + 0.1, 0.5)  # Add 0.1 to include ymax
+            # # Make sure 0 is included in the ticks
+            # if 0 not in ticks:
+            #     ticks = np.sort(np.append(ticks, 0))
+            # axis.set_yticks(ticks)
 
             axis.set_ylim(global_min_ylim, global_max_ylim)
             if i < len(axes) - n_cols:
@@ -1035,7 +1038,6 @@ def create_faceted_dotplot_with_percentages(df: pd.DataFrame, top_n: int = 10, g
     return fig
 
 
-
 def plot_filtered_meow_regions(filter_dict: dict={'Lat_Zone': 'Tropical'}, 
                                extent=(-180, 180, -40, 40),
                                figsize=(15, 10),
@@ -1204,6 +1206,181 @@ def plot_contour(ax, x, y, df, title, legend_label='Calcification Rate'):
     ax.set_ylabel('pH$_T$')
     ax.set_title(title)
     plt.colorbar(contour, label=legend_label)
+
+
+def plot_funnel_from_model(
+    model,
+    main: str = None,
+    effect_type: str = "Effect Size",
+    shade_colors: list[str] = ["white", "gray55", "gray75"],
+    back_color: str = "gray90",
+    level: list[float] = [0.1, 0.05, 0.01],
+    legend: bool = True,
+    hlines: list[float] = None,
+    yaxis: str = "sei",
+    digits: list[int] = [1, 3],
+    las: int = 1,
+    xaxs: str = "i",
+    yaxs: str = "i",
+    xlim: list=None,
+    ylim: list=[0,10],  # this range is ridiculous, adjust accordingly
+    plot_in_python: bool = False,
+    figsize: tuple[int, int] = (10, 8),
+    save_path: [str] = None
+) -> None | tuple[plt.Figure, plt.Axes]:
+    """
+    Create a funnel plot from an existing metafor model object.
+    
+    Parameters
+    ----------
+    model : rpy2.robjects.vectors.ListVector
+        A fitted metafor model object (from rma, rma.uni, etc.)
+    main : str, 
+        Main title for the plot
+    effect_type : str, 
+        Label for x-axis
+    shade_colors : List[str], 
+        Colors for confidence contours (from innermost to outermost)
+    back_color : str, 
+        Background color for the plot
+    level : List[float], 
+        Confidence levels for contours
+    legend : bool, 
+        Whether to include a legend
+    hlines : List[float], 
+        Y-positions for horizontal reference lines
+    yaxis : str, 
+        Y-axis scale ('se', 'vi', 'seinv', 'vinv')
+    digits : List[int], 
+        Number of digits for axis values
+    las : int, 
+        Orientation of axis labels (0-3)
+    xaxs : str, 
+        X-axis style ('r' for regular, 'i' for internal)
+    yaxs : str, 
+        Y-axis style ('r' for regular, 'i' for internal)
+    plot_in_python : bool, 
+        Whether to capture the R plot and display it in Python
+    figsize : tuple, 
+        Figure size for matplotlib plot (if plot_in_python=True)
+    save_path : str, 
+        Path to save the plot (if plot_in_python=True)
+    
+    Returns
+    -------
+    None or Tuple[plt.Figure, plt.Axes]
+        If plot_in_python=True, returns the matplotlib figure and axes
+    
+    Notes
+    -----
+    This function requires that you have already fitted a metafor model
+    using rpy2. The model should be created with metafor's rma() or similar
+    functions before passing to this function.
+    """
+    # Convert Python lists to R vectors where needed
+    r_shade = ro.StrVector(shade_colors)
+    r_level = ro.FloatVector(level)
+    r_digits = ro.IntVector(digits)
+    
+    # Handle horizontal lines
+    r_hlines = ro.NULL if hlines is None else ro.FloatVector(hlines)
+    
+    if plot_in_python:
+        # Create a temporary file for the R plot
+        import tempfile
+        import os
+        
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+            temp_filename = temp_file.name
+            
+        # Create the plot in R and save to file with high resolution
+        # Multiply dimensions by 3 and use high DPI for better quality
+        grdevices.png(temp_filename, 
+                      width=figsize[0], height=figsize[1], 
+                      units='in', res=300)
+        
+        # Call metafor's funnel function with the provided parameters
+        metafor.funnel(
+            x=model,
+            main=ro.NULL if main is None else main,
+            shade=r_shade,
+            back=back_color,
+            level=r_level,
+            legend=legend,
+            hlines=r_hlines,
+            xlab=effect_type,
+            yaxis=yaxis,
+            las=las,
+            digits=r_digits,
+            xaxs=xaxs,
+            yaxs=yaxs,
+            xlim=ro.NULL if xlim is None else ro.FloatVector(xlim),
+            # ylim=ro.NULL if ylim is None else ro.FloatVector(ylim)
+        )
+        
+        grdevices.dev_off()
+        
+        # Display the plot in Python
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+        img = plt.imread(temp_filename)
+        ax.imshow(img, interpolation='nearest')  # Use 'nearest' for sharper image rendering
+        ax.axis('off')
+        plt.tight_layout(pad=0)  # Reduce padding
+        
+        # Save if requested
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        
+        # Clean up temporary file
+        os.unlink(temp_filename)
+        
+        return fig, ax
+    else:
+        # Call metafor's funnel function with the provided parameters
+        metafor.funnel(
+            x=model,
+            main=ro.NULL if main is None else main,
+            shade=r_shade,
+            back=back_color,
+            level=r_level,
+            legend=legend,
+            hlines=r_hlines,
+            xlab=effect_type,
+            yaxis=yaxis,
+            las=las, 
+            digits=r_digits,
+            xaxs=xaxs,
+            # yaxs=yaxs
+            )
+            # xlim=ro.NULL if xlim is None else ro.FloatVector(xlim),
+        # save the plot to a file if save_path is provided
+        if save_path:
+            # Use higher resolution settings
+            grdevices.png(str(save_path), width=figsize[0], height=figsize[1], units='in', res=300)
+            metafor.funnel(
+                x=model,
+                main=ro.NULL if main is None else main,
+                shade=r_shade,
+                back=back_color,
+                level=r_level,
+                legend=legend,
+                hlines=r_hlines,
+                xlab=effect_type,
+                yaxis=yaxis,
+                las=las, 
+                digits=r_digits,
+                xaxs=xaxs,
+                yaxs=yaxs,
+                xlim=ro.NULL if xlim is None else ro.FloatVector(xlim),
+                # ylim=ro.NULL if ylim is None else ro.FloatVector(ylim)
+            )            
+            grdevices.dev_off()
+            plt.close()
+        
+        return None
+
+
+
 
 ### DEPRECATED
 # def generic_plot_stacked_hist(df: pd.DataFrame, ax: matplotlib.axes.Axes, filter_col_name: str, filter_col_val: str | float, response_col_name: str, group_col_name: str, group_values_list: list, color_map: dict, title: str="no title") -> None:
