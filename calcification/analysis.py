@@ -159,10 +159,25 @@ def calc_cohens_d(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     Returns:
         tuple[float, float]: Cohen's d and its variance
     """
-    sd_pooled = np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))    # N.B. BH (2021) uses simple average
+    sd_pooled = calc_pooled_sd(n1, n2, sd1, sd2) 
     d = (mu2 - mu1) / sd_pooled
     d_var = (n1 + n2) / (n1 * n2) + d ** 2 / (2 * (n1 + n2))
     return d, d_var
+
+
+def calc_pooled_sd(n1: int, n2: int, sd1: float, sd2: float) -> float:
+    """Calculate pooled standard deviation for two groups.
+    N.B. BH (2021) uses simple average
+    Args:
+        n1 (int): number of samples in group 1 (control)
+        n2 (int): number of samples in group 2 (treatment)
+        sd1 (float): standard deviation of group 1
+        sd2 (float): standard deviation of group 2
+        
+    Returns:
+        float: pooled standard deviation
+    """
+    return np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))
 
 
 def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: int) -> float:
@@ -277,22 +292,25 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
                     # Convert Series to DataFrame   (necessary when not using apply)
                     df = pd.DataFrame([df].T)
                 if df is not None:
-                    grouped_data.extend(df)
+                    grouped_data.extend(df) # was previously extend
     
     if isinstance(grouped_data, list):
-        # TODO: fix this: still raising the futurewarning error
+        # Fix for performance warnings
         valid_dfs = [df for df in grouped_data if df is not None and not df.empty and not df.isna().all().all()]
         if valid_dfs:
             df = pd.concat(valid_dfs)
-            df.loc[:,"ID"] = df.index
+            # Sort index to avoid lexsort depth warning and create a copy to avoid fragmentation
+            df = df.sort_index().copy()
+            df["ID"] = df.index
         else:
             # Return empty DataFrame with same columns and dtypes as expected output
             df = pd.DataFrame(columns=df.columns if len(grouped_data) > 0 and grouped_data[0] is not None else None)
-            df.loc[:,"ID"] = df.index
+            df["ID"] = df.index
         return df
     elif isinstance(grouped_data, pd.DataFrame):
-        df = grouped_data
-        df.loc[:,"ID"] = df.index
+        # Sort index and create a copy to avoid performance warnings
+        df = grouped_data.sort_index().copy()
+        df["ID"] = df.index
         return df
     else:
         raise ValueError("Invalid data type for grouped_data. Expected list or DataFrame.")
@@ -308,25 +326,133 @@ def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pandas.DataFrame: DataFrame with effect size calculations
     """
-    
-    results_df = []
-    control_df = df[df['treatment'] == "control"]
-    if control_df.empty:
-        print(f"No control data found for this group (index {df.index} DOI {df['doi'].iloc[0]} species {df['species_types'].iloc[0]})")
-        return None
-    # aggregate if necessary
-    control_row = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
-    
-    for i, row in df.iterrows():
-        if row['treatment'] == "control":
-            continue
-        # calculate effect size for each row in treatment_df
-        effect_size = calc_treatment_effect_for_row(row, control_row)
+    def process_group(group, control_level_col):
+        control_level = min(group[control_level_col])
+        control_df = group[group[control_level_col] == control_level]
+        treatment_df = group[group[control_level_col] > control_level]
         
-        results_df.append(pd.DataFrame(effect_size).T)
-    # run calc_treatment_effect_for_row for each
+        if treatment_df.empty:  # skip if there's no treatment data
+            return
+            
+        # convert control to series if necessary    # TODO: mean?
+        # Convert control_df to Series: take mean of numeric columns and first value of others
+        if isinstance(control_df, pd.DataFrame):
+            if len(control_df) > 1:
+                # Get numeric columns
+                numeric_cols = control_df.select_dtypes(include='number').columns
+                # Create a Series with first values
+                control_series = control_df.iloc[0].copy()
+                # Replace numeric columns with their means
+                for col in numeric_cols:
+                    control_series[col] = control_df[col].mean()
+            else:
+                control_series = control_df.iloc[0]
+        else:
+            control_series = control_df
+        
+        # Calculate effect size for each row in treatment_df and create a list of results
+        effect_rows = []
+        for _, row in treatment_df.iterrows():
+            effect_row = calc_treatment_effect_for_row(row, control_series)
+            effect_rows.append(effect_row)
+        
+        # Concatenate all rows to create the effect_size DataFrame
+        if effect_rows:
+            effect_size = pd.concat(effect_rows, axis=1).T.copy()
+            
+            # update treatment label
+            if control_level_col == "treatment_level_t":
+                effect_size['treatment_level_ph'] = group.name
+                if group.name >= 1:
+                    effect_size['treatment'] = 'temp_mv'
+            elif control_level_col == "treatment_level_ph":
+                effect_size['treatment_level_t'] = group.name
+                if group.name >= 1:
+                    effect_size['treatment'] = 'phtot_mv'
+            
+            return effect_size
+        return None
+
+    # process each group and append results
+    results_ph = grouped_by_ph = df.groupby('treatment_level_ph').apply(
+        process_group, control_level_col='treatment_level_t'
+    )
+    results_t = grouped_by_t = df.groupby('treatment_level_t').apply(
+        process_group, control_level_col='treatment_level_ph'
+    )
+    # TODO: this doesn't add effects for where BOTH treatment levels change at once i.e. multivariate, the part which isn't in-level comparison
     
-    return results_df
+    
+    
+    
+    # Filter out None values before returning
+    results = []
+    if not results_ph.empty:
+        results.append(results_ph)
+    if not results_t.empty:
+        results.append(results_t)
+    
+    return results
+    
+    
+    
+    # results_df = []
+    # control_df = df[df['treatment'] == "control"]
+    # if control_df.empty:
+    #     print(f"No control data found for this group (index {df.index} DOI {df['doi'].iloc[0]} species {df['species_types'].iloc[0]})")
+    #     return None
+    # # aggregate if necessary
+    # control_row = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
+    
+    # for i, row in df.iterrows():
+    #     if row['treatment'] == "control":
+    #         continue
+    #     # calculate effect size for each row in treatment_df
+    #     effect_size = calc_treatment_effect_for_row(row, control_row)
+        
+    #     results_df.append(pd.DataFrame(effect_size).T)
+    
+    # return results_df
+
+
+#     results_df = []
+#     # for each treatment value in pH, calculate effect size varying temperature
+#     grouped_by_ph = df.groupby('treatment_level_ph')
+#     grouped_by_t = df.groupby('treatment_level_t')
+    
+#     def process_group(group, control_level_col):
+#         control_level = min(group[control_level_col])
+#         control_df = group[group[control_level_col] == control_level]
+#         treatment_df = group[group[control_level_col] > control_level]
+        
+#         if treatment_df.empty:  # skip if there's no treatment data
+#             return
+
+#         # covered (better) before being passed
+#         # # aggregate control data if n > 1 (more precise than just taking first row)
+#         # control_data = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
+#         # # Aggregate treatment data if all n=1
+#         # if np.all(treatment_df.n == 1):
+#         #     treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T
+            
+            
+#         # update treatment label
+#         if control_level_col == "treatment_level_t":
+#             treatment_df.loc[:, 'treatment'] = 'temp'
+#         elif control_level_col == "treatment_level_ph":
+#             treatment_df.loc[:, 'treatment'] = 'phtot'
+            
+#         # calculate effect size varying treatment condition
+#         # First make sure we convert control_data DataFrame to Series if needed
+#         control_series = control_df.iloc[0] if isinstance(control_df, pd.DataFrame) else control_df
+#         # Calculate effect size for each row in treatment_df
+#         effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_series), axis=1)
+#         return effect_size
+    
+#     results_df.append(grouped_by_ph.apply(process_group, control_level_col='treatment_level_t', include_groups=False))
+#     results_df.append(grouped_by_t.apply(process_group, control_level_col='treatment_level_ph', include_groups=False))
+    
+#     return pd.concat(results_df).reset_index(drop=True)
 
 
 def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
@@ -401,7 +527,11 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     })
     
     # calculate metadata
+    row_copy['control_temp'] = control_data['temp']
+    row_copy['treatment_temp'] = treatment_row['temp']
     row_copy['delta_t'] = row_copy['temp'] - t_in_c
+    row_copy['control_phtot'] = control_data['phtot']
+    row_copy['treatment_phtot'] = treatment_row['phtot']
     row_copy['delta_ph'] = row_copy['phtot'] - ph_c
     row_copy['treatment_val'] = row_copy['temp'] if row_copy['treatment'] == 'temp' else row_copy['phtot']
     row_copy['control_calcification'] = mu_c
@@ -583,7 +713,9 @@ def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_
 
     # select only rows relevant to treatment
     if treatment:
-        data = data[data["treatment"] == treatment]
+        data = data[data["treatment"].astype(str).str.contains(treatment, na=False)]
+        # data = data[data['treatment'] == treatment]
+        
     n_investigation = len(data)
     # remove nans for subset effect_type
     required_columns = [effect_type, effect_type_var, 'original_doi', 'ID'] + (necessary_vars or [])
@@ -646,10 +778,6 @@ def run_metafor_mv(
     # ensure original_doi is string type to avoid conversion issues
     df = df.copy()
     df['original_doi'] = df['original_doi'].astype(str)
-    
-
-    
-    
     
     df_subset = df[all_necessary_vars]
     df_r = ro.pandas2ri.py2rpy(df_subset)
@@ -1214,3 +1342,66 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
 #     results_df.append(grouped_by_t.apply(process_group, control_level_col='treatment_level_ph', include_groups=False))
     
 #     return pd.concat(results_df).reset_index(drop=True)
+
+
+# # Import required R packages
+# from rpy2.robjects.packages import importr
+# from rpy2.robjects import pandas2ri
+# import rpy2.robjects as ro
+
+# # Activate pandas2ri for DataFrame conversion
+# pandas2ri.activate()
+# r = ro.r
+
+# # Import metafor package
+# metafor = importr('metafor')
+
+# # temp_df['esid'] = temp_df.groupby('doi').cumcount() + 1
+
+# # Convert your DataFrame to an R DataFrame
+# r_temp_df = pandas2ri.py2rpy(temp_df)
+# ro.r.assign('dat', r_temp_df)
+# ro.r.assign('res', basic_temp_model)
+
+
+# # Now you can use the updated 'dat' and 'V' in your forest plot or further analysis
+# ro.r('''
+# create_forest_plot <- function(res, dat) {
+#     par(tck=-.01, mgp=c(1,0.01,0), mar=c(2,4,2,2))
+    
+#     # Ensure 'original_doi' is numeric to avoid non-numeric argument errors
+#     dat$original_doi <- as.numeric(as.factor(dat$original_doi))
+#     # sort by original_doi
+#     dat <- dat[order(dat$original_doi), ]
+    
+#     dd <- c(0, diff(dat$original_doi))
+#     print(dd)
+#     rows <- (1:res$k)*5 + cumsum(dd)  # Multiply by 2 to increase vertical spacing
+#     forest(res, 
+#     # rows=rows, 
+#     # ylim=c(-500, max(rows)+500), xlim=c(-5,7),
+#                  cex=0.4, efac=c(0,1), mlab="Pooled Estimate")
+    
+#     # abline(h = rows[c(1,diff(rows)) == 2] - 1, lty="dotted")
+# }
+# ''')
+# from rpy2.robjects.packages import importr
+
+# grdevices = importr('grDevices')
+
+# # To execute the forest plot function
+# ro.r('create_forest_plot(res, dat)')
+# # save the plot
+
+# # If you want to save the plot
+# r('pdf("forest_plot.pdf", width=12, height=10)')
+# r('create_forest_plot(res, dat)')
+# r('dev.off()')
+
+# # grdevices.png(str(config.fig_dir / 'forest_plot.png'), width=800, height=600)
+# # grdevices.dev_off()
+# # # view plot in python
+# # from matplotlib import pyplot as plt
+# # import matplotlib.image as mpimg
+# # img = mpimg.imread('forest_plot.png')
+# # plt.imshow(img)
