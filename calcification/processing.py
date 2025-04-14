@@ -174,9 +174,12 @@ def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> 
     df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']] = df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']].infer_objects(copy=False).ffill()
     df[['coords', 'cleaned_coords']] = df.groupby('doi')[['coords', 'cleaned_coords']].ffill()  # fill only as far as the next DOI
     
-    if selection_dict:  # filter for selected values
+    if selection_dict:  # filter for selected values
         for key, value in selection_dict.items():
-            df = df[df[key] == value]    
+            if isinstance(value, list):
+                df = df[df[key].isin(value)]
+            else:
+                df = df[df[key] == value]
     
     # missing sample size values
     if df['n'].dtype == 'object':  # Only perform string operations if column contains strings
@@ -263,6 +266,16 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
             ).pHtot[0],
             axis=1
         )
+    # if phtot is still NaN, calculate from other parameters. # TODO: check that this works (eg. 10.1002/lno.10952)
+    # mask_missing_phtot_with_alt_carb = measured_df['phtot'].isna() & measured_df['pco2'].notna() & measured_df['ta'].notna() & measured_df['temp'].notna()
+    # if mask_missing_phtot_with_alt_carb.any():
+    #     measured_df.loc[mask_missing_phtot_with_alt_carb, 'phtot'] = measured_df[mask_missing_phtot_with_alt_carb].apply(
+    #         lambda row: cb.Csys(
+    #             TA=row['ta'], pCO2=row['pco2'], T_in=row['temp'], S_in=row['sal'] if pd.notna(row['sal']) else 35
+    #         ).pHtot[0],
+    #         axis=1
+    #     )
+    # TODO: provide pCO2?
 
     ### calculate carbonate chemistry
     carb_metadata = file_ops.read_yaml(config.resources_dir / "mapping.yaml")
@@ -387,7 +400,7 @@ def assign_treatment_groups(df: pd.DataFrame, control_T: float, control_pH: floa
     return df
 
 
-def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.1, irr_atol: float=30) -> pd.DataFrame:
+def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.08, irr_atol: float=30) -> pd.DataFrame:
     """
     Assign treatment groups to each row based on temperature and pH values,
     recognizing multiple levels of treatments.
