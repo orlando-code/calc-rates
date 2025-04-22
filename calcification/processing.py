@@ -11,13 +11,13 @@ import cbsyst.helpers as cbh
 
 
 ### helper functions
-def aggregate_df(df, method: str='mean') -> pd.DataFrame:
+def aggregate_df(df: pd.DataFrame, method: str='mean') -> pd.DataFrame:
     """Aggregate DataFrame by specified method (mean, median, etc.)"""
     aggregation_funcs = {col: method if pd.api.types.is_numeric_dtype(df[col]) else lambda x: x.iloc[0] for col in df.columns}  # define aggregation functions for each column
     return df.agg(aggregation_funcs)    # aggregate DataFrame
 
 
-def group_irradiance(df: pd.DataFrame, irr_col: float='irr', atol: float=30):
+def group_irradiance(df: pd.DataFrame, irr_col: float='irr', atol: float=30) -> pd.DataFrame:
     """
     Assigns an 'irr_group' to values that are within absolute tolerance.
     
@@ -53,8 +53,8 @@ def group_irradiance(df: pd.DataFrame, irr_col: float='irr', atol: float=30):
     return df
 
 
-def cluster_values(values, tolerance: float) -> list:
-    """TODO: combine with group_irradiance function
+def cluster_values(values: list, tolerance: float) -> list:
+    """
     Cluster values based on their proximity.
     
     Args:
@@ -116,6 +116,8 @@ def aggregate_treatments_with_individual_samples(df: pd.DataFrame) -> pd.DataFra
         temp_sd=('temp', 'std'),
         sal=('sal', 'mean'),
         sal_sd=('sal', 'std'),
+        irr=('irr', 'mean'),    # irradiance
+        irr_sd=('irr', 'std'),
         calcification=('calcification', 'mean'),    # calcification
         calcification_sd=('calcification', 'std'),
         st_calcification=('st_calcification', 'mean'),
@@ -124,7 +126,7 @@ def aggregate_treatments_with_individual_samples(df: pd.DataFrame) -> pd.DataFra
         n=('n', 'count')
     ).reset_index()
     # remove rows with n=1
-    df_no_ones = df[~df['doi'].isin(aggregated_df['doi'])]
+    df_no_ones = df[df['n'] != 1]
     # Append the aggregated data to the DataFrame
     df_no_ones = pd.concat([df_no_ones, aggregated_df], ignore_index=True)
     return df_no_ones
@@ -143,17 +145,10 @@ def calc_sd_from_se(se: float, n: int) -> float:
     return se * np.sqrt(n)
 
 
-def safe_to_numeric(col):
-    """Convert column to numeric if possible, otherwise return as is."""
-    try:
-        return pd.to_numeric(col)
-    except (ValueError, TypeError):
-        return col  # return original column if conversion fails
-
-
 ### raw file wrangling
 def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     """Clean dataframe fields and standardise for future processing"""
+    ### basic cleaning
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u") # replace any unicode versions of 'μ' with 'u'
     df = df.map(lambda x: unicodedata.normalize("NFKD", str(x)).replace('\xa0', ' ') if isinstance(x, str) else x)  # clean non-breaking spaces from string cells
     # general processing
@@ -163,14 +158,14 @@ def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> 
     df.columns = df.columns.str.replace('[()]', '', regex=True) # remove '(' and ')' from column names
     df['year'] = pd.to_datetime(df['year'], format='%Y')    # datetime format for later plotting
     
-    # flag up duplicate dois (only if they have also have 'include' as 'yes')
+    ### deal with duplicate dois: flag up duplicate dois which also have 'include' as 'yes'
     inclusion_df = df[df['include'] == 'yes']
     duplicate_dois = inclusion_df[inclusion_df.duplicated(subset='doi', keep=False)]
     if not duplicate_dois.empty and not all(pd.isna(duplicate_dois['doi'])):
         print("\nDuplicate DOIs found, treat with caution:")
         print([doi for doi in duplicate_dois.doi.unique() if doi is not np.nan])
         
-    # fill down necessary repeated metadata values
+    ### formating: fill down necessary repeated metadata values
     df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']] = df[['doi', 'year', 'authors', 'location', 'species_types', 'taxa']].infer_objects(copy=False).ffill()
     df[['coords', 'cleaned_coords']] = df.groupby('doi')[['coords', 'cleaned_coords']].ffill()  # fill only as far as the next DOI
     
@@ -181,16 +176,18 @@ def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> 
             else:
                 df = df[df[key] == value]
     
-    # missing sample size values
+    ### deal with missing n
     if df['n'].dtype == 'object':  # Only perform string operations if column contains strings
         df = df[~df['n'].str.contains('~', na=False)]   # remove any rows in which 'n' has '~' in the string
         df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
-    df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].apply(safe_to_numeric)
+        
+    ### infer data types
+    df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].astype(float, errors='ignore')  # convert all columns to float except for year
     problem_cols = ['irr', 'ipar']  # some columns have rogue strings when they should all contain numbers: in this case, convert unconvertable values to NaN
     for col in problem_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # remove any columns with 'unnamed' in the header
+    ### remove any columns with 'unnamed' in the header: these are an artefact from messing around outside the spreadsheets necessary columns
     df = df.loc[:, ~df.columns.str.contains('^unnamed')]
     return df
 
@@ -290,7 +287,7 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
     return df.combine_first(carb_df)
 
 
-def calculate_carb_chem(row, out_values: list) -> dict:
+def calculate_carb_chem(row: pd.Series, out_values: list) -> dict:
     """(Re)calculate carbonate chemistry parameters and return a dictionary.""" 
     try:
         out_dict = cb.Csys(
@@ -309,7 +306,7 @@ def calculate_carb_chem(row, out_values: list) -> dict:
         
         
 ### assigning treatment groups
-def determine_control_conditions(df) -> dict:
+def determine_control_conditions(df: pd.DataFrame) -> dict:
     """Identify the rows corresponding to min temperature and/or max pH.
     
     Args:
@@ -500,8 +497,7 @@ def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd
     df = pd.concat([df.iloc[:, :4], df.iloc[:, 4:].rename(columns=lambda col: col if var in col else f'{var}_{col}')], axis=1)
 
     # load locations yaml as dataframe
-    locations_fp = config.resources_dir / 'locations.yaml'
-    locations_df = pd.DataFrame(file_ops.read_yaml(locations_fp)).T
+    locations_df = pd.DataFrame(file_ops.read_yaml(locations_yaml_fp)).T
     # reorder columns to be latitude, longitude, location
     locations_df = locations_df[['latitude', 'longitude', 'location']]
 
@@ -511,6 +507,48 @@ def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd
     df.reset_index(inplace=True, names='doi')
     
     return df
+
+
+def generate_location_specific_anomalies(df: pd.DataFrame, scenario_var: str = "sst"):
+    df = df.sort_index()     # Sort the index to avoid PerformanceWarning about lexsort depth
+    locations = df.index.unique()
+    anomaly_rows = []  # to hold newmods inputs
+    metadata_rows = []    # to track what each row corresponds to
+
+    for location in tqdm(locations, desc=f"Generating batched anomalies for {scenario_var}"):
+        location_df = df.loc[location]
+        scenarios = location_df['scenario'].unique()
+
+        for scenario in scenarios:
+            scenario_df = location_df[location_df['scenario'] == scenario]
+            time_frames = [1995] + list(scenario_df.time_frame.unique())
+
+            for time_frame in time_frames:
+                if time_frame == 1995:
+                    base = scenario_df[f'mean_historical_{scenario_var}_30y_ensemble'].mean()
+                    mean_scenario = base - base
+                    p10_scenario = scenario_df[f'percentile_10_historical_{scenario_var}_30y_ensemble'].mean() - base
+                    p90_scenario = scenario_df[f'percentile_90_historical_{scenario_var}_30y_ensemble'].mean() - base
+                else:
+                    time_scenario_df = scenario_df[scenario_df['time_frame'] == time_frame]
+                    mean_scenario = time_scenario_df[f'mean_{scenario_var}_20y_anomaly_ensemble'].mean()
+                    p10_scenario = time_scenario_df[f'{scenario_var}_percentile_10_anomaly_ensemble'].mean()
+                    p90_scenario = time_scenario_df[f'{scenario_var}_percentile_90_anomaly_ensemble'].mean()
+                    # Generate predictions for mean, p10, and p90 scenarios
+                for percentile, anomaly in [('mean', mean_scenario), ('p10', p10_scenario), ('p90', p90_scenario)]:
+                    anomaly_rows.append([anomaly])
+                    metadata_rows.append({
+                        'doi': location[0],
+                        'location': location[1],
+                        'longitude': location[2],
+                        'latitude': location[3],
+                        'scenario_var': scenario_var,
+                        'scenario': scenario,
+                        'time_frame': time_frame,
+                        # 'anomaly_value': anomaly,
+                        'percentile': percentile
+                    })
+    return pd.concat([pd.DataFrame(metadata_rows), pd.DataFrame(anomaly_rows, columns=['anomaly_value'])], axis=1)
 
 
 
@@ -573,3 +611,11 @@ def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd
 #                  'control' if isinstance(x, str) and x == 'cTcP' else np.nan
 #     )
 #     return result_df
+
+
+# def safe_to_numeric(col):
+#     """Convert column to numeric if possible, otherwise return as is."""
+#     try:
+#         return pd.to_numeric(col)
+#     except (ValueError, TypeError):
+#         return col  # return original column if conversion fails
