@@ -8,7 +8,6 @@ import statsmodels.api as sm
 # R
 import rpy2.robjects as ro
 import rpy2.robjects.packages as rpackages
-# from rpy2.robjects import pandas2ri
 metafor = rpackages.importr("metafor")
 base = rpackages.importr("base")
 
@@ -17,98 +16,74 @@ from calcification import config, processing, file_ops
 
 
 ### core analysis calculations
-def calc_relative_rate(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None, epsilon=1e-6):
+def calc_relative_rate(mu1: float, mu2: float, sd1: float=None, sd2: float=None, n1: int=None, n2: int=None, epsilon: float=1e-6) -> tuple[float, float]:
     """
     Calculate percent change between two means with error propagation.
     
-    For different scenarios:
+    Examples:
     - 10 to 20: +100%
     - 10 to 0: -100%
     - 10 to -10: -200%
     
-    Parameters:
-    -----------
-    mu1, mu2 : float
-        Mean values to compare (mu1=reference/baseline, mu2=new value)
-    se1, se2 : float, optional
-        Standard errors of mu1 and mu2
-    epsilon : float, optional
-        Small value to stabilize calculations when means are close to zero
+    Args:
+        mu1, mu2 (float):   Mean values to compare (mu1=reference/baseline, mu2=new value)
+        se1, se2 (float, optional):   Standard errors of mu1 and mu2
+        epsilon (float, optional):  Small value to stabilize calculations when means are close to zero
         
     Returns:
-    --------
-    pc : float
-        Percent change
-    se_pc : float or None
-        Standard error of the percent change
+        pc (float): Percent change
+        se_pc (float or None):  Standard error of the percent change
     """
     se1, se2 = sd1/np.sqrt(n1), sd2/np.sqrt(n2)
-    # Special case: both means are exactly zero
-    if mu1 == 0 and mu2 == 0:
-        pc = 0  # No change between the means
-        
-        # If SEs are provided, calculate the uncertainty
-        if se1 is not None and se2 is not None:
+    if mu1 == 0 and mu2 == 0:       # special case: both means are exactly zero
+        pc = 0  # no change between means
+       
+        if se1 is not None and se2 is not None:  # if SEs are provided, calculate uncertainty
             # When both means are zero, consider the ratio of SEs to estimate uncertainty
             # This represents how much percentage change we would expect if the values 
             # fluctuated by ±1 SE from zero
-            if se1 > 0:
-                # Scale based on the potential percentage fluctuations around zero
+            if se1 > 0: # scale based on the potential percentage fluctuations around zero
                 se_pc = 100 * se2 / se1
-            else:
-                # If se1 is zero but se2 is not, technically infinite uncertainty
+            else:   # if se1 is zero but se2 is not, technically infinite uncertainty
                 se_pc = float('inf') if se2 > 0 else 0
             return pc, se_pc
         return pc
     
-    # Special case: baseline is zero
-    if mu1 == 0:
-        # Handle the zero baseline case
-        # Return signed 100% change
-        pc = np.sign(mu2) * 100
+    if mu1 == 0:     # special case: baseline is zero
+        pc = np.sign(mu2) * 100 # signed 100% change
         
-        # If SE is provided, calculate the uncertainty
-        if se1 is not None and se2 is not None:
-            # When baseline is zero, use the ratio of SEs to treatment
-            if abs(mu2) > epsilon:
-                # Error in baseline causes very large fluctuations in percent change
+        if se1 is not None and se2 is not None: # if SE provided, calculate the uncertainty
+            if abs(mu2) > epsilon:  # use the ratio of SEs to treatment for zero treatment
+                # N.B. error in baseline causes very large fluctuations in percent change
                 se_pc = 100 * se1 / abs(mu2)
-                
-                # Also consider uncertainty in the treatment
                 se_pc = np.sqrt(se_pc**2 + (100 * se2 / abs(mu2))**2)
-            else:
-                # If both are essentially zero, high uncertainty
+            else:    # if both are essentially zero, high uncertainty
                 se_pc = float('inf') if (se1 > 0 or se2 > 0) else 0
             return pc, se_pc
         return pc
     
-    # Standard percent change calculation
+    # standard percent change calculation
     pc = ((mu2 - mu1) / abs(mu1)) * 100
     
-    # Return only PC if no standard errors provided
+    # return only PC if no standard errors provided
     if se1 is None or se2 is None:
         return pc
     
-    # Error propagation - calculate partial derivatives
+    # error propagation via partial derivatives
     dpc_dmu1 = (-mu2 / (mu1**2)) * 100
-    dpc_dmu2 = (1 / abs(mu1)) * 100
-    
-    # Calculate standard error using error propagation
+    dpc_dmu2 = (1 / abs(mu1)) * 100    
     var_pc = (dpc_dmu1**2 * se1**2) + (dpc_dmu2**2 * se2**2)
     
     return pc, var_pc
 
 
-def calc_absolute_rate(mu1, mu2, sd1=None, sd2=None, n1=None, n2=None):
+def calc_absolute_rate(mu1: float, mu2: float, sd1: float=None, sd2: float=None, n1: int=None, n2: int=None) -> tuple[float, float]:
     """Calculate the simple difference between two means with error propagation.
     
     Args:
-        mu1 (float): mean of group 1 (control)
-        mu2 (float): mean of group 2 (treatment)
-        sd1 (float): standard deviation of group 1
-        sd2 (float): standard deviation of group 2
-        n1 (int): number of samples in group 1
-        n2 (int): number of samples in group 2
+        mu1, mu2 (float):   Mean values to compare (mu1=reference/baseline, mu2=new value)
+        sd1, sd2 (float, optional):   Standard deviations of mu1 and mu2
+        n1, n2 (int): number of samples in group 1 (control) and group 2 (treatment)
     
     Returns:
         tuple: absolute difference between means, standard error of the difference
@@ -136,9 +111,8 @@ def calc_bias_correction(n1: int, n2: int) -> float:
     """Calculate bias correction for Cohen's d metric: https://www.campbellcollaboration.org/calculator/equations
     
     Args:
-        n1 (int): number of samples in group 1 (control)
-        n2 (int): number of samples in group 2 (treatment)
-        
+        n1, n2 (int): number of samples in group 1 (control) and group 2 (treatment)
+
     Returns:
         float: bias correction factor
     """
@@ -149,12 +123,9 @@ def calc_cohens_d(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     """Calculate Cohen's d metric: https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/hedgeg.htm
     
     Args:
-        mu1 (float): mean of group 1 (control)
-        mu2 (float): mean of group 2 (treatment)
-        sd1 (float): standard deviation of group 1
-        sd2 (float): standard deviation of group 2
-        n1 (int): number of samples in group 1
-        n2 (int): number of samples in group 2
+        mu1, mu2 (float):   Mean values to compare (mu1=reference/baseline, mu2=new value)
+        sd1, sd2 (float, optional):   Standard deviations of mu1 and mu2
+        n1, n2 (int): number of samples in group 1 and group 2
                 
     Returns:
         tuple[float, float]: Cohen's d and its variance
@@ -168,11 +139,10 @@ def calc_cohens_d(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
 def calc_pooled_sd(n1: int, n2: int, sd1: float, sd2: float) -> float:
     """Calculate pooled standard deviation for two groups.
     N.B. BH (2021) uses simple average
+    
     Args:
-        n1 (int): number of samples in group 1 (control)
-        n2 (int): number of samples in group 2 (treatment)
-        sd1 (float): standard deviation of group 1
-        sd2 (float): standard deviation of group 2
+        n1, n2 (int): number of samples in group 1 (control) and group 2 (treatment)
+        sd1, sd2 (float, optional):   Standard deviations of mu1 and mu2
         
     Returns:
         float: pooled standard deviation
@@ -180,16 +150,13 @@ def calc_pooled_sd(n1: int, n2: int, sd1: float, sd2: float) -> float:
     return np.sqrt(((n1 - 1) * sd1 ** 2 + (n2 - 1) * sd2 ** 2) / (n1 + n2 - 2))
 
 
-def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: int) -> float:
+def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: int) -> tuple[float, float]:
     """Calculate Hedges G metric: https://www.campbellcollaboration.org/calculator/equations
     
     Args:
-        mu1 (float): mean of group 1 (control)
-        mu2 (float): mean of group 2 (treatment)
-        sd1 (float): standard deviation of group 1
-        sd2 (float): standard deviation of group 2
-        n1 (int): number of samples in group 1
-        n2 (int): number of samples in group 2
+        mu1, mu2 (float):   Mean values to compare (mu1=reference/baseline, mu2=new value)
+        sd1, sd2 (float, optional):   Standard deviations of mu1 and mu2
+        n1, n2 (int): number of samples in group 1 and group 2
         
     Returns:
         float: Hedges G metric
@@ -199,10 +166,6 @@ def calc_hedges_g(mu1: float, mu2: float, sd1: float, sd2: float, n1: int, n2: i
     
     hg = d * bias_correction
     hg_var = d_var * bias_correction ** 2
-    # # calculate 95% confidence intervals
-    # se_g = np.sqrt(var*bias_correction**2)  # standard error
-    # hg_lower = hg - 1.959964 * se_g
-    # hg_upper = hg + 1.959964 * se_g
     return hg, hg_var
 
 
@@ -217,12 +180,11 @@ def calc_cooks_distance(data: pd.Series) -> pd.Series:
         data = pd.to_numeric(data, errors='coerce')
     
     # fit OLS model
-    X = sm.add_constant(data)
+    X = sm.add_constant(np.asarray(data))
     try:
         model = sm.OLS(data, X).fit()
     except ValueError:
         # convert data to numeric if it is not already
-        data = pd.to_numeric(data, errors='coerce')
         model = sm.OLS(data, X).fit()
     # calculate Cook's distance
     influence = model.get_influence()
@@ -241,6 +203,9 @@ def calc_cooks_threshold(data: pd.Series, nparams: int) -> float:
 
 
 def remove_cooks_outliers(df: pd.DataFrame, effect_type: str = 'hedges_g', nparams: int=3) -> pd.DataFrame:
+    """
+    Remove outliers from a DataFrame based on Cook's distance.
+    """
     data = df.copy()
     # calculate cooks distance
     cooks_threshold = calc_cooks_threshold(data[effect_type], nparams=nparams)
@@ -289,31 +254,45 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
             for species, species_df in irr_df.groupby('species_types'):
                 df = process_group_multivar(species_df)
                 if isinstance(df, pd.Series):
-                    # Convert Series to DataFrame   (necessary when not using apply)
                     df = pd.DataFrame([df].T)
                 if df is not None:
-                    grouped_data.extend(df) # was previously extend
+                    grouped_data.extend(df)
     
     if isinstance(grouped_data, list):
-        # Fix for performance warnings
         valid_dfs = [df for df in grouped_data if df is not None and not df.empty and not df.isna().all().all()]
         if valid_dfs:
-            df = pd.concat(valid_dfs)
-            # Sort index to avoid lexsort depth warning and create a copy to avoid fragmentation
-            df = df.sort_index().copy()
-            df["ID"] = df.index
+            df = pd.concat(valid_dfs).sort_index().copy()   # sort index to avoid lexsort depth warning and create a copy to avoid fragmentation
         else:
             # Return empty DataFrame with same columns and dtypes as expected output
             df = pd.DataFrame(columns=df.columns if len(grouped_data) > 0 and grouped_data[0] is not None else None)
-            df["ID"] = df.index
-        return df
-    elif isinstance(grouped_data, pd.DataFrame):
-        # Sort index and create a copy to avoid performance warnings
-        df = grouped_data.sort_index().copy()
-        df["ID"] = df.index
-        return df
+    df = df.sort_values(by='doi').copy().reset_index()
+    df["ID"] = df.index
+        
+    df.loc[df.phtot.isna(), 'delta_ph'] = 0 # assign delta_ph = 0 where phtot is NaN (assumes this variable was controlled throughout the experiment)
+    df.loc[df.temp.isna(), 'delta_t'] = 0   # similarly, assign delta_t = 0 where temp is NaN
+    
+    # replace any 0 values in "*_var" columns with mean of that column (there's no such thing as no error)
+    for col in df.columns:
+        if col.endswith('_var'):
+            mean_value = df[col].mean()
+            df[col] = df[col].replace(0, mean_value)
+
+    return df
+
+
+def calculate_control_series(control_df: pd.DataFrame) -> pd.Series:
+    """Calculates the representative control series, averaging numeric columns."""
+    if control_df.empty:
+        return pd.Series(dtype=object) # return empty series if no control data
+    if len(control_df) > 1:
+        numeric_cols = control_df.select_dtypes(include='number').columns
+        # create a Series with first values for non-numeric, means for numeric
+        control_series = control_df.iloc[0].copy()
+        for col in numeric_cols:
+            control_series[col] = control_df[col].mean(skipna=True) # Use mean for numeric
     else:
-        raise ValueError("Invalid data type for grouped_data. Expected list or DataFrame.")
+        control_series = control_df.iloc[0].copy()
+    return control_series
 
 
 def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
@@ -321,10 +300,10 @@ def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
     Process a group of species data to calculate effect size.
     
     Args:
-        df: DataFrame containing data for a specific species
+        df (pd.DataFrame): DataFrame containing data for a specific species
     
     Returns:
-        pandas.DataFrame: DataFrame with effect size calculations
+        pd.DataFrame: DataFrame with effect size calculations
     """
     def process_group(group, control_level_col):
         control_level = min(group[control_level_col])
@@ -334,29 +313,15 @@ def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
         if treatment_df.empty:  # skip if there's no treatment data
             return
             
-        # convert control to series if necessary    # TODO: mean?
-        # Convert control_df to Series: take mean of numeric columns and first value of others
-        if isinstance(control_df, pd.DataFrame):
-            if len(control_df) > 1:
-                # Get numeric columns
-                numeric_cols = control_df.select_dtypes(include='number').columns
-                # Create a Series with first values
-                control_series = control_df.iloc[0].copy()
-                # Replace numeric columns with their means
-                for col in numeric_cols:
-                    control_series[col] = control_df[col].mean()
-            else:
-                control_series = control_df.iloc[0]
-        else:
-            control_series = control_df
+        control_series = calculate_control_series(control_df)
         
-        # Calculate effect size for each row in treatment_df and create a list of results
+        # calculate effect size for each row in treatment_df and create a list of results
         effect_rows = []
         for _, row in treatment_df.iterrows():
             effect_row = calc_treatment_effect_for_row(row, control_series)
             effect_rows.append(effect_row)
         
-        # Concatenate all rows to create the effect_size DataFrame
+        # concatenate all rows to create the effect_size DataFrame
         if effect_rows:
             effect_size = pd.concat(effect_rows, axis=1).T.copy()
             
@@ -373,86 +338,50 @@ def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
             return effect_size
         return None
 
+
     # process each group and append results
-    results_ph = grouped_by_ph = df.groupby('treatment_level_ph').apply(
+    results_ph = df.groupby('treatment_level_ph').apply(
         process_group, control_level_col='treatment_level_t'
     )
-    results_t = grouped_by_t = df.groupby('treatment_level_t').apply(
+    results_t = df.groupby('treatment_level_t').apply(
         process_group, control_level_col='treatment_level_ph'
     )
     # TODO: this doesn't add effects for where BOTH treatment levels change at once i.e. multivariate, the part which isn't in-level comparison
+    def process_orthogonal_group(df):
+        # identify absolute control
+        control_df = df[df['treatment'] == 'control']
+        control_series = calculate_control_series(control_df)
+        
+        # for each row where treatment_level_t == treatment_level_ph, calculate effect size
+        treatment_df = df[(df['treatment_level_t'] == df['treatment_level_ph']) & (df['treatment'] != 'control')]
+        if treatment_df.empty:
+            return None
+        # Calculate effect size for each row in treatment_df
+        effect_rows = []
+        
+        for _, row in treatment_df.iterrows():
+            effect_row = calc_treatment_effect_for_row(row, control_series)
+            effect_rows.append(effect_row)
+        # Concatenate all rows to create the effect_size DataFrame
+        if effect_rows:
+            effect_size = pd.concat(effect_rows, axis=1).T.copy()
+            # update treatment label
+            effect_size['treatment'] = 'phtot_temp_mv'
+            return effect_size
+        
+    # process orthogonal group
+    results_orthogonal = process_orthogonal_group(df)
     
-    
-    
-    
-    # Filter out None values before returning
     results = []
     if not results_ph.empty:
-        results.append(results_ph)
+        results.append(results_ph.reset_index(drop=True))
     if not results_t.empty:
-        results.append(results_t)
+        results.append(results_t.reset_index(drop=True))
+    if results_orthogonal is not None:
+        results.append(results_orthogonal)
     
     return results
     
-    
-    
-    # results_df = []
-    # control_df = df[df['treatment'] == "control"]
-    # if control_df.empty:
-    #     print(f"No control data found for this group (index {df.index} DOI {df['doi'].iloc[0]} species {df['species_types'].iloc[0]})")
-    #     return None
-    # # aggregate if necessary
-    # control_row = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
-    
-    # for i, row in df.iterrows():
-    #     if row['treatment'] == "control":
-    #         continue
-    #     # calculate effect size for each row in treatment_df
-    #     effect_size = calc_treatment_effect_for_row(row, control_row)
-        
-    #     results_df.append(pd.DataFrame(effect_size).T)
-    
-    # return results_df
-
-
-#     results_df = []
-#     # for each treatment value in pH, calculate effect size varying temperature
-#     grouped_by_ph = df.groupby('treatment_level_ph')
-#     grouped_by_t = df.groupby('treatment_level_t')
-    
-#     def process_group(group, control_level_col):
-#         control_level = min(group[control_level_col])
-#         control_df = group[group[control_level_col] == control_level]
-#         treatment_df = group[group[control_level_col] > control_level]
-        
-#         if treatment_df.empty:  # skip if there's no treatment data
-#             return
-
-#         # covered (better) before being passed
-#         # # aggregate control data if n > 1 (more precise than just taking first row)
-#         # control_data = aggregate_by_treatment_group(control_df) if len(control_df) > 1 else control_df.iloc[0]
-#         # # Aggregate treatment data if all n=1
-#         # if np.all(treatment_df.n == 1):
-#         #     treatment_df = pd.DataFrame(aggregate_by_treatment_group(treatment_df)).T
-            
-            
-#         # update treatment label
-#         if control_level_col == "treatment_level_t":
-#             treatment_df.loc[:, 'treatment'] = 'temp'
-#         elif control_level_col == "treatment_level_ph":
-#             treatment_df.loc[:, 'treatment'] = 'phtot'
-            
-#         # calculate effect size varying treatment condition
-#         # First make sure we convert control_data DataFrame to Series if needed
-#         control_series = control_df.iloc[0] if isinstance(control_df, pd.DataFrame) else control_df
-#         # Calculate effect size for each row in treatment_df
-#         effect_size = treatment_df.apply(lambda row: calc_treatment_effect_for_row(row, control_series), axis=1)
-#         return effect_size
-    
-#     results_df.append(grouped_by_ph.apply(process_group, control_level_col='treatment_level_t', include_groups=False))
-#     results_df.append(grouped_by_t.apply(process_group, control_level_col='treatment_level_ph', include_groups=False))
-    
-#     return pd.concat(results_df).reset_index(drop=True)
 
 
 def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
@@ -548,9 +477,8 @@ def calc_treatment_effect_for_row(treatment_row: pd.Series, control_data: pd.Ser
     return row_copy
 
 
-def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climatology_data_fp: str=None, selection_dict: dict={'include': 'yes'}):
+def calculate_effect_sizes_end_to_end(raw_data_fp: str, data_sheet_name: str, climatology_data_fp: str=None, selection_dict: dict={'include': 'yes'}) -> pd.DataFrame:
     """
-    # TODO: replace with new processing functions?
     Calculate effect sizes from raw data and align with climatology data.
     
     Args:
@@ -566,7 +494,6 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     carbonate_df = processing.populate_carbonate_chemistry(raw_data_fp, data_sheet_name, selection_dict=selection_dict)
     
     # prepare for alignment with climatology by uniquifying DOIs
-    # carbonate_df = utils.uniquify_multilocation_study_dois(carbonate_df)
     print(f"\nShape of dataframe with all rows marked for inclusion: {carbonate_df.shape}")
     
     # save selected columns of carbonate dataframe to file for reference
@@ -584,11 +511,11 @@ def calculate_effect_sizes_end_to_end(raw_data_fp, data_sheet_name: str, climato
     # save results
     save_cols = file_ops.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
     effects_df['year'] = pd.to_datetime(effects_df['year']).dt.strftime('%Y')  # cast year from pd.timestamp to integer
-    # Check for missing columns in save_cols
+    # check for missing columns in save_cols
     missing_columns = [col for col in save_cols if col not in effects_df.columns]
     if missing_columns:
         print(f"\nWARNING: The following columns in save_cols are not in effects_df: {missing_columns}")
-        # Filter save_cols to only include columns that exist in effects_df
+        # filter save_cols to only include columns that exist in effects_df
         available_save_cols = [col for col in save_cols if col in effects_df.columns]
         effects_df[available_save_cols].to_csv(config.tmp_data_dir / f"effect_sizes.csv", index=False)
     else:
@@ -604,14 +531,14 @@ def fit_curve(df: pd.DataFrame, variable: str, effect_type: str, order: int) -> 
     """
     Fit a polynomial curve to the data.
 
-    Parameters:
-    - df (pd.DataFrame): The dataframe containing the data.
-    - variable (str): The independent variable.
-    - effect_type (str): The dependent variable.
-    - order (int): The order of the polynomial to fit.
+    Args:
+        df (pd.DataFrame): The dataframe containing the data.
+        variable (str): The independent variable.
+        effect_type (str): The dependent variable.
+        order (int): The order of the polynomial to fit.
 
     Returns:
-    - model: The fitted regression model.
+        model: The fitted regression model.
     """
     # Remove NaNs
     df = df[df[variable].notna() & df[effect_type].notna()]
@@ -624,7 +551,7 @@ def fit_curve(df: pd.DataFrame, variable: str, effect_type: str, order: int) -> 
     return model
 
 
-def predict_curve(model, x, alpha=0.05):
+def predict_curve(model, x: np.ndarray, alpha=0.05) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Predict values using the fitted model with confidence intervals.
 
@@ -638,11 +565,9 @@ def predict_curve(model, x, alpha=0.05):
     """
     X = np.vander(x, N=model.params.shape[0], increasing=True)
     prediction = model.get_prediction(X)
-    
-    # Get the predicted values
+    # predictions
     predicted = prediction.predicted_mean
-    
-    # Get the confidence intervals
+    # confidence intervals
     conf_int = prediction.conf_int(alpha=alpha)
     lower = conf_int[:, 0]
     upper = conf_int[:, 1]
@@ -655,32 +580,47 @@ def generate_formula(effect_type: str, treatment: str=None, variables: list[str]
     if variables is None:
         variables = []
         
-    # Add treatment-specific variable if needed
+    # add treatment-specific variable if needed
     if treatment:
-        if treatment == "phtot":
-            variables.append("delta_ph")
-        elif treatment == "temp":
-            variables.append("delta_t")
+        if isinstance(treatment, list):
+            for t in treatment:
+                if t == "phtot":
+                    variables.append("delta_ph")
+                elif t == "temp":
+                    variables.append("delta_t")
+                elif t in ["phtot_mv", "temp_mv", 'phtot_temp_mv']:
+                    variables.append("delta_ph")
+                    variables.append("delta_t")
+                else:
+                    raise ValueError(f"Unknown treatment: {t}")
         else:
-            raise ValueError(f"Unknown treatment: {treatment}")
+            if treatment == "phtot":
+                variables.append("delta_ph")
+            elif treatment == "temp":
+                variables.append("delta_t")
+            elif treatment in ["phtot_mv", "temp_mv", 'phtot_temp_mv']:
+                variables.append("delta_ph")
+                variables.append("delta_t")
+            else:
+                raise ValueError(f"Unknown treatment: {treatment}")
     
-    # Remove duplicates and process variables
+    # remove duplicates and process variables
     variables = list(set(variables))
     variable_mapping = file_ops.read_yaml(config.resources_dir / 'mapping.yaml')["meta_model_factor_variables"]
     
-    # Split into factor and regular variables
+    # split into factor and regular variables
     factor_vars = [f"factor({v})" for v in variables if v in variable_mapping]
     other_vars = [v for v in variables if v not in variable_mapping]
     
-    # Combine all parts into formula string
+    # combine all parts into formula string
     parts = other_vars + factor_vars
     formula = f"{effect_type} ~ {' + '.join(parts)}"
     
-    # Remove intercept if specified
+    # remove intercept if specified
     return formula + " - 1" if not include_intercept else formula
 
 
-def get_formula_components(formula):
+def get_formula_components(formula: str) -> dict:
     """
     Extracts the response variable, predictors, and intercept flag from a formula string.
     """
@@ -688,20 +628,50 @@ def get_formula_components(formula):
     response_part, predictor_part = formula.split('~')
     formula_comps['response'] = response_part.strip()
 
-    # Clean and normalize predictor part
+    # clean and normalize predictor part
     predictor_part = predictor_part.replace(' ', '').replace('-1', '+intercept_off')  # temporarily mark intercept removal
+    # split on + first, then check for * in each term
     predictors_raw = predictor_part.split('+')
+    all_predictors = []
+    for term in predictors_raw:
+        if '*' in term:
+            # this is an interaction term, split it and process
+            interaction_terms = term.split('*')
+            all_predictors.extend(interaction_terms)
+        else:
+            all_predictors.append(term)
+    predictors_raw = all_predictors
 
-    # Determine intercept
-    intercept = 'intercept_off' not in predictors_raw
+    intercept = 'intercept_off' not in predictors_raw   # determine intercept
     predictors_raw = [p for p in predictors_raw if p != 'intercept_off']
+    predictors_raw = [p.replace('factor(', '').replace(')', '') for p in predictors_raw]    # remove factor() from around any predictors_raw if they have it
     formula_comps['predictors'] = [p for p in predictors_raw if p]  # remove empty strings
     formula_comps['intercept'] = intercept
 
     return formula_comps
 
 
-def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_var=None, treatment=None, necessary_vars: list[str] = None, formula: str=None) -> pd.DataFrame:
+def process_df_for_r(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Processes a pandas DataFrame by converting columns to floats if possible,
+    otherwise keeping them as their original type.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame to process.
+
+    Returns:
+        pd.DataFrame: The processed DataFrame with updated column types.
+    """
+    df_copy = df.copy()
+    for col in df_copy.columns:
+        # Only convert columns that are predominantly numeric
+        if pd.to_numeric(df_copy[col], errors='coerce').notna().sum() > 0.5 * len(df_copy):
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+    
+    return df_copy
+
+
+def preprocess_df_for_meta_model(df: pd.DataFrame, effect_type: str = 'hedges_g', effect_type_var: bool=None, treatment: list[str] = None, necessary_vars: list[str] = None, formula: str=None) -> pd.DataFrame:
     # TODO: get necessary variables more dynamically (probably via a mapping including factor)
     data = df.copy()
     
@@ -711,24 +681,22 @@ def preprocess_df_for_meta_model(df, effect_type: str = 'hedges_g', effect_type_
     if not formula:
         formula = generate_formula(effect_type, treatment, variables=necessary_vars)
 
+    formula_comps = get_formula_components(formula)
     # select only rows relevant to treatment
     if treatment:
-        data = data[data["treatment"].astype(str).str.contains(treatment, na=False)]
-        # data = data[data['treatment'] == treatment]
+        if isinstance(treatment, list):
+            data = data[data["treatment"].astype(str).isin(treatment)]
+        else:
+            data = data[data['treatment'] == treatment]
         
     n_investigation = len(data)
     # remove nans for subset effect_type
-    required_columns = [effect_type, effect_type_var, 'original_doi', 'ID'] + (necessary_vars or [])
-    data = data.dropna(subset=required_columns)
+    required_columns = [effect_type, effect_type_var, 'original_doi', 'ID'] + formula_comps['predictors']
+    data = data.dropna(subset=[required_col for required_col in required_columns if required_col != '1'])
     
-    # Ensure all numeric columns are explicitly converted to correct type
-    for col in data.columns:
-        data[col] = processing.safe_to_numeric(data[col])
-    # convert any object columns to strings
-    for col in data.select_dtypes(include=['object']).columns:
-        data[col] = data[col].astype(str)
-        
-        
+    # data = process_df_for_r(data)
+    data = data.convert_dtypes()
+
     n_nans = n_investigation - len(data)
     
     ### summarise processing
@@ -774,12 +742,13 @@ def run_metafor_mv(
     # activate R conversion
     ro.pandas2ri.activate()
     
-    all_necessary_vars = ['original_doi', 'ID'] + (necessary_vars or []) + [effect_type, effect_type_var] + ['delta_ph' if treatment == 'phtot' else 'delta_t']
+    formula_comps = get_formula_components(formula)
+    all_necessary_vars = ['original_doi', 'ID'] + (necessary_vars or []) + [effect_type, effect_type_var] + formula_comps['predictors']
     # ensure original_doi is string type to avoid conversion issues
     df = df.copy()
     df['original_doi'] = df['original_doi'].astype(str)
     
-    df_subset = df[all_necessary_vars]
+    df_subset = df[[necessary_var for necessary_var in all_necessary_vars if necessary_var != '1']]
     df_r = ro.pandas2ri.py2rpy(df_subset)
     
     # run the metafor model
@@ -795,12 +764,13 @@ def run_metafor_mv(
     return model, base.summary(model), formula, df
 
 
-def run_parallel_dredge(df, global_formula=None, effect_type='hedges_g', x_var='temp', n_cores=16):
+def run_parallel_dredge(df: pd.DataFrame, global_formula: str=None, effect_type: str='hedges_g', x_var: str='temp', n_cores: int=16) -> pd.DataFrame:
     """TODO: get actually working in parallel
     Runs a parallel dredge analysis using MuMIn in R.
 
     Parameters:
         df (rpy2.robjects.vectors.DataFrame): The dataframe in R format.
+        global_formula (str): The global formula for the model.
         effect_type (str): The effect type (e.g., 'hedges_g').
         x_var (str): The independent variable (e.g., 'delta_t').
         n_cores (int): Number of cores for parallel processing.
@@ -810,7 +780,7 @@ def run_parallel_dredge(df, global_formula=None, effect_type='hedges_g', x_var='
     """
     os.environ['LC_ALL'] = 'en_US.UTF-8'  # Set locale to UTF-8
 
-    # Assign variables to R environment
+    # assign variables to R environment
     ro.r.assign("df_r", ro.pandas2ri.py2rpy(df))    # convert to R dataframe
     df_r = ro.pandas2ri.py2rpy(df)
     ro.r.assign("effect_col", effect_type)
@@ -823,7 +793,7 @@ def run_parallel_dredge(df, global_formula=None, effect_type='hedges_g', x_var='
     print(global_formula)
     ro.r.assign("global_formula", ro.Formula(global_formula))
 
-    # Run the R code for parallel dredge
+    # run the R code for parallel dredge
     ro.r(f"""
     # Set up for MuMIn
     eval(metafor:::.MuMIn)
@@ -852,22 +822,48 @@ def run_parallel_dredge(df, global_formula=None, effect_type='hedges_g', x_var='
     parallel::stopCluster(clu)
     """)
 
-    # Retrieve the dredge result and convert to pandas DataFrame
+    # retrieve the dredge result and convert to pandas DataFrame
     dredge_result = ro.r("dredge_result")
-    # Convert to pandas DataFrame
+    # convert to pandas DataFrame
     ro.pandas2ri.activate()
     df = ro.pandas2ri.rpy2py(dredge_result)
     # assign any values of '-2147483648' to NaN (R's placeholder for NA in string columns)
     return df.replace(-2147483648, np.nan)
 
 
-def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var: str = "sst"):
-    # Get constant terms from the model matrix (excluding intercept/first column)
+def predict_model(model, newmods: pd.DataFrame) -> pd.DataFrame:
+    """
+    Provide a model with a dataframe of moderator values (same dimensions as model X) to get model predictions.
+    """
+    # convert to R matrix (newmods)
+    newmods_np = np.array(newmods, dtype=float)
+    newmods_r = ro.r.matrix(ro.FloatVector(newmods_np.flatten()), nrow=newmods_np.shape[0], byrow=True)
+
+    # predict all at once in R
+    predictions_r = ro.r('predict')(model, newmods=newmods_r, digits=2)
+
+    r_selected_columns = ro.r('as.data.frame')(predictions_r).rx(True, ro.IntVector([1, 2, 3, 4, 5, 6]))    # select columns to avoid heterogenous shape
+    ro.pandas2ri.activate()
+
+    # convert the selected columns to a pandas dataframe
+    with (ro.default_converter + ro.pandas2ri.converter).context():
+        return ro.conversion.get_conversion().rpy2py(r_selected_columns).reset_index(drop=True)
+    
+
+
+def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var: str = "sst", moderator_pos: int = None) -> list[dict]:
+    # TODO: make this more general
+    # get constant terms from the model matrix (excluding intercept/first column)
     model_matrix = ro.r('model.matrix')(model)
-    const_terms = np.array(model_matrix)[:, 1:].mean(axis=0)
+    if moderator_pos:   # if moderator position provided, use it
+        # take mean of all columns except for moderator pos
+        const_terms = np.mean(np.delete(np.array(model_matrix)[:, 1:], moderator_pos-1, axis=1), axis=0)
+        
+    else:
+        const_terms = np.array(model_matrix)[:, 1:].mean(axis=0)
     const_terms_list = const_terms.tolist()
 
-    df = df.sort_index()     # Sort the index to avoid PerformanceWarning about lexsort depth
+    df = df.sort_index()     # sort the index to avoid PerformanceWarning about lexsort depth
     locations = df.index.unique()
     prediction_rows = []  # to hold newmods inputs
     metadata_rows = []    # to track what each row corresponds to
@@ -891,7 +887,7 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
                     mean_scenario = time_scenario_df[f'mean_{scenario_var}_20y_anomaly_ensemble'].mean()
                     p10_scenario = time_scenario_df[f'{scenario_var}_percentile_10_anomaly_ensemble'].mean()
                     p90_scenario = time_scenario_df[f'{scenario_var}_percentile_90_anomaly_ensemble'].mean()
-                    # Generate predictions for mean, p10, and p90 scenarios
+                    # generate predictions for mean, p10, and p90 scenarios
                 for percentile, anomaly in [('mean', mean_scenario), ('p10', p10_scenario), ('p90', p90_scenario)]:
                     prediction_rows.append([anomaly] + const_terms_list)
                     metadata_rows.append({
@@ -906,15 +902,15 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
                         'percentile': percentile
                     })
 
-    # Convert to R matrix (newmods)
+    # convert to R matrix (newmods)
     newmods_np = np.array(prediction_rows, dtype=float)
     newmods_r = ro.r.matrix(ro.FloatVector(newmods_np.flatten()), nrow=newmods_np.shape[0], byrow=True)
 
-    # Predict all at once in R
+    # predict all at once in R
     predictions_r = ro.r('predict')(model, newmods=newmods_r, digits=2)
     predicted_vals = list(predictions_r)
 
-    # Combine metadata and predictions
+    # combine metadata and predictions
     for i, val in enumerate(predicted_vals[0]): # for now, just taking mean predictions (ignoring ci, pi)
         metadata_rows[i]['predicted_effect_size'] = val
 
