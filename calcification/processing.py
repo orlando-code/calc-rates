@@ -182,8 +182,8 @@ def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> 
         df = df[df.n != 'M']    # remove any rows in which 'n' is 'M'
         
     ### infer data types
-    df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].astype(float, errors='ignore')  # convert all columns to float except for year
-    problem_cols = ['irr', 'ipar']  # some columns have rogue strings when they should all contain numbers: in this case, convert unconvertable values to NaN
+    df.loc[:, df.columns != 'year'] = df.loc[:, df.columns != 'year'].apply(safe_to_numeric)
+    problem_cols = ['irr', 'ipar', 'sal']  # some columns have rogue strings when they should all contain numbers: in this case, convert unconvertable values to NaN
     for col in problem_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -191,6 +191,14 @@ def preprocess_df(df: pd.DataFrame, selection_dict: dict={'include': 'yes'}) -> 
     df = df.loc[:, ~df.columns.str.contains('^unnamed')]
     return df
 
+
+def safe_to_numeric(col):
+    """Convert column to numeric if possible, otherwise return as is."""
+    try:
+        return pd.to_numeric(col)
+    except (ValueError, TypeError):
+        return col  # return original column if conversion fails
+    
 
 def process_raw_data(df: pd.DataFrame, require_results: bool=True, selection_dict: dict={'include': 'yes'}, ph_conversion: bool=True) -> pd.DataFrame:
     """Process raw data from the spreadsheet to prepare for analysis
@@ -204,11 +212,10 @@ def process_raw_data(df: pd.DataFrame, require_results: bool=True, selection_dic
     """
     df = preprocess_df(df, selection_dict=selection_dict)  # general processing
     ### location processsing
-    # TODO: have functions return series rather than a modified dataframe for greater transparency?
     df = locations.uniquify_multilocation_study_dois(df)  # for dois with multiple locations
     df = locations.assign_coordinates(df)  # assign coordinates to locations
     locations.save_locations_information(df)    # save locations information
-    df = locations.assign_ecoregions(df)  # assign ecoregions to locations  # TODO: ecoregions losing rows?
+    df = locations.assign_ecoregions(df)  # assign ecoregions to locations
     
     ### taxonomy
     df = taxonomy.assign_taxonomical_info(df)   # create family, genus, species, and functional group columns from species binomials
@@ -263,16 +270,15 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
             ).pHtot[0],
             axis=1
         )
-    # if phtot is still NaN, calculate from other parameters. # TODO: check that this works (eg. 10.1002/lno.10952)
-    # mask_missing_phtot_with_alt_carb = measured_df['phtot'].isna() & measured_df['pco2'].notna() & measured_df['ta'].notna() & measured_df['temp'].notna()
-    # if mask_missing_phtot_with_alt_carb.any():
-    #     measured_df.loc[mask_missing_phtot_with_alt_carb, 'phtot'] = measured_df[mask_missing_phtot_with_alt_carb].apply(
-    #         lambda row: cb.Csys(
-    #             TA=row['ta'], pCO2=row['pco2'], T_in=row['temp'], S_in=row['sal'] if pd.notna(row['sal']) else 35
-    #         ).pHtot[0],
-    #         axis=1
-    #     )
-    # TODO: provide pCO2?
+    # if phtot is still NaN, calculate from other parameters.
+    mask_missing_phtot_with_alt_carb = measured_df['phtot'].isna() & measured_df['pco2'].notna() & measured_df['ta'].notna() & measured_df['temp'].notna()
+    if mask_missing_phtot_with_alt_carb.any():
+        measured_df.loc[mask_missing_phtot_with_alt_carb, 'phtot'] = measured_df[mask_missing_phtot_with_alt_carb].apply(
+            lambda row: cb.Csys(
+                TA=row['ta'], pCO2=row['pco2'], T_in=row['temp'], S_in=row['sal'] if pd.notna(row['sal']) else 35
+            ).pHtot[0],
+            axis=1
+        )
 
     ### calculate carbonate chemistry
     carb_metadata = file_ops.read_yaml(config.resources_dir / "mapping.yaml")
@@ -280,15 +286,14 @@ def populate_carbonate_chemistry(fp: str, sheet_name: str="all_data", selection_
     out_values = carb_metadata['carbonate_chemistry_params']
     carb_df = measured_df[carb_chem_cols].copy()
 
-    # apply function row-wise
+    # apply carbonate chemistry calculation row-wise
     tqdm.pandas(desc="Calculating carbonate chemistry")
-
     carb_df.loc[:, out_values] = carb_df.progress_apply(lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1)
     return df.combine_first(carb_df)
 
 
 def calculate_carb_chem(row: pd.Series, out_values: list) -> dict:
-    """(Re)calculate carbonate chemistry parameters and return a dictionary.""" 
+    """(Re)calculate carbonate chemistry parameters from the dataframe row and return a dictionary.""" 
     try:
         out_dict = cb.Csys(
             pHtot=row['phtot'],
@@ -551,7 +556,6 @@ def generate_location_specific_anomalies(df: pd.DataFrame, scenario_var: str = "
     return pd.concat([pd.DataFrame(metadata_rows), pd.DataFrame(anomaly_rows, columns=['anomaly_value'])], axis=1)
 
 
-
 ### DEPRECATED
 # def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.05, irr_atol: float=30) -> pd.DataFrame:
 #     """
@@ -613,9 +617,4 @@ def generate_location_specific_anomalies(df: pd.DataFrame, scenario_var: str = "
 #     return result_df
 
 
-# def safe_to_numeric(col):
-#     """Convert column to numeric if possible, otherwise return as is."""
-#     try:
-#         return pd.to_numeric(col)
-#     except (ValueError, TypeError):
-#         return col  # return original column if conversion fails
+
