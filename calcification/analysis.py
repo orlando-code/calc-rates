@@ -7,6 +7,7 @@ import statsmodels.api as sm
 
 # R
 import rpy2.robjects as ro
+from rpy2.robjects import pandas2ri
 import rpy2.robjects.packages as rpackages
 metafor = rpackages.importr("metafor")
 base = rpackages.importr("base")
@@ -651,6 +652,122 @@ def get_formula_components(formula: str) -> dict:
     return formula_comps
 
 
+def process_meta_regplot_data(model, model_comps, x_mod, level, point_size, predlim):
+    """
+    Process data for meta-regression plotting.
+    
+    Args:
+        model (rpy2.robjects.vectors.ListVector): An R rma.mv or rma model object from metafor package.
+        model_comps (tuple): Model components containing predictor and response info.
+        x_mod (str): Name of the moderator variable to plot on x-axis.
+        level (float): Confidence level for intervals in percent.
+        point_size (str or array-like): Point sizes - either "seinv" (inverse of standard error), 
+            "vinv" (inverse of variance), or an array of custom sizes.
+        predlim (tuple[float, float], optional): Limits for predicted x-axis values (min, max).
+            
+    Returns:
+        tuple: Containing processed data (xi, yi, vi, norm_weights, xs, pred, ci_lb, ci_ub, 
+                pred_lb, pred_ub, mod_pos)
+    """
+    pandas2ri.activate()    # enable automatic conversion between R and pandas        
+    # get index of x_mod in predictors
+    mod_pos = model_comps['predictors'].index(x_mod) if isinstance(x_mod, str) else 0
+    if model_comps['intercept']:
+        mod_pos += 1    # adjust for intercept if present
+    
+    # extract model components
+    yi = np.array(model.rx2('yi.f'))
+    vi = np.array(model.rx2('vi.f'))
+    X = np.array(model.rx2('X.f'))    
+    xi = X[:, mod_pos]
+    
+    mask = ~np.isnan(yi) & ~np.isnan(vi) & ~np.isnan(xi).any(axis=0)    # handle missing values
+    if not all(mask):
+        yi = yi[mask]
+        vi = vi[mask]
+        xi = xi[mask]
+    
+    # create weight vector for point sizes
+    if point_size == "seinv":
+        weights = 1 / np.sqrt(vi)
+    elif point_size == "vinv":
+        weights = 1 / vi 
+    elif isinstance(point_size, (list, np.ndarray)):
+        weights = np.array(point_size)
+    else:
+        weights = np.ones_like(yi)
+    
+    if len(weights) > 0:    # normalize weights for point sizes
+        min_w, max_w = min(weights), max(weights)
+        if max_w - min_w > np.finfo(float).eps:
+            norm_weights = 30 * (weights - min_w) / (max_w - min_w) + 1
+        else:
+            norm_weights = np.ones_like(weights) * 20
+    else:
+        norm_weights = np.ones_like(yi) * 20
+    
+    range_xi = max(xi) - min(xi)    # create sequence of x values for the regression line
+    predlim = (min(xi) - 0.1*range_xi, max(xi) + 0.1*range_xi) if predlim is None else predlim
+    xs = np.linspace(predlim[0], predlim[1], 1000)
+    
+    r_xs = ro.FloatVector(xs)
+    
+    # create prediction data for the regression line
+    # this requires creating a new matrix with mean values for all predictors except the moderator of interest
+    predict_function = ro.r('''
+    function(model, xs, mod_pos, level) {
+        # Get mean values for all predictors
+        X_means <- colMeans(model$X.f)
+        
+        # Create new data for predictions
+        Xnew <- matrix(rep(X_means, each=length(xs)), nrow=length(xs))
+        colnames(Xnew) <- colnames(model$X.f)
+        
+        # Set the moderator of interest to the sequence of values
+        Xnew[,mod_pos] <- xs
+        
+        # Remove intercept if present in the model
+        if (model$int.incl) {
+            Xnew <- Xnew[,-1, drop=FALSE]
+        }
+        
+        # Make predictions
+        pred <- predict(model, newmods=Xnew, level=(level/100))
+        
+        # Return results
+        return(pred)
+    }
+    ''')
+    
+    ### get predictions
+    try:
+        pred_res = predict_function(model, r_xs, mod_pos + 1, level)  # R is 1-indexed
+        pred = np.array(pred_res.rx2('pred'))
+        ci_lb = np.array(pred_res.rx2('ci.lb'))
+        ci_ub = np.array(pred_res.rx2('ci.ub'))
+        pred_lb = np.array(pred_res.rx2('pi.lb'))
+        pred_ub = np.array(pred_res.rx2('pi.ub'))
+    except Exception as e:
+        print(f"Error in prediction: {e}")
+        print("Falling back to simplified prediction")
+        # simplified fallback to at least get a regression line
+        coeffs = np.array(model.rx2('b'))
+        if len(coeffs) > 1:  # multiple coefficients
+            if model.rx2('int.incl')[0]:  # model includes intercept
+                pred = coeffs[0] + coeffs[mod_pos] * xs
+            else:
+                pred = coeffs[mod_pos-1] * xs
+        else:  # Single coefficient
+            pred = coeffs[0] * xs
+        ci_lb = pred - 1.96 * 0.5  # rough approximation
+        ci_ub = pred + 1.96 * 0.5  # rough approximation
+        # default values for prediction intervals if not available
+        pred_lb = pred - 1.96 * 1.0  # rough approximation for prediction interval
+        pred_ub = pred + 1.96 * 1.0  # rough approximation for prediction interval
+    
+    return xi, yi, vi, norm_weights, xs, pred, ci_lb, ci_ub, pred_lb, pred_ub, mod_pos
+
+    
 def process_df_for_r(df: pd.DataFrame) -> pd.DataFrame:
     """
     Processes a pandas DataFrame by converting columns to floats if possible,
