@@ -153,3 +153,25 @@ def safe_to_numeric(col):
         return pd.to_numeric(col)
     except (ValueError, TypeError):
         return col  # return original column if conversion fails
+
+
+def aggregate_df(df: pd.DataFrame, method: str = "mean") -> pd.DataFrame:
+    """Aggregate DataFrame by specified method (mean, median, etc.)"""
+    aggregation_funcs = {
+        col: method if pd.api.types.is_numeric_dtype(df[col]) else lambda x: x.iloc[0]
+        for col in df.columns
+    }  # define aggregation functions for each column
+    return df.agg(aggregation_funcs)  # aggregate DataFrame
+
+
+def calc_sd_from_se(se: float, n: int) -> float:
+    """Calculate standard deviation from standard error and sample size
+
+    Args:
+        se (float): standard error
+        n (int): number of samples
+
+    Returns:
+        float: standard deviation
+    """
+    return se * np.sqrt(n)
