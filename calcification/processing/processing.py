@@ -852,6 +852,14 @@ def interpolate_and_extrapolate_predictions(df, target_year=2100):
     return df_full
 
 
+def process_emissions_sheet(sheet_df: pd.DataFrame, scenario_name: str) -> pd.DataFrame:
+    # Process the sheet DataFrame
+    sheet_df = sheet_df[["Gas", "CO2"]].iloc[3:]  # years labelled 'Gas'
+    sheet_df.rename(columns={"Gas": "year", "CO2": scenario_name}, inplace=True)
+    sheet_df["year"] = pd.to_numeric(sheet_df["year"], errors="coerce")
+    return sheet_df
+
+
 ### DEPRECATED
 # def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_atol: float=0.05, irr_atol: float=30) -> pd.DataFrame:
 #     """
