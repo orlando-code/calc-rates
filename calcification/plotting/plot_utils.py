@@ -23,9 +23,9 @@ def save_fig(
     print("Saving figure to", config.fig_dir)
     config.fig_dir.mkdir(parents=True, exist_ok=True)
     run_key = (
-        run_key + "_" + utils.get_formatted_timestamp()
+        run_key + "_" + utils.get_now_timestamp_formatted()
         if run_key
-        else utils.get_formatted_timestamp()
+        else utils.get_now_timestamp_formatted()
     )
 
     fig_fp = config.fig_dir / f"{fig_name}_{run_key}.png"
