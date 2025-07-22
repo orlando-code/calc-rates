@@ -18,8 +18,8 @@ from sklearn.gaussian_process.kernels import (
 )
 
 # custom
-from calcification import analysis
-from calcification.plotting import utils as plot_utils
+from calcification.analysis import analysis
+from calcification.plotting import plot_utils
 
 # R
 metafor = importr("metafor")

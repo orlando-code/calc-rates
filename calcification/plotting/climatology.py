@@ -7,8 +7,7 @@ import pandas as pd
 import seaborn as sns
 from matplotlib import gridspec
 
-from calcification.plotting import config as plot_config
-from calcification.plotting import utils as plot_utils
+from calcification.plotting import plot_config, plot_utils
 
 
 def plot_spatial_effect_distribution(

@@ -6,7 +6,7 @@ import pandas as pd
 import seaborn as sns
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from calcification.plotting import config as plot_config
+from calcification.plotting import plot_config
 
 
 def plot_study_timeseries(
