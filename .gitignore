@@ -200,3 +200,6 @@ graphics/
 *.afdesign*
 *.pptx
 *.pdf
+
+# figures
+figures/
