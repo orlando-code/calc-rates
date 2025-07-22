@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import rpy2.robjects as ro
-import seaborn as sns
 from matplotlib.lines import Line2D
 from rpy2.robjects.packages import importr
 
@@ -647,127 +646,6 @@ def plot_funnel_from_model(
             plt.close()
 
         return None
-
-
-def create_faceted_dotplot_with_percentages(
-    df: pd.DataFrame,
-    top_n: int = 10,
-    groupby: str = "taxa",
-    omission_threshold: int = 10,
-) -> plt.Figure:
-    """
-    Create a faceted dotplot with percentages for the top N species in each taxonomic group.
-    """
-    count_df = df.groupby(["species", "genus", groupby])["n"].sum().reset_index()
-
-    # Get taxa that meet the omission threshold
-    group_counts = count_df.groupby(groupby)["n"].sum()
-    unique_in_group = sorted(
-        [
-            group
-            for group in group_counts.index
-            if group_counts[group] >= omission_threshold
-        ]
-    )
-    n_in_group = len(unique_in_group)
-
-    fig, axes = plt.subplots(1, n_in_group, figsize=(5 * n_in_group, 10), sharey=False)
-
-    if n_in_group == 1:
-        axes = [axes]
-
-    for i, group in enumerate(unique_in_group):
-        ax = axes[i]
-
-        group_data = count_df[count_df[groupby] == group].copy()
-        total_count = group_data["n"].sum()
-
-        group_data.n = group_data.n.astype(int)
-        topn = group_data.nlargest(top_n, "n")
-        other_species = group_data[~group_data["species"].isin(topn["species"])]
-
-        if len(other_species) > 0:
-            other_count = other_species["n"].sum()
-            # other_percentage = (other_count / total_count) * 100
-
-            other_sum = pd.DataFrame(
-                {
-                    "species": [f"Other ({len(other_species)} species)"],
-                    "genus": ["Various"],
-                    groupby: [group],
-                    "n": [other_count],
-                }
-            )
-
-            plot_data = pd.concat([topn, other_sum], ignore_index=True)
-        else:
-            plot_data = topn
-
-        plot_data["species_label"] = plot_data.apply(
-            lambda row: f"{row['species']} ({(row['n'] / total_count * 100):.1f}%)",
-            axis=1,
-        )
-
-        plot_data = plot_data.sort_values("n", ascending=True)
-
-        unique_genera = sorted(plot_data["genus"].unique())
-        genus_palette = dict(
-            zip(unique_genera, sns.color_palette("Spectral", len(unique_genera)))
-        )
-        # specify 'various' genus as black
-        genus_palette["Various"] = "black"
-
-        colors = [genus_palette[genus] for genus in plot_data["genus"]]
-        y_positions = range(len(plot_data))
-        ax.scatter(plot_data["n"], y_positions, c=colors, s=100)
-
-        # add count labels
-        for j, (_, row) in enumerate(plot_data.iterrows()):
-            ax.text(
-                row["n"]
-                + 0.02 * ax.get_xlim()[1]
-                + len(str(row["n"])) * 0.02 * ax.get_xlim()[1],
-                j,
-                f"{row['n']}",
-                va="center",
-            )
-        for j, (_, row) in enumerate(plot_data.iterrows()):
-            ax.plot([0, row["n"]], [j, j], "gray", alpha=0.3)
-
-        # formatting
-        ax.set_yticks(y_positions)
-        ax.set_yticklabels(plot_data["species_label"])
-        max_count = plot_data["n"].max()
-        ax.set_xlim(0, max_count * 1.3)  # extra space for the count labels
-        ax.grid(axis="x", linestyle="--", alpha=0.7)
-        ax.set_xlabel("Count", fontsize=12)
-        if i == 0:
-            ax.set_ylabel("Species", fontsize=12)
-        # legend
-        legend_handles = [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                color="w",
-                markerfacecolor=genus_palette[genus],
-                markersize=10,
-            )
-            for genus in unique_genera
-        ]
-
-        total_species = len(group_data)
-        ax.set_title(
-            f"{group.capitalize()}\n(Total: {int(total_count)} samples, {total_species} species)",
-            fontsize=14,
-        )
-        ax.legend(legend_handles, unique_genera, title="Genus", loc="lower right")
-
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.9)
-    plt.suptitle(f"Top {int(top_n)} Species Counts by Taxonomic Group", fontsize=16)
-
-    return fig
 
 
 def plot_contour(ax, x, y, df, title, legend_label="Calcification Rate"):
