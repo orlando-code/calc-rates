@@ -1,4 +1,4 @@
-import itertools
+import logging
 import string
 from pathlib import Path
 
@@ -12,7 +12,10 @@ from tqdm.auto import tqdm
 
 ### cbsyst sensitivity analysis
 def create_st_ft_sensitivity_array(
-    param_combinations: list, pertubation_percentage: float, resolution: int = 20
+    param_combinations: list,
+    pertubation_percentage: float,
+    resolution: int = 20,
+    progress_bar: bool = True,
 ) -> xa.DataArray:
     # check if more than three parameters are passed
     if len(param_combinations[0]) != 3:
@@ -21,7 +24,7 @@ def create_st_ft_sensitivity_array(
         )
 
     results_dict = {}
-    for Sal, Temp, pH_NBS in tqdm(param_combinations):
+    for Sal, Temp, pH_NBS in tqdm(param_combinations, disable=not progress_bar):
         ST_base = cbh.calc_ST(Sal)
         FT_base = cbh.calc_FT(Sal)
 
@@ -29,16 +32,16 @@ def create_st_ft_sensitivity_array(
         ST_values = np.linspace(
             ST_base - pertubation_percentage / 100 * ST_base,
             ST_base + pertubation_percentage / 100 * ST_base,
-            20,
+            resolution,
         )
         FT_values = np.linspace(
             FT_base - pertubation_percentage / 100 * FT_base,
             FT_base + pertubation_percentage / 100 * FT_base,
-            20,
+            resolution,
         )
 
         # initialize empty array for pH_total values
-        pH_grid = np.zeros((20, 20))
+        pH_grid = np.zeros((resolution, resolution))
 
         for i, ST in enumerate(ST_values):
             for j, FT in enumerate(FT_values):
@@ -82,7 +85,7 @@ def create_st_ft_sensitivity_array(
     )
 
 
-def select_by_stat(ds: xa.Dataset, variables_stats: dict):
+def select_by_stat(ds: xa.Dataset, variables_stats: dict) -> xa.Dataset:
     """
     Selects values from an xarray dataset based on the specified statistics for given variables.
 
@@ -93,45 +96,25 @@ def select_by_stat(ds: xa.Dataset, variables_stats: dict):
     Returns:
         xr.Dataset: Dataset subset at the selected coordinate values.
     """
+    allowed = {"min", "max", "mean"}
     selected_coords = {}
-
     for var, stat in variables_stats.items():
-        if stat == "min":
-            selected_coords[var] = ds[var].min().item()
-        elif stat == "max":
-            selected_coords[var] = ds[var].max().item()
-        elif stat == "mean":
-            selected_coords[var] = ds[var].mean().item()
-        else:
-            raise ValueError(f"stat for {var} must be 'min', 'max', or 'mean'")
-
-    # Select the closest matching values
-    ds_selected = ds.sel(selected_coords, method="nearest")
-
-    return ds_selected
+        if stat not in allowed:
+            raise ValueError(f"stat for {var} must be one of {allowed}")
+        selected_coords[var] = getattr(ds[var], stat)().item()
+    return ds.sel(selected_coords, method="nearest")
 
 
-def convert_png_to_jpg(directory: str) -> None:
-    """
-    Convert all PNG files in a directory to JPG format.
-
-    Args:
-        directory (str): The path to the directory containing the PNG files.
-    """
-    # fetch all current png files
+def convert_png_to_jpg(directory: str):
+    """Convert all PNG files in a directory to JPG format."""
     png_files = Path(directory).glob("*.png")
-
     for png_file in png_files:
-        with Image.open(png_file) as img:  # open file
-            # convert to RGB (PNG can have transparency)
+        with Image.open(png_file) as img:
             rgb_img = img.convert("RGB")
-
-            # create a new filename by replacing .png with .jpg
             jpg_file = png_file.with_suffix(".jpg")
-
-            # save image as JPG
             rgb_img.save(jpg_file, "JPEG")
-            print(f"Converted {png_file} to {jpg_file}")
+            logging.info(f"Converted {png_file} to {jpg_file}")
+            yield jpg_file
 
 
 def uniquify_repeated_values(vals: list, uniquify_str: str = "LOC") -> list:
@@ -154,7 +137,14 @@ def uniquify_repeated_values(vals: list, uniquify_str: str = "LOC") -> list:
             else letters
         )
 
-    return [j for _, i in itertools.groupby(vals) for j in zip_letters(list(i))]
+    counts = {}
+    result = []
+    for val in vals:
+        count = counts.get(val, 0)
+        suffix = f"-{uniquify_str}-{string.ascii_uppercase[count]}" if count else ""
+        result.append(f"{val}{suffix}")
+        counts[val] = count + 1
+    return result
 
 
 def safe_to_numeric(col):
