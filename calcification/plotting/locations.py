@@ -4,7 +4,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from calcification.plotting import utils as plot_utils
+from calcification.plotting import plot_utils
 from calcification.utils import config
 
 
