@@ -58,6 +58,7 @@ def aggregate_treatments_rows_with_individual_samples(df: pd.DataFrame) -> pd.Da
     ]
     # select only groups where all n==1 (i.e. only single-sample treatments)
     mask = df.groupby(group_cols)["n"].transform(lambda x: (x == 1).all())
+    # drop rows containing
     to_agg = df[mask]
     not_agg = df[~mask]
 
@@ -215,11 +216,14 @@ def assign_treatment_groups_multilevel(
         pd.DataFrame: Original dataframe with added 'treatment_group' and 'treatment_level' columns.
     """
     result_df = df.copy()  # avoid modifying original dataframe
-    # pre-initialize columns with correct types
-    result_df["treatment_group"] = pd.NA
-    result_df["treatment_level_t"] = pd.NA
-    result_df["treatment_level_ph"] = pd.NA
-    result_df["irr_group"] = pd.NA
+    treatment_group_cols = [
+        "treatment_group",
+        "treatment_level_t",
+        "treatment_level_ph",
+        "irr_group",
+    ]
+    for col in treatment_group_cols:  # pre-initialize columns with correct types
+        result_df[col] = pd.NA
 
     for doi, study_df in result_df.groupby(
         "doi"
@@ -237,6 +241,7 @@ def assign_treatment_groups_multilevel(
         total=result_df.groupby(groupby_cols, dropna=False).ngroups,
     ):
         if len(group_df) <= 1:  # skip if too few samples
+            # print(f"Skipping {study_doi} because it has only one treatment")
             continue
 
         # find control values (min T, max pH)
@@ -279,7 +284,8 @@ def assign_treatment_groups_multilevel(
     result_df["treatment"] = np.select(conditions, choices, default="unknown")
     # Replace 'unknown' with np.nan after the select operation
     result_df.loc[result_df["treatment"] == "unknown", "treatment"] = np.nan
-
+    # drop any rows with nans in treatment_group columns (single-treatment studies)
+    result_df = result_df.dropna(subset=treatment_group_cols)
     return result_df
 
 
