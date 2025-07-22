@@ -1,5 +1,4 @@
-# general
-
+### calculate cargonate chemistry from experimental data
 import cbsyst as cb
 import cbsyst.helpers as cbh
 import numpy as np
