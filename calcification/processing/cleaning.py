@@ -2,6 +2,7 @@ import logging
 import unicodedata
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from calcification.processing import locations, taxonomy, units
@@ -14,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize column names and clean strings."""
     df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u")
-    df = df.applymap(
+    df = df.map(
         lambda x: unicodedata.normalize("NFKD", str(x)).replace("\xa0", " ")
         if isinstance(x, str)
         else x
@@ -80,6 +81,11 @@ def convert_types(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def replace_empty_cells_with_nan(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace empty cells with NaN."""
+    return df.replace(" ", np.nan)
+
+
 def remove_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Remove unnamed columns."""
     return df.loc[:, ~df.columns.str.contains("^unnamed")]
@@ -87,40 +93,49 @@ def remove_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def convert_ph_to_hplus(df: pd.DataFrame) -> pd.DataFrame:
     """Convert pH to hplus."""
-    if "phtot" in df.columns:
+    try:
         df["hplus"] = df["phtot"].apply(
             lambda p: units.ph_to_hplus(p) if pd.notna(p) else None
         )
+    except Exception as e:
+        logger.error(f"Error during pH to hplus conversion: {e}")
+        raise
     return df
 
 
 def convert_irr_to_par(df: pd.DataFrame) -> pd.DataFrame:
     """Convert irradiance to PAR."""
-    if "irr" in df.columns and "ipar" in df.columns:
+    try:
         df["irr"] = df.apply(
             lambda row: units.irradiance_conversion(row["ipar"], "PAR")
             if pd.notna(row["ipar"])
             else row["irr"],
             axis=1,
         )
+    except Exception as e:
+        logger.error(f"Error during irradiance to PAR conversion: {e}")
+        raise
     return df
 
 
 def calculate_calcification_sd(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate calcification standard deviation."""
-    if "calcification_se" in df.columns and "n" in df.columns:
+    try:
         df["calcification_sd"] = df.apply(
             lambda row: utils.calc_sd_from_se(row["calcification_se"], row["n"])
             if pd.notna(row["calcification_se"]) and pd.notna(row["n"])
             else row.get("calcification_sd"),
             axis=1,
         )
+    except Exception as e:
+        logger.error(f"Error during calcification standard deviation calculation: {e}")
+        raise
     return df
 
 
 def standardise_calcification_rates(df: pd.DataFrame) -> pd.DataFrame:
     """Standardise calcification rates."""
-    if "calcification" in df.columns and "st_calcification_unit" in df.columns:
+    try:
         df[["st_calcification", "st_calcification_sd", "st_calcification_unit"]] = (
             df.apply(
                 lambda x: pd.Series(
@@ -136,6 +151,9 @@ def standardise_calcification_rates(df: pd.DataFrame) -> pd.DataFrame:
                 axis=1,
             )
         )
+    except Exception as e:
+        logger.error(f"Error during calcification rate standardisation: {e}")
+        raise
     return df
 
 
@@ -149,6 +167,7 @@ def preprocess_df(
         df = filter_selection(df, selection_dict)
         df = convert_types(df)
         df = remove_unnamed_columns(df)
+        df = replace_empty_cells_with_nan(df)
         return df
     except Exception as e:
         logger.error(f"Error during preprocessing: {e}")
@@ -174,8 +193,9 @@ def process_raw_data(
             df = convert_ph_to_hplus(df)
         if require_results:
             df = df.dropna(subset=["n", "calcification"])
-        df = standardise_calcification_rates(df)
         df = units.map_units(df)
+        df = standardise_calcification_rates(df)
+        df = calculate_calcification_sd(df)
         return df
     except Exception as e:
         logger.error(f"Error during raw data processing: {e}")
