@@ -10,23 +10,20 @@ from calcification.utils import file_ops
 
 ### climatology
 def process_climatology_csv(fp: str, index_col: str = "doi") -> pd.DataFrame:
+    """Process climatology csv files provided in BH's format"""
     df = pd.read_csv(fp).drop(columns=["data_ID", "Unnamed: 0"])
-    # rename columns to be less wordy
     df = (
         (df.copy())
         .replace({"2021_2040": 2030, "2041_2060": 2050, "2081_2100": 2090})
         .infer_objects(copy=False)
-    )
-
+    )  # rename columns to be indexable and less wordy
     return df.set_index(index_col) if index_col else df
 
 
 def convert_climatology_csv_to_multiindex(
     fp: str, locations_yaml_fp: str
 ) -> pd.DataFrame:
-    """
-    Convert the climatology CSV file to a multi-index DataFrame.
-    """
+    """Convert the climatology CSV file to a multi-index DataFrame."""
     df = process_climatology_csv(fp, index_col="doi")  # load the CSV file
 
     var = "ph" if "ph" in str(fp.name) else "sst" if "sst" in str(fp.name) else None
@@ -63,10 +60,19 @@ def convert_climatology_csv_to_multiindex(
     return df
 
 
-def generate_location_specific_anomalies(df: pd.DataFrame, scenario_var: str = "sst"):
-    df = (
-        df.sort_index()
-    )  # Sort the index to avoid PerformanceWarning about lexsort depth
+def generate_location_specific_climatology_anomalies(
+    df: pd.DataFrame, scenario_var: str = "sst"
+) -> pd.DataFrame:
+    """Generate location-specific climatologyanomalies for each location in the dataframe
+
+    Args:
+        df (pd.DataFrame): Dataframe with multi-index of locations and scenarios
+        scenario_var (str): Variable to generate anomalies for (e.g. "sst", "ph")
+
+    Returns:
+        pd.DataFrame: Dataframe with location-specific climatology anomalies
+    """
+    df = df.sort_index()  # sort index to avoid PerformanceWarning about lexsort depth
     locations = df.index.unique()
     anomaly_rows = []  # to hold newmods inputs
     metadata_rows = []  # to track what each row corresponds to
@@ -141,7 +147,19 @@ def generate_location_specific_anomalies(df: pd.DataFrame, scenario_var: str = "
     )
 
 
-def interpolate_and_extrapolate_predictions(df, target_year=2100):
+def interpolate_and_extrapolate_predictions(
+    df: pd.DataFrame, target_year: int = 2100
+) -> pd.DataFrame:
+    """Interpolate and extrapolate predictions for each core_grouping, scenario, and percentile
+
+    Args:
+        df (pd.DataFrame): Dataframe with multi-index of locations and scenarios
+        target_year (int): Year to extrapolate to
+
+    Returns:
+        pd.DataFrame: Dataframe with interpolated and extrapolated predictions
+    """
+
     grouping_cols = ["core_grouping", "scenario", "percentile", "time_frame"]
     value_cols = [col for col in df.columns if col not in grouping_cols]
 
@@ -196,8 +214,20 @@ def interpolate_and_extrapolate_predictions(df, target_year=2100):
 
 
 def process_emissions_sheet(sheet_df: pd.DataFrame, scenario_name: str) -> pd.DataFrame:
-    # Process the sheet DataFrame
-    sheet_df = sheet_df[["Gas", "CO2"]].iloc[3:]  # years labelled 'Gas'
+    """Process the emissions sheet DataFrame as provided from supplementary data of https://doi.org/10.5194/gmd-13-3571-2020
+
+    Args:
+        sheet_df (pd.DataFrame): Dataframe with emissions data
+        scenario_name (str): Name of scenario to process
+
+    Returns:
+        pd.DataFrame: Dataframe with processed emissions data
+    """
+    sheet_df = sheet_df[["Gas", "CO2"]].iloc[
+        3:
+    ]  # select only years corresponding to CO2 emissions
     sheet_df.rename(columns={"Gas": "year", "CO2": scenario_name}, inplace=True)
-    sheet_df["year"] = pd.to_numeric(sheet_df["year"], errors="coerce")
+    sheet_df["year"] = pd.to_numeric(
+        sheet_df["year"], errors="coerce"
+    )  # convert year to numeric
     return sheet_df
