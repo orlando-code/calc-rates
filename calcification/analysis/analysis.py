@@ -15,9 +15,8 @@ from scipy.stats import median_abs_deviation
 from scipy.stats import norm as scipy_norm
 from tqdm.auto import tqdm
 
-from calcification.processing import processing
-
 # custom
+from calcification.processing import carbonate_processing, groups_processing
 from calcification.utils import config, file_ops
 
 metafor = rpackages.importr("metafor")
@@ -165,7 +164,7 @@ def calc_cohens_d(
         tuple[float, float]: Cohen's d and its variance
     """
     sd_pooled = calc_pooled_sd(n1, n2, sd1, sd2)
-    d = (mu2 - mu1) / sd_pooled
+    d = (mu2 - mu1) / sd_pooled if sd_pooled != 0 else 0
     d_var = (n1 + n2) / (n1 * n2) + d**2 / (2 * (n1 + n2))
     return d, d_var
 
@@ -337,7 +336,7 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
     for col in df.columns:
         if col.endswith("_var"):
             mean_value = df[col].mean()
-            df[col] = df[col].replace(0, mean_value)
+            df[col] = df[col].replace(0, mean_value).infer_objects(copy=False)
 
     return df
 
@@ -608,7 +607,7 @@ def calculate_effect_sizes_end_to_end(
         pd.DataFrame: DataFrame with calculated effect sizes
     """
     # load and process carbonate chemistry data
-    carbonate_df = processing.populate_carbonate_chemistry(
+    carbonate_df = carbonate_processing.populate_carbonate_chemistry(
         raw_data_fp, data_sheet_name, selection_dict=selection_dict
     )
 
@@ -626,10 +625,14 @@ def calculate_effect_sizes_end_to_end(
     )
 
     # assign treatment groups
-    carbonate_df_tgs = processing.assign_treatment_groups_multilevel(carbonate_df)
+    carbonate_df_tgs = groups_processing.assign_treatment_groups_multilevel(
+        carbonate_df
+    )
 
-    carbonate_df_tgs_no_ones = processing.aggregate_treatments_with_individual_samples(
-        carbonate_df_tgs
+    carbonate_df_tgs_no_ones = (
+        groups_processing.aggregate_treatments_rows_with_individual_samples(
+            carbonate_df_tgs
+        )
     )
     # calculate effect size
     print("\nCalculating effect sizes...")
