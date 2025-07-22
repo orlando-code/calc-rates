@@ -5,28 +5,28 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 
-def cluster_values(values: list, tolerance: float) -> list:
+def cluster_array_values_within_tolerance(array_like: list, tolerance: float) -> list:
     """
     Cluster values based on their proximity.
 
     Args:
-        values (array-like): Values to cluster.
+        array_like (array-like): Values to cluster.
         tolerance (float): Tolerance for clustering.
 
     Returns:
         list: List of clusters, where each cluster is a list of values.
     """
-    if len(values) == 0:  # return empty list if no values
+    if len(array_like) == 0:  # return empty list if no values
         return []
 
     # sort values
-    sorted_values = np.sort(values)
+    sorted_array = np.sort(array_like)
 
     # initialize first cluster
-    clusters = [[sorted_values[0]]]
+    clusters = [[sorted_array[0]]]
 
     # cluster remaining values
-    for val in sorted_values[1:]:
+    for val in sorted_array[1:]:
         # check if value is sufficiently close to the last value in the current cluster
         if np.abs(val - np.mean(clusters[-1])) < tolerance:
             # add to current (most recent) cluster
@@ -38,103 +38,129 @@ def cluster_values(values: list, tolerance: float) -> list:
     return clusters
 
 
-def aggregate_treatments_with_individual_samples(df: pd.DataFrame) -> pd.DataFrame:
-    """For treatments with only one sample (most often those for which raw, sample-level data was extracted), aggregate the data to get means and standard deviations of the treatment groups."""
-    aggregated_df = (
-        df.groupby(
-            [
-                "doi",
-                "species_types",
-                "treatment_level_ph",
-                "treatment_level_t",
-                "calcification_unit",
-            ]
-        )
-        .filter(lambda group: (group["n"] == 1).all())
-        .groupby(
-            [
-                "doi",
-                "species_types",
-                "treatment_level_ph",
-                "treatment_level_t",
-                "calcification_unit",
-            ]
-        )
-        .agg(
-            ecoregion=("ecoregion", "first"),  # metadata
-            lat_zone=("lat_zone", "first"),
-            latitude=("latitude", "first"),
-            longitude=("longitude", "first"),
-            location=("location", "first"),
-            taxa=("taxa", "first"),
-            genus=("genus", "first"),
-            species=("species", "first"),
-            family=("family", "first"),
-            core_grouping=("core_grouping", "first"),
-            authors=("authors", "first"),
-            year=("year", "first"),
-            treatment_group=("treatment_group", "first"),
-            treatment=("treatment", "first"),
-            dic=("dic", "mean"),  # carbonate chemistry
-            dic_sd=("dic", "std"),
-            pco2=("pco2", "mean"),
-            pco2_sd=("pco2", "std"),
-            phtot=("phtot", "mean"),
-            phtot_sd=("phtot", "std"),
-            temp=("temp", "mean"),
-            temp_sd=("temp", "std"),
-            sal=("sal", "mean"),
-            sal_sd=("sal", "std"),
-            irr=("irr", "mean"),  # irradiance
-            irr_sd=("irr", "std"),
-            calcification=("calcification", "mean"),  # calcification
-            calcification_sd=("calcification", "std"),
-            st_calcification=("st_calcification", "mean"),
-            st_calcification_sd=("st_calcification", "std"),
-            st_calcification_unit=("st_calcification_unit", "first"),
-            n=("n", "count"),
-        )
-        .reset_index()
-    )
-    # remove rows with n=1
-    df_no_ones = df[df["n"] != 1]
-    # Append the aggregated data to the DataFrame
-    df_no_ones = pd.concat([df_no_ones, aggregated_df], ignore_index=True)
-    return df_no_ones
-
-
-def determine_control_conditions(df: pd.DataFrame) -> dict:
-    """Identify the rows corresponding to min temperature and/or max pH.
+def aggregate_treatments_rows_with_individual_samples(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate treatments with only one sample (n==1) to get means and stds,
+    then append to the rest of the DataFrame.
 
     Args:
-        df (pd.DataFrame): Input dataframe with columns 'doi', 'temp', 'phtot', etc.
+        df (pd.DataFrame): Input dataframe with columns 'doi', 'species_types', 'treatment_level_ph', 'treatment_level_t', 'calcification_unit', 'n', etc.
 
     Returns:
-        dict: Dictionary with control conditions for each treatment group.
+        pd.DataFrame: Dataframe with aggregated treatments.
     """
-    grouped = df.groupby("treatment_group")
+    # aggregate data by treatment group (within each study, separate by species_types, calcification_unit, and treatment levels)
+    group_cols = [
+        "doi",
+        "species_types",
+        "treatment_level_ph",
+        "treatment_level_t",
+        "calcification_unit",
+    ]
+    # select only groups where all n==1 (i.e. only single-sample treatments)
+    mask = df.groupby(group_cols)["n"].transform(lambda x: (x == 1).all())
+    to_agg = df[mask]
+    not_agg = df[~mask]
 
-    control_treatments = {}
+    if not to_agg.empty:
+        aggregated = (
+            to_agg.groupby(group_cols)
+            .agg(
+                ecoregion=("ecoregion", "first"),
+                lat_zone=("lat_zone", "first"),
+                latitude=("latitude", "first"),
+                longitude=("longitude", "first"),
+                location=("location", "first"),
+                taxa=("taxa", "first"),
+                genus=("genus", "first"),
+                species=("species", "first"),
+                family=("family", "first"),
+                core_grouping=("core_grouping", "first"),
+                authors=("authors", "first"),
+                year=("year", "first"),
+                treatment_group=("treatment_group", "first"),
+                treatment=("treatment", "first"),
+                dic=("dic", "mean"),
+                dic_sd=("dic", "std"),
+                pco2=("pco2", "mean"),
+                pco2_sd=("pco2", "std"),
+                phtot=("phtot", "mean"),
+                phtot_sd=("phtot", "std"),
+                temp=("temp", "mean"),
+                temp_sd=("temp", "std"),
+                sal=("sal", "mean"),
+                sal_sd=("sal", "std"),
+                irr=("irr", "mean"),
+                irr_sd=("irr", "std"),
+                calcification=("calcification", "mean"),
+                calcification_sd=("calcification_sd", "std"),
+                st_calcification=("st_calcification", "mean"),
+                st_calcification_sd=("st_calcification_sd", "std"),
+                st_calcification_unit=("st_calcification_unit", "first"),
+                n=("n", "count"),
+            )
+            .reset_index()
+        )
+        result = pd.concat([not_agg, aggregated], ignore_index=True)
+    else:
+        result = df.copy()
+    return result
 
-    for group, sub_df in grouped:
-        group = int(group)  # convert group to integer for semantics
-        min_temp = (
-            sub_df.loc[sub_df["temp"].idxmin()]["temp"]
-            if not any(sub_df["phtot"].isna())
-            else None
-        )  # Row with minimum temperature
-        max_pH = (
-            sub_df.loc[sub_df["phtot"].idxmax()]["phtot"]
-            if not any(sub_df["phtot"].isna())
-            else None
-        )  # Row with maximum pH
 
-        control_treatments[group] = {
-            "control_t_in": min_temp,
-            "control_phtot": max_pH,
-        }
+def _assign_treatment_row(
+    row: pd.Series,
+    control_T: float,
+    control_pH: float,
+    t_mapping: dict,
+    ph_mapping: dict,
+    irr_group: float,
+) -> pd.Series:
+    """Assign treatment group to a single row based on temperature and pH values."""
+    # get temperature cluster level (0 is control)
+    t_level = None
+    if not np.isnan(row["temp"]) and control_T is not None:
+        t_cluster_idx = t_mapping.get(row["temp"])
+        control_cluster_idx = t_mapping.get(control_T)
+        if t_cluster_idx is not None and control_cluster_idx is not None:
+            t_level = t_cluster_idx - control_cluster_idx
 
-    return control_treatments
+    # get pH cluster level (0 is control)
+    ph_level = None
+    if not np.isnan(row["phtot"]) and control_pH is not None:
+        ph_cluster_idx = ph_mapping.get(row["phtot"])
+        control_cluster_idx = ph_mapping.get(control_pH)
+        if ph_cluster_idx is not None and control_cluster_idx is not None:
+            ph_level = (
+                control_cluster_idx - ph_cluster_idx
+            )  # reverse order since higher pH is control
+
+    # determine clusters for cases where there is only one of t or ph
+    if t_level is None and ph_level is not None:
+        t_level = 0
+    if ph_level is None and t_level is not None:
+        ph_level = 0
+
+    # determine if values are in control clusters   # TODO: not currently capturing rare case when studies have both T and pH varied from control with no intermediary values
+    is_control_T = t_level == 0 if t_level is not None else False
+    is_control_pH = ph_level == 0 if ph_level is not None else False
+
+    # classify the treatment
+    if is_control_T and is_control_pH:
+        treatment = "cTcP"
+    elif is_control_T:
+        treatment = "cTtP"
+    elif is_control_pH:
+        treatment = "tTcP"
+    elif not (is_control_T or is_control_pH):
+        treatment = "tTtP"
+    else:
+        treatment = "uncertain"
+
+    return {
+        "treatment_group": treatment,
+        "treatment_level_t": t_level,
+        "treatment_level_ph": ph_level,
+        "irr_group": irr_group,
+    }
 
 
 def assign_treatment_groups(
@@ -158,55 +184,16 @@ def assign_treatment_groups(
     Returns:
         pd.DataFrame: Dataframe with added treatment group columns.
     """
-    # apply classification to each row in this group
-    for idx in df.index:
-        row = df.loc[idx]
+    treatment_group_assignments = df.apply(
+        lambda row: _assign_treatment_row(
+            row, control_T, control_pH, t_mapping, ph_mapping, irr_group
+        ),
+        axis=1,
+        result_type="expand",
+    )
 
-        # get temperature cluster level (0 is control)
-        t_level = None
-        if not np.isnan(row["temp"]) and control_T is not None:
-            t_cluster_idx = t_mapping.get(row["temp"])
-            control_cluster_idx = t_mapping.get(control_T)
-            if t_cluster_idx is not None and control_cluster_idx is not None:
-                t_level = t_cluster_idx - control_cluster_idx
-
-        # get pH cluster level (0 is control)
-        ph_level = None
-        if not np.isnan(row["phtot"]) and control_pH is not None:
-            ph_cluster_idx = ph_mapping.get(row["phtot"])
-            control_cluster_idx = ph_mapping.get(control_pH)
-            if ph_cluster_idx is not None and control_cluster_idx is not None:
-                ph_level = (
-                    control_cluster_idx - ph_cluster_idx
-                )  # reverse order since higher pH is control
-
-        # determine clusters for cases where there is only one of t or ph
-        if t_level is None and ph_level is not None:
-            t_level = 0
-        if ph_level is None and t_level is not None:
-            ph_level = 0
-
-        # determine if values are in control clusters   # TODO: not currently capturing rare case when studies have both T and pH varied from control with no intermediary values
-        is_control_T = t_level == 0 if t_level is not None else False
-        is_control_pH = ph_level == 0 if ph_level is not None else False
-
-        # classify the treatment
-        if is_control_T and is_control_pH:
-            treatment = "cTcP"
-        elif is_control_T:
-            treatment = "cTtP"
-        elif is_control_pH:
-            treatment = "tTcP"
-        elif not (is_control_T or is_control_pH):
-            treatment = "tTtP"
-        else:
-            treatment = "uncertain"
-
-        # Update the treatment info in the result dataframe
-        df.loc[idx, "treatment_group"] = treatment
-        df.loc[idx, "treatment_level_t"] = t_level if t_level is not None else np.nan
-        df.loc[idx, "treatment_level_ph"] = ph_level if ph_level is not None else np.nan
-        df.loc[idx, "irr_group"] = irr_group
+    for col in treatment_group_assignments.columns:
+        df[col] = treatment_group_assignments[col]
 
     return df
 
@@ -228,27 +215,22 @@ def assign_treatment_groups_multilevel(
         pd.DataFrame: Original dataframe with added 'treatment_group' and 'treatment_level' columns.
     """
     result_df = df.copy()  # avoid modifying original dataframe
-
-    # Pre-initialize columns with correct types
+    # pre-initialize columns with correct types
     result_df["treatment_group"] = pd.NA
     result_df["treatment_level_t"] = pd.NA
     result_df["treatment_level_ph"] = pd.NA
     result_df["irr_group"] = pd.NA
 
-    # process all DOIs in one pass for irradiance grouping
     for doi, study_df in result_df.groupby(
         "doi"
     ):  # group irradiance values by study (DOI)
-        # Apply irradiance grouping within each study
         grouped_df = group_irradiance(study_df, atol=irr_atol)
-        # Update the result dataframe with the grouped irradiance values
+        # update the result dataframe with the grouped irradiance values
         result_df.loc[grouped_df.index, "irr_group"] = grouped_df["irr_group"]
 
-    # Create a list to store processed dataframes
-    processed_dfs = []
-
-    # Group by relevant factors to process in chunks
+    # process each group
     groupby_cols = ["doi", "irr_group", "species_types"]
+    processed_dfs = []
     for (study_doi, irr_group, species), group_df in tqdm(
         result_df.groupby(groupby_cols, dropna=False),
         desc="Assigning treatment groups",
@@ -265,27 +247,11 @@ def assign_treatment_groups_multilevel(
             group_df["phtot"].max() if not group_df["phtot"].isna().all() else None
         )
 
-        # cluster temperature values
-        t_values = group_df["temp"].dropna().unique()
-        t_clusters = cluster_values(t_values, t_atol)
-
-        # cluster pH values
-        ph_values = group_df["phtot"].dropna().unique()
-        ph_clusters = cluster_values(ph_values, pH_atol)
-
         # map each value to its cluster index
-        t_mapping = {
-            val: cluster_idx
-            for cluster_idx, cluster in enumerate(t_clusters)
-            for val in cluster
-        }
-        ph_mapping = {
-            val: cluster_idx
-            for cluster_idx, cluster in enumerate(ph_clusters)
-            for val in cluster
-        }
+        t_mapping = _make_cluster_mapping(group_df["temp"].dropna().unique(), t_atol)
+        ph_mapping = _make_cluster_mapping(group_df["phtot"].dropna().unique(), pH_atol)
 
-        # Process this group
+        # process group
         treatments_df = assign_treatment_groups(
             group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group
         )
@@ -315,6 +281,12 @@ def assign_treatment_groups_multilevel(
     result_df.loc[result_df["treatment"] == "unknown", "treatment"] = np.nan
 
     return result_df
+
+
+def _make_cluster_mapping(values: list, atol: float) -> dict:
+    """Helper to cluster values and return a mapping from value to cluster index."""
+    clusters = cluster_array_values_within_tolerance(values, atol)
+    return {val: idx for idx, cluster in enumerate(clusters) for val in cluster}
 
 
 def assign_delta_t_category(delta_t: float | int) -> str:
