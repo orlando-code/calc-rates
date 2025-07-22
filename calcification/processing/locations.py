@@ -9,9 +9,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-# custom
-from calcification import config, file_ops
-from calcification.processing import utils as processing_utils
+from calcification.utils import config, file_ops, utils
 
 
 ### spatial
@@ -35,10 +33,11 @@ def get_google_maps_coordinates(locations: list[str]) -> dict:
             print(f"Using locations in {config.resources_dir / 'gmaps_locations.yaml'}")
             return gmaps_coords
 
-    ### if necessary, generate or append to a locations yaml file
+    # if necessary, generate or append to a locations yaml file
     if not (config.resources_dir / "gmaps_locations.yaml").exists():
-        # create new yaml file
         print(f"Creating gmaps_locations.yaml file in {config.resources_dir}")
+        # create new yaml file
+        file_ops.write_yaml({}, config.resources_dir / "gmaps_locations.yaml")
 
     # get coordinates for these locations using Google Maps API
     gmaps_coords = {}
@@ -278,7 +277,7 @@ def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
         ["doi", "location_lower", "coords", "cleaned_coords"]
     )  # drop duplicates to get truly unique
 
-    locs_df.loc[:, "doi"] = processing_utils.uniquify_repeated_values(locs_df.doi)
+    locs_df.loc[:, "doi"] = utils.uniquify_repeated_values(locs_df.doi)
 
     temp_df = temp_df.merge(
         locs_df["doi"],

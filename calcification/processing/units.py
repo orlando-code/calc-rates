@@ -3,8 +3,7 @@ import re
 
 import pandas as pd
 
-# custom
-from calcification import config, file_ops
+from calcification.utils import config, file_ops
 
 ### global constants
 MOLAR_MASS_CACO3 = 100.0869  # g/mol

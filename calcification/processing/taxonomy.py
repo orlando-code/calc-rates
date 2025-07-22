@@ -5,8 +5,7 @@ import pandas as pd
 import requests
 from tqdm.auto import tqdm
 
-# custom
-from calcification import config, file_ops
+from calcification.utils import config, file_ops
 
 
 def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:

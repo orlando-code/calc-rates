@@ -9,61 +9,54 @@ from calcification.utils import config
 
 
 def plot_areas_with_study_locations(
-    df, filter_dict: dict = {"Lat_Zone": "Tropical"}, extent=(-180, 180, -40, 40)
-):
+    df: pd.DataFrame,
+    filter_dict: dict | None = None,
+    extent: tuple[float, float, float, float] = (-180, 180, -40, 40),
+) -> tuple[plt.Figure, plt.Axes]:
     """
-    Plots areas and study locations on a world map.
+    Plot areas and study locations on a world map.
 
-    Parameters:
-    - df: pandas.DataFrame containing study locations with latitude and longitude.
-    - filter_dict: Dictionary specifying column_name: value pairs to filter areas_df.
-    - extent: Tuple specifying the map extent in the format (min_lon, max_lon, min_lat, max_lat).
+    Args:
+        df: DataFrame with 'latitude', 'longitude', and 'doi' columns.
+        filter_dict: Optional dict to filter regions.
+        extent: (min_lon, max_lon, min_lat, max_lat).
+
+    Returns:
+        (fig, ax): Matplotlib Figure and Axes.
     """
-    # Create base map with filtered regions
+    if filter_dict is None:
+        filter_dict = {"Lat_Zone": "Tropical"}
+
+    # create base map with filtered regions
     fig, ax = plot_filtered_meow_regions(filter_dict=filter_dict, extent=extent)
 
-    # Plot study locations
     locs_df = df.drop_duplicates("doi", keep="first")
-    for i, (doi, data) in enumerate(locs_df.iterrows()):
-        # Convert coordinates to float if needed
-        lat = (
-            float(data["latitude"])
-            if isinstance(data["latitude"], str)
-            else data["latitude"]
-        )
-        lon = (
-            float(data["longitude"])
-            if isinstance(data["longitude"], str)
-            else data["longitude"]
-        )
+    # plot study locations and plotting
+    lat = pd.to_numeric(locs_df["latitude"], errors="coerce")
+    lon = pd.to_numeric(locs_df["longitude"], errors="coerce")
+    valid = lat.notna() & lon.notna()
+    ax.plot(
+        lon[valid],
+        lat[valid],
+        "o",
+        markeredgecolor="white",
+        markersize=5,
+        color="red",
+        transform=ccrs.PlateCarree(),
+    )
 
-        # Only plot if coordinates are valid
-        if pd.notna(lat) and pd.notna(lon):
-            ax.plot(
-                lon,
-                lat,
-                "o",
-                markeredgecolor="white",
-                markersize=5,
-                color="red",
-                transform=ccrs.PlateCarree(),
-            )
-
-    # Add title
     ax.set_title("Spatial distribution of studies", fontsize=10)
-
     plt.show()
-
     return fig, ax
 
 
 def plot_filtered_meow_regions(
-    filter_dict: dict = {"Lat_Zone": "Tropical"},
-    extent=(-180, 180, -40, 40),
-    figsize=(15, 10),
-    dpi=300,
-    cmap="viridis",
-):
+    filter_dict: dict | None = None,
+    extent: tuple[float, float, float, float] = (-180, 180, -40, 40),
+    figsize: tuple[float, float] = (15, 10),
+    dpi: int = 300,
+    cmap: str = "viridis",
+) -> tuple[plt.Figure, plt.Axes]:
     """
     Plots filtered marine ecoregions of the world (MEOW) on a map.
 
@@ -77,22 +70,21 @@ def plot_filtered_meow_regions(
     Returns:
     - fig, ax: Matplotlib figure and axis objects for further customization.
     """
-    # Read in shapefiles from directory
+    if filter_dict is None:
+        filter_dict = {"Lat_Zone": "Tropical"}
+
+    # read in shapefiles from directory
     gdf = gpd.read_file(config.climatology_data_dir / "MEOW" / "meow_ecos.shp")
+    for col, val in filter_dict.items():
+        gdf = gdf[gdf[col] == val]
 
-    # Filter areas_df based on filter_dict
-    if filter_dict:
-        for col, value in filter_dict.items():
-            gdf = gdf[gdf[col] == value]
-
-    # Create figure and axis
     fig, ax = plt.subplots(
         1, 1, figsize=figsize, subplot_kw={"projection": ccrs.PlateCarree()}, dpi=dpi
     )
 
     ax = plot_utils.format_geo_axes(ax, extent=extent)
 
-    # Plot filtered areas on world map
+    # plot filtered areas on world map
     gdf.plot(
         ax=ax,
         column="REALM",
@@ -106,8 +98,6 @@ def plot_filtered_meow_regions(
             "fontsize": 8,
         },
     )
-
-    # Add gridlines
     gl = ax.gridlines(
         draw_labels=True, linewidth=0.5, color="gray", alpha=0.5, linestyle="--"
     )

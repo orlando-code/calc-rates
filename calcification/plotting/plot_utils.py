@@ -11,7 +11,7 @@ import pandas as pd
 import seaborn as sns
 from scipy import interpolate
 
-from calcification.plotting import config as plot_config
+from calcification.plotting import plot_config
 from calcification.utils import config, utils
 
 

@@ -8,9 +8,8 @@ import pandas as pd
 from scipy import interpolate
 from tqdm.auto import tqdm
 
-# custom
-from calcification import config, file_ops, locations, taxonomy, units
-from calcification.processing import utils as processing_utils
+from calcification.processing import locations, taxonomy, units
+from calcification.utils import config, file_ops
 
 
 ### helper functions
