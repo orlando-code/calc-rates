@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import rpy2.robjects as ro
+import seaborn as sns
 from matplotlib.lines import Line2D
 from rpy2.robjects.packages import importr
 
@@ -18,7 +19,7 @@ from sklearn.gaussian_process.kernels import (
 
 # custom
 from calcification.analysis import analysis
-from calcification.plotting import plot_utils
+from calcification.plotting import plot_config, plot_utils
 
 # R
 metafor = importr("metafor")
@@ -817,3 +818,383 @@ def plot_3d_surface_gp(
     )
 
     return fig
+
+
+def plot_global_timeseries_grid(
+    groups: dict[str, pd.DataFrame], figsize=(16, 10), dpi=300, title_org: str = None
+):
+    """
+    Plot global timeseries in a grid layout with SSPs vertically and group types horizontally.
+
+    Parameters:
+        groups: dict mapping group names (str) to DataFrames (pd.DataFrame)
+    """
+    # Extract scenarios and group names
+    scenarios = next(iter(groups.values()))["scenario"].unique()
+    group_names = list(groups.keys())
+
+    # Define colors and formatting
+    historic_colour, historic_alpha = "darkgrey", 0.5
+    forecast_alpha, zero_effect_colour, zero_effect_alpha = 0.3, "black", 0.5
+    # group_colours = sns.color_palette("tab10", len(groups))  # Different color per group
+    # group_colour_dict = {group: group_colours[i] for i, group in enumerate(groups)}
+    scenario_colours = sns.color_palette("Reds", len(scenarios))
+    scenario_colour_dict = {
+        scenario: scenario_colours[i] for i, scenario in enumerate(scenarios)
+    }
+
+    x_points = next(iter(groups.values()))["time_frame"].unique()
+    time_discontinuity = 2025  # present day
+
+    # Create grid layout: rows are SSPs, columns are group types
+    fig, axes = plt.subplots(
+        len(scenarios),
+        len(groups),
+        figsize=figsize,
+        sharex=False,
+        sharey=False,
+        dpi=dpi,
+    )
+
+    # Global min/max for y-axis synchronization
+    global_min_ylim, global_max_ylim = float("inf"), float("-inf")
+
+    # First pass to calculate global y-limits
+    for group_name, df in groups.items():
+        for scenario in scenarios:
+            scenario_df = df[df["scenario"] == scenario]
+            means_df = scenario_df[scenario_df["percentile"] == "mean"]
+            min_val = min(
+                means_df["ci.lb"].min() if not means_df.empty else 0, 0
+            )  # Include 0
+            max_val = max(
+                means_df["ci.ub"].max() if not means_df.empty else 0, 0
+            )  # Include 0
+
+            global_min_ylim = min(global_min_ylim, min_val)
+            global_max_ylim = max(global_max_ylim, max_val)
+
+    # Add some padding to y-limits
+    y_padding = 0.1 * (global_max_ylim - global_min_ylim)
+    global_min_ylim -= y_padding
+    global_max_ylim += y_padding
+
+    # Plot each cell in the grid
+    for i, scenario in enumerate(scenarios):
+        for j, group_name in enumerate(group_names):
+            ax = (
+                axes[i, j]
+                if len(scenarios) > 1 and len(group_names) > 1
+                else axes[i]
+                if len(group_names) == 1
+                else axes[j]
+                if len(scenarios) == 1
+                else axes
+            )
+
+            df = groups[group_name]
+            scenario_df = df[df["scenario"] == scenario]
+
+            if not scenario_df.empty:
+                means_df = scenario_df[scenario_df["percentile"] == "mean"]
+                x_fine, mean_spline = plot_utils.interpolate_spline(
+                    x_points, means_df["pred"]
+                )
+                x_fine, low_spline = plot_utils.interpolate_spline(
+                    x_points, means_df["ci.lb"]
+                )
+                x_fine, up_spline = plot_utils.interpolate_spline(
+                    x_points, means_df["ci.ub"]
+                )
+
+                historic_mask = x_fine < time_discontinuity
+                forecast_mask = x_fine >= time_discontinuity
+
+                # Historical period
+                ax.fill_between(
+                    x_fine[historic_mask],
+                    low_spline[historic_mask],
+                    up_spline[historic_mask],
+                    alpha=historic_alpha,
+                    color=historic_colour,
+                    linewidth=0,
+                )
+                ax.plot(
+                    x_fine[historic_mask],
+                    mean_spline[historic_mask],
+                    ":",
+                    color=scenario_colour_dict[scenario],
+                    alpha=0.8,
+                )
+
+                # Forecast period
+                ax.fill_between(
+                    x_fine[forecast_mask],
+                    low_spline[forecast_mask],
+                    up_spline[forecast_mask],
+                    alpha=forecast_alpha,
+                    color=scenario_colour_dict[scenario],
+                    linewidth=0,
+                )
+                ax.plot(
+                    x_fine[forecast_mask],
+                    mean_spline[forecast_mask],
+                    "--",
+                    linewidth=2,
+                    color=scenario_colour_dict[scenario],
+                    label=group_name,
+                )
+
+                first_negative_index = np.argmax(
+                    up_spline < 0
+                )  # Find the first index where the mean spline is negative
+                if first_negative_index is not None and not np.isnan(
+                    first_negative_index
+                ):
+                    ax.annotate(
+                        "",
+                        xy=(x_fine[first_negative_index], 0),
+                        xytext=(
+                            x_fine[first_negative_index],
+                            up_spline[first_negative_index] + 2,
+                        ),
+                        arrowprops=dict(arrowstyle="-|>", color="black", lw=1.5),
+                        fontsize=8,
+                        ha="center",
+                        va="center",
+                    )
+
+            # Zero effect line
+            ax.axhline(
+                y=0,
+                color=zero_effect_colour,
+                alpha=zero_effect_alpha,
+                linestyle="-",
+                linewidth=1,
+            )
+
+            # Set grid and limits
+            ax.grid(ls="--", alpha=0.3)
+            ax.set_xlim(2000, 2100)
+            ax.set_ylim(-200, global_max_ylim)
+
+            from matplotlib import ticker
+
+            x_tickspacing, y_tickspacing = 50, 100
+            ax.xaxis.set_major_locator(ticker.MultipleLocator(x_tickspacing))
+            ax.yaxis.set_major_locator(ticker.MultipleLocator(y_tickspacing))
+
+            fig.text(0.5, 0.0, "Year", ha="center", fontsize=10)
+            fig.text(
+                0.0,
+                0.5,
+                "Percentage change in calcification rate",
+                va="center",
+                rotation="vertical",
+                fontsize=10,
+            )
+
+            # Add group name as title only on first row
+            if i == 0:
+                ax.set_title(group_name, fontsize=10, color="black")
+
+            # Hide tick labels except for edge cells
+            if j > 0:  # Not first column
+                ax.set_yticklabels([])
+            if i < len(scenarios) - 1:  # Not last row
+                ax.set_xticklabels([])
+
+            # decrease size of axis tick labels
+            ax.tick_params(axis="both", labelsize=8)
+
+    # Add a single legend at the top
+    handles = (
+        [
+            plt.Line2D(
+                [],
+                [],
+                linestyle="-",
+                color=zero_effect_colour,
+                label="Zero effect",
+                alpha=zero_effect_alpha,
+            )
+        ]
+        + [plt.Rectangle((0, 0), 1, 1, color="grey", alpha=0.3, label="95% CI")]
+        + [
+            plt.Line2D(
+                [], [], linestyle=":", color=historic_colour, label="Historical"
+            ),
+            plt.Line2D([], [], linestyle="--", color=historic_colour, label="Forecast"),
+        ]
+        + [
+            plt.Line2D(
+                [],
+                [],
+                linestyle="--",
+                color=scenario_colour_dict[scenario],
+                label=plot_config.SCENARIO_MAP[scenario],
+            )
+            for scenario in scenarios
+        ]
+    )
+
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.98),
+        ncol=len(handles),
+        fontsize=10,
+        frameon=False,
+    )
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust layout to accommodate suptitle
+
+    return fig, axes
+
+
+def plot_global_timeseries_multi(
+    groups: dict[str, pd.DataFrame], figsize=(10, 10), dpi=300, title_org: str = None
+):
+    """
+    Plot global timeseries for multiple groups on the same axes.
+
+    Parameters:
+        groups: dict mapping group names (str) to DataFrames (pd.DataFrame)
+    """
+    scenarios = next(iter(groups.values()))["scenario"].unique()
+
+    # Define colors and formatting
+    historic_colour, historic_alpha = "darkgrey", 0.5
+    forecast_alpha, zero_effect_colour, zero_effect_alpha = 0.2, "black", 0.5
+    group_colours = sns.color_palette("tab10", len(groups))  # Different color per group
+    group_colour_dict = {group: group_colours[i] for i, group in enumerate(groups)}
+
+    x_points = next(iter(groups.values()))["time_frame"].unique()
+    time_discontinuity = 2025  # present day
+
+    fig, axes = plt.subplots(len(scenarios), 1, figsize=figsize, sharex=True, dpi=dpi)
+
+    for i, scenario in enumerate(scenarios):
+        ax = axes[i]
+
+        for group_name, df in groups.items():
+            scenario_df = df[df["scenario"] == scenario]
+
+            means_df = scenario_df[scenario_df["percentile"] == "mean"]
+            x_fine, mean_spline = plot_utils.interpolate_spline(
+                x_points, means_df["pred"]
+            )
+            x_fine, up_spline = plot_utils.interpolate_spline(
+                x_points, means_df["ci.lb"]
+            )
+            x_fine, low_spline = plot_utils.interpolate_spline(
+                x_points, means_df["ci.ub"]
+            )
+
+            historic_mask = x_fine < time_discontinuity
+            forecast_mask = x_fine >= time_discontinuity
+
+            ax.plot(
+                x_fine[forecast_mask],
+                mean_spline[forecast_mask],
+                "--",
+                alpha=0.8,
+                color=group_colour_dict[group_name],
+                label=group_name,
+            )
+            ax.fill_between(
+                x_fine[forecast_mask],
+                low_spline[forecast_mask],
+                up_spline[forecast_mask],
+                alpha=forecast_alpha,
+                color=group_colour_dict[group_name],
+                linewidth=0,
+            )
+            ax.plot(
+                x_fine[historic_mask],
+                mean_spline[historic_mask],
+                ":",
+                color=group_colour_dict[group_name],
+                alpha=0.8,
+            )
+            ax.fill_between(
+                x_fine[historic_mask],
+                low_spline[historic_mask],
+                up_spline[historic_mask],
+                alpha=historic_alpha,
+                color=historic_colour,
+                linewidth=0,
+            )
+
+        # Zero effect line
+        ax.hlines(
+            0,
+            xmin=x_fine.min(),
+            xmax=x_fine.max(),
+            color=zero_effect_colour,
+            alpha=zero_effect_alpha,
+        )
+
+        # Set labels and grid
+        ax.set_ylabel("Relative calcification rate", fontsize=8)
+        ax.grid(ls="--", alpha=0.5)
+
+    # Global legend
+    handles = [
+        plt.Line2D([], [], linestyle=":", color=historic_colour, label="Historical"),
+        plt.Line2D(
+            [],
+            [],
+            linestyle="-",
+            color=zero_effect_colour,
+            label="Zero effect",
+            alpha=zero_effect_alpha,
+        ),
+    ] + [
+        plt.Line2D([], [], linestyle="--", color=group_colours[i], label=group)
+        for i, group in enumerate(groups)
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.95),
+        ncol=len(handles),
+        fontsize=8,
+        frameon=False,
+    )
+    # annotate each axis with the scenario name
+    for i, ax in enumerate(axes):
+        ax.annotate(
+            plot_config.SCENARIO_MAP[scenarios[i]],
+            xy=(0.95, 0.9),
+            xycoords="axes fraction",
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="black",
+        )
+        # ax.set_title(scenario, fontsize=10, fontweight='bold', color=group_colours[i])
+
+    # Synchronize ylims and xlims
+    global_min_ylim, global_max_ylim = 0, 0
+    for axis in axes:
+        ymin, ymax = axis.get_ylim()
+        global_min_ylim = min(global_min_ylim, ymin)
+        global_max_ylim = max(global_max_ylim, ymax)
+
+    for axis in axes:
+        axis.tick_params(axis="both", labelsize=8)
+        axis.set_xlim(1995, 2100)
+        axis.set_ylim(global_min_ylim, global_max_ylim)
+
+    if len(axes) > 0:
+        axes[-1].set_xlabel("Year", fontsize=8)
+
+    plt.suptitle(
+        f"{title_org}\nProjected relative calcification rates under different climate scenarios"
+        if title_org
+        else "Projected relative calcification rates under different climate scenarios",
+        fontsize=12,
+    )
+
+    return fig, axes
