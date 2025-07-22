@@ -9,7 +9,7 @@ from scipy import interpolate
 from tqdm.auto import tqdm
 
 from calcification.processing import locations, taxonomy, units
-from calcification.utils import config, file_ops
+from calcification.utils import config, file_ops, utils
 
 
 ### helper functions
@@ -249,7 +249,7 @@ def preprocess_df(
 
     ### infer data types
     df.loc[:, df.columns != "year"] = df.loc[:, df.columns != "year"].apply(
-        processing_utils.safe_to_numeric
+        utils.safe_to_numeric
     )
     problem_cols = [
         "irr",
