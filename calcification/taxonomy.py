@@ -143,11 +143,11 @@ def assign_functional_group(taxon_info: dict) -> str:
         class_name in ['phaeophyceae', 'ulvophyceae', 'florideophyceae']):
         # Special check for calcareous algae that aren't CCA
         if genus in ['galaxaura', 'padina']:
-            return 'Calcareous algae'
+            return 'Other algae'
         if genus in ['peyssonnelia']:
-            return 'Calcareous red algae'
+            return 'Other algae'
         if family in ['halimedaceae']:
-            return 'Calcareous green algae'
+            return 'Halimeda'
         return 'Fleshy algae'
     
     # Hard corals (scleractinian)

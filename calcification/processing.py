@@ -17,6 +17,15 @@ def aggregate_df(df: pd.DataFrame, method: str='mean') -> pd.DataFrame:
     return df.agg(aggregation_funcs)    # aggregate DataFrame
 
 
+def assign_delta_t_category(delta_t: float | int) -> str:
+    """
+    Assign a category based on the value of delta_t.
+    """
+    bins = [-float('inf'), 0.5, 1.5, 2.5, float('inf')]
+    labels = ['No change', 'Low', 'Medium', 'High']
+    return pd.cut([delta_t], bins=bins, labels=labels)[0]
+
+
 def group_irradiance(df: pd.DataFrame, irr_col: float='irr', atol: float=30) -> pd.DataFrame:
     """
     Assigns an 'irr_group' to values that are within absolute tolerance.
@@ -484,17 +493,23 @@ def assign_treatment_groups_multilevel(df: pd.DataFrame, t_atol: float=0.5, pH_a
 
 
 ### climatology
-def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd.DataFrame:
-    """
-    Convert the climatology CSV file to a multi-index DataFrame.
-    """
-    df = pd.read_csv(fp).drop(columns=['data_ID', 'Unnamed: 0']).set_index('doi')
+def process_climatology_csv(fp: str, index_col: str = 'doi') -> pd.DataFrame:
+    df = pd.read_csv(fp).drop(columns=['data_ID', 'Unnamed: 0'])
     # rename columns to be less wordy
-    df = df.replace(
+    df = (df.copy()).replace(
         {"2021_2040": 2030,
         "2041_2060": 2050,
         "2081_2100": 2090}
         ).infer_objects(copy=False)
+
+    return df.set_index(index_col) if index_col else df
+
+
+def convert_climatology_csv_to_multiindex(fp: str, locations_yaml_fp: str) -> pd.DataFrame:
+    """
+    Convert the climatology CSV file to a multi-index DataFrame.
+    """
+    df = process_climatology_csv(fp, index_col='doi')  # load the CSV file
     
     var = 'ph' if 'ph' in str(fp.name) else 'sst' if 'sst' in str(fp.name) else None
     if not var:
@@ -554,6 +569,45 @@ def generate_location_specific_anomalies(df: pd.DataFrame, scenario_var: str = "
                         'percentile': percentile
                     })
     return pd.concat([pd.DataFrame(metadata_rows), pd.DataFrame(anomaly_rows, columns=['anomaly_value'])], axis=1)
+
+
+def interpolate_and_extrapolate_predictions(df, target_year=2100):
+    grouping_cols = ['core_grouping', 'scenario', 'percentile', 'time_frame']
+    value_cols = [col for col in df.columns if col not in grouping_cols]
+
+    # Filter only mean percentile
+    df = df[df['percentile'] == 'mean'].copy()
+
+    # Make the full year grid (including up to 2100)
+    all_years = np.arange(df['time_frame'].min(), target_year + 1)
+    unique_groups = df[['core_grouping', 'scenario', 'percentile']].drop_duplicates()
+    full_grid = unique_groups.merge(pd.DataFrame({'time_frame': all_years}), how='cross')
+
+    # Merge full grid with existing predictions
+    df_full = pd.merge(full_grid, df, on=['core_grouping', 'scenario', 'percentile', 'time_frame'], how='left')
+
+    # Now interpolate/extrapolate for each group
+    for (core_grouping, scenario, percentile), group_df in df_full.groupby(['core_grouping', 'scenario', 'percentile']):
+        mask = (df_full['core_grouping'] == core_grouping) & (df_full['scenario'] == scenario) & (df_full['percentile'] == percentile)
+
+        available_years = group_df.dropna(subset=value_cols)['time_frame'].values
+        
+        if len(available_years) < 2:
+            continue  # Not enough points to interpolate
+
+        for value_col in value_cols:
+            available_vals = group_df.dropna(subset=[value_col])[value_col].values
+
+            if len(available_vals) < 2:
+                continue  # Not enough data
+
+            # Fit spline
+            spline = make_interp_spline(available_years, available_vals, k=min(2, len(available_vals) - 1))
+
+            # Predict for all years
+            df_full.loc[mask, value_col] = spline(all_years)
+
+    return df_full
 
 
 ### DEPRECATED

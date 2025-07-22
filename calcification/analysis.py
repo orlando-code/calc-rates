@@ -3,7 +3,11 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
+
+# stats
 import statsmodels.api as sm
+from scipy.stats import median_abs_deviation
+from scipy.stats import norm as scipy_norm
 
 # R
 import rpy2.robjects as ro
@@ -965,7 +969,6 @@ def predict_model(model, newmods: pd.DataFrame) -> pd.DataFrame:
     # convert the selected columns to a pandas dataframe
     with (ro.default_converter + ro.pandas2ri.converter).context():
         return ro.conversion.get_conversion().rpy2py(r_selected_columns).reset_index(drop=True)
-    
 
 
 def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var: str = "sst", moderator_pos: int = None) -> list[dict]:
@@ -1034,6 +1037,50 @@ def generate_location_specific_predictions(model, df: pd.DataFrame, scenario_var
     return metadata_rows
 
 
+
+def filter_robust_zscore(series: pd.Series, threshold: float=20) -> pd.Series:
+    """
+    Filter out outliers based on robust z-scores.
+    
+    Args:
+        series (pd.Series): The series to filter.
+        threshold (float): The z-score threshold for filtering.
+    
+    Returns:
+        pd.Series: A boolean series indicating which values are not outliers.
+    """
+    median = np.median(series)
+    mad = median_abs_deviation(series, scale='normal')  # scale for approx equivalence to std dev
+    robust_z = np.abs((series - median) / mad)
+    return robust_z < threshold
+
+
+
+def p_score(prediction: float, se: float, null_value: float=0) -> float:
+    """
+    Calculate the p-value for a given prediction and standard error.
+    """
+    z = (prediction - null_value) / se
+    p = 2 * (1 - scipy_norm.cdf(abs(z)))  # two-tailed p-value
+    return p
+
+
+### assign certainty levels
+def assign_certainty(p_score: float) -> int:
+    """
+    Assign certainty levels based on p-value.
+    """
+    if p_score < 0.01:
+        return 4  # very high certainty
+    elif p_score < 0.05:
+        return 3  # high certainty
+    elif p_score < 0.1:
+        return 2  # medium certainty
+    else:
+        return 1  # low certainty
+    
+    
+    
 ### DEPRECATED
 # def compute_heds
     # def calculate_effect_size(df1_sample, df2_sample, var, group1, group2):

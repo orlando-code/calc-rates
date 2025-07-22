@@ -26,6 +26,9 @@ import pandas as pd
 import statsmodels.api as sm
 from scipy import interpolate
 
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
+    
 # custom
 from calcification import config, utils, analysis
 
@@ -44,6 +47,17 @@ RATE_TYPE_MAPPING = {
     'm2 d-1': r'$m^2 \, d^{-1}$',
     'm d-1': r'$m \, d^{-1}$',
     'deltaSA d-1': r'$\Delta SA \, d^{-1}$'
+}
+
+# Using seaborn's vlag colormap (violet-lavender-amber-gold)
+# This creates a diverging palette that goes from violet/blue to amber/gold
+vlag_palette = sns.color_palette("colorblind", n_colors=5)
+CG_COLOURS = {
+    'Coral': vlag_palette[1],      # Violet/blue end of the spectrum
+    'CCA': vlag_palette[4],        # Blue-ish color
+    'Halimeda': vlag_palette[2],   # Middle/neutral color 
+    'Other algae': vlag_palette[0], # Amber-ish color
+    'Foraminifera': vlag_palette[3], # Gold/red end of the spectrum
 }
 
 
@@ -153,7 +167,7 @@ class Polynomial:
         return 'x' if power == 1 else 'x^{0}'.format(power) if power != 0 else ''
     
 def meta_regplot(
-    model: ro.vectors.ListVector, model_comps: tuple, x_mod: str,   level: float=95, ci: bool=True, pi: bool=True, shade: bool=True, point_size: str="seinv", point_color: str='black', point_fill: str='white', colorby: list=None, line_color: str='blue', ci_color: str='lightblue', ci_line_color: str='blue', xlab: str=None, ylab: str=None, xlim: tuple[float, float]=None, ylim: tuple[float, float]=None, predlim: tuple[float, float]=None, refline: float=0, figsize: tuple[float, float]=(10, 7), title: str=None, ax: matplotlib.axes.Axes=None, future_global_anomaly_df: pd.DataFrame=None, scenario_var: str=None) -> tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]:
+    model: ro.vectors.ListVector, model_comps: tuple, x_mod: str,   level: float=95, ci: bool=True, pi: bool=True, shade: bool=True, point_size: str="seinv", point_color: str='black', point_fill: str='white', colorby: list=None, line_color: str='blue', ci_color: str='lightblue', ci_line_color: str='blue', xlab: str=None, ylab: str=None, xlim: tuple[float, float]=None, ylim: tuple[float, float]=None, predlim: tuple[float, float]=None, refline: float=0, figsize: tuple[float, float]=(10, 7), title: str=None, ax: matplotlib.axes.Axes=None, future_global_anomaly_df: pd.DataFrame=None, scenario_var: str=None, all_legend: bool=True) -> tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]:
     """
     Create a meta-regression plot from an rma.mv or rma object.
     
@@ -240,8 +254,13 @@ def meta_regplot(
     ax.scatter([], [], edgecolor=point_color[0], facecolor=point_fill[0], alpha=0.8, label='Studies')
     # Get coefficients and create a polynomial string for the legend
     coeffs = np.array(model.rx2('b'))
-    polynomial = Polynomial(coeffs[mod_pos])
-    ax.plot(xs, pred, color=line_color, linewidth=2, label=f'Regression line: {polynomial}{x_mod}')    # plot regression line with equation
+    # polynomial = Polynomial(coeffs[mod_pos])
+    polynomial = Polynomial(np.concatenate([coeffs[mod_pos], coeffs[0]])).__str__()
+    regression_mod_str = "$\\Delta pH$" if x_mod == 'delta_ph' else "$\\Delta T$"
+    # replace x with the variable name
+    polynomial = polynomial.replace('x', regression_mod_str)
+    regression_line = ax.plot(xs, pred, color=line_color, linewidth=2, 
+                             label=f'Meta-regression: {polynomial}')
 
     ax.plot([],[], linestyle='--', color=ci_line_color, label='95% Confidence interval') if ci else None
     ax.plot([],[], linestyle=':', color=ci_line_color, label='95% Prediction interval') if pi else None
@@ -249,28 +268,32 @@ def meta_regplot(
     ### formatting
     ax.axhline(y=refline, color='gray', label='Zero effect level', linestyle='-', linewidth=1) if refline is not None else None    # add reference line
     ax.set_xlabel(xlab if xlab else model_comps['predictors'][mod_pos] if not model_comps['intercept'] else model_comps['predictors'][mod_pos-1], fontsize=12)
-    ax.set_ylabel(ylab if ylab else f'Effect size ({model_comps['response']})', fontsize=12)
+    ax.set_ylabel(ylab if ylab else f'Effect size ({model_comps["response"]})', fontsize=12)
     ax.set_title(title, fontsize=14) if title else None
     ax.set_xlim(xlim) if xlim else predlim if predlim else None
     ax.set_ylim(ylim) if ylim else None    
     ax.grid(True, linestyle='--', alpha=0.3)
 
-    ax.legend(fontsize=10)
-    # if colorby, make legend for values
-    if colorby is not None:
-        # if colorby represents discrete values (not continuous)
-        if len(unique_colors) < 5:
-            legend_elements = []
-            for color in unique_colors:
-                legend_elements.append(Line2D([0], [0], marker='o', color='w', label=color, 
-                                            markerfacecolor=color_map[color], markersize=10))
-            ax.legend(handles=legend_elements, title="Point colours", fontsize=10, loc='upper left')
-        # if colorby represents continuous values, make a colorbar
-        else:
-            sm = plt.cm.ScalarMappable(cmap='viridis', norm=plt.Normalize(vmin=min(colorby), vmax=max(colorby)))
-            sm.set_array([])
-            cbar = plt.colorbar(sm, ax=ax)
-            cbar.set_label('Color by', fontsize=10)
+    if all_legend:
+        ax.legend(fontsize=10)
+        # if colorby, make legend for values
+        if colorby is not None:
+            # if colorby represents discrete values (not continuous)
+            if len(unique_colors) < 5:
+                legend_elements = []
+                for color in unique_colors:
+                    legend_elements.append(Line2D([0], [0], marker='o', color='w', label=color, 
+                                                markerfacecolor=color_map[color], markersize=10))
+                ax.legend(handles=legend_elements, title="Point colours", fontsize=10, loc='upper left')
+            # if colorby represents continuous values, make a colorbar
+            else:
+                sm = plt.cm.ScalarMappable(cmap='viridis', norm=plt.Normalize(vmin=min(colorby), vmax=max(colorby)))
+                sm.set_array([])
+                cbar = plt.colorbar(sm, ax=ax)
+                cbar.set_label('Color by', fontsize=10)
+    else:   # only show regression line in legend if all_legend is False
+        ax.legend([regression_line[0]], [f'Meta-regression: {polynomial}'], fontsize=10, loc='upper left')
+        
         
 
     if ax is None:  # Only apply tight_layout if we created a new figure
@@ -582,6 +605,115 @@ def plot_spatial_effect_distribution(predictions_df: pd.DataFrame, var_to_plot: 
     
     return fig, axes
 
+def plot_climate_anomalies(data: pd.DataFrame, 
+                         plot_vars: list[str] = ['sst', 'ph'],
+                         plot_var_labels: dict = {'sst': "Sea surface temperature (°C) anomaly", 
+                                                 'ph': "pH$_{total}$ anomaly"},
+                         time_discontinuity: int = 2025,
+                         figsize: tuple[float, float] = (10, 4),
+                         dpi: int = 300) -> tuple[matplotlib.figure.Figure, np.ndarray]:
+    """
+    Plots timeseries of global climate variable anomalies for given scenarios.
+    This function extracts just the anomaly plotting portion from the original
+    plot_global_timeseries_with_anomalies function.
+
+    Args:
+        data (pd.DataFrame): DataFrame containing the data to plot with columns for
+            scenario, time_frame, scenario_var, anomaly_value_mean, anomaly_value_p10,
+            and anomaly_value_p90.
+        plot_vars (list[str]): List of climate variables to plot (e.g., ['sst', 'ph']).
+        plot_var_labels (dict): Dictionary mapping variable names to their display labels.
+        time_discontinuity (int): Year separating historical and forecast data.
+        figsize (tuple[float, float]): Size of the figure as (width, height).
+        dpi (int): Resolution of the figure in dots per inch.
+        
+    Returns:
+        tuple[matplotlib.figure.Figure, np.ndarray]: Figure and array of axes objects.
+    """
+    # Extract unique scenarios
+    scenarios = data.scenario.unique()
+    n_cols = len(plot_vars)
+    
+    # Create figure and axes
+    fig, axes = plt.subplots(1, n_cols, figsize=figsize, dpi=dpi)
+    if n_cols == 1:
+        axes = np.array([axes])  # Ensure axes is always an array
+    
+    # Define colors and formatting
+    historic_colour, historic_alpha = 'darkgrey', 0.5
+    forecast_alpha = 0.2
+    scenario_colours = sns.color_palette("Reds", len(scenarios))
+    scenario_colour_dict = {scenario: scenario_colours[i] for i, scenario in enumerate(scenarios)}
+    
+    # Get unique time points
+    x_points = data['time_frame'].unique()
+    
+
+    # Plot each climate variable
+    for j, plot_var in enumerate(plot_vars):
+        axis = axes[j]
+        # data_subset = data[data['scenario_var'] == plot_var]
+        
+        for scenario in scenarios:
+            # Get data for this scenario
+            forecast_subset = data[data['scenario'] == scenario]
+            mean_data = forecast_subset[forecast_subset['percentile'] == 'mean']
+            p10_data = forecast_subset[forecast_subset['percentile'] == 'p10']
+            p90_data = forecast_subset[forecast_subset['percentile'] == 'p90']
+            # Create smooth interpolated lines
+            x_fine, mean_spline = interpolate_spline(
+                x_points, mean_data[f'anomaly_value_{plot_var}'])
+            x_fine, low_spline = interpolate_spline(
+                x_points, p10_data[f'anomaly_value_{plot_var}'])
+            x_fine, up_spline = interpolate_spline(
+                x_points, p90_data[f'anomaly_value_{plot_var}'])
+            
+            # Create masks for historical vs forecast data
+            historic_mask = x_fine < time_discontinuity
+            forecast_mask = x_fine >= time_discontinuity
+            
+            # Plot forecast data
+            axis.plot(x_fine[forecast_mask], mean_spline[forecast_mask], '--', 
+                     alpha=0.7, color=scenario_colour_dict[scenario])
+            axis.fill_between(x_fine[forecast_mask], low_spline[forecast_mask], 
+                             up_spline[forecast_mask], alpha=forecast_alpha, 
+                             color=scenario_colour_dict[scenario], linewidth=0)
+        
+        # Plot historical data (once, since it's the same for all scenarios)
+        axis.plot(x_fine[historic_mask], mean_spline[historic_mask], '--', 
+                 color=historic_colour)
+        axis.fill_between(x_fine[historic_mask], low_spline[historic_mask], 
+                         up_spline[historic_mask], alpha=historic_alpha, 
+                         color=historic_colour, linewidth=0)
+        
+        # Add variable label
+        annotate_var = f'{plot_var_labels[plot_var]}'
+        axis.annotate(annotate_var, xy=(0.5, 0.92), xycoords='axes fraction', ha='center', fontsize=10)
+        
+        # Format axis
+        axis.tick_params(axis='both', labelsize=8)
+        axis.set_xlim(1995, 2100)
+        axis.set_xlabel("Year", fontsize=8)
+    
+    # Add legend
+    handles = [
+        plt.Line2D([], [], linestyle='--', color=historic_colour, label='Historical')
+    ] + [
+        plt.Line2D([], [], linestyle='--', color=scenario_colours[i], 
+                  label=scenario if 'SCENARIO_MAP' not in globals() 
+                  else SCENARIO_MAP.get(scenario.lower(), scenario))
+        for i, scenario in enumerate(scenarios)
+    ]
+    
+    fig.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, 0.98), 
+              ncol=len(handles), fontsize=8, frameon=False)
+    
+    # Adjust layout
+    plt.subplots_adjust(top=0.85)  # Make room for the title
+    # fig.tight_layout()
+    
+    return fig, axes
+
 
 def plot_global_timeseries_with_anomalies(data: pd.DataFrame, plot_vars: list[str, str]=['sst', 'ph'], plot_var_labels: list[str] = {'sst': "Sea surface temperature anomaly (°C)", 'ph': "pH$_{total}$ anomaly"}, time_discontinuity: int=2025, figsize: tuple[float, float]=(10, 10), dpi: int=300) -> tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]:
     """
@@ -768,6 +900,7 @@ def plot_global_timeseries(pred_anomaly_df: pd.DataFrame, figsize: tuple[float, 
         
     plt.suptitle(f'{title_org}\nProjected relative calcification rates under different climate scenarios' if title_org else 'Projected relative calcification rates under different climate scenarios', fontsize=12)
 
+    return fig, axes
 
 def save_fig(
     fig: object,
@@ -848,7 +981,7 @@ def plot_study_timeseries(df: pd.DataFrame, ax=None, colorby='core_grouping') ->
                          title_fontsize=small_fontsize)
     legend.get_title().set_ha('left')
     plt.xlabel('Year', fontsize=plt.rcParams['font.size'])
-    plt.title("Temporal distribution of studies", fontsize=plt.rcParams['font.size'])
+    # plt.title("Temporal distribution of studies", fontsize=plt.rcParams['font.size'])
     plt.tight_layout()
     return ax
 
@@ -1083,13 +1216,13 @@ def plot_effect_size_distributions(df, effect_sizes=['cohens_d', 'hedges_g', 're
 def set_up_regression_plot(var:str):
     if var == 'phtot':
         xlab = '$\\Delta$ pH'
-        xlim = (-1, 0)
-        predlim = (-1, 0)
+        xlim = (-1, 0.1)
+        predlim = xlim
         scenario_var = 'ph'
     elif var == 'temp':
         xlab = '$\\Delta$ Temperature ($^\\circ C$)'
-        xlim = (0,11)
-        predlim = None
+        xlim = (-1,10)
+        predlim = xlim
         scenario_var = 'sst'
     return xlab, xlim, predlim, scenario_var
 
@@ -1110,7 +1243,120 @@ def plot_contour(ax, x, y, df, title, legend_label='Calcification Rate'):
     ax.set_ylabel('pH$_T$')
     ax.set_title(title)
     plt.colorbar(contour, label=legend_label)
+    
+    
+def plot_contour_gp(ax: matplotlib.axes.Axes, x: np.ndarray, y: np.ndarray, df: pd.DataFrame, 
+                   title: str, legend_label: str = 'Calcification Rate') -> None:
+    """
+    Create a smooth contour plot using Gaussian Process regression
+    
+    Args:
+        ax (matplotlib.axes.Axes): The axes to plot on
+        x (np.ndarray): The x-coordinates for the grid
+        y (np.ndarray): The y-coordinates for the grid
+        df (pd.DataFrame): DataFrame containing 'temp', 'phtot', and 'st_calcification' columns
+        title (str): The title for the plot
+        legend_label (str, optional): The label for the colorbar
+    """
+    X_train = df[['temp', 'phtot']].values
+    y_train = df['st_calcification'].values
+    
+    # define the kernel - variable-independent RBFs with noise
+    k1 = ConstantKernel(1.0) * RBF(length_scale=2.5, length_scale_bounds=(0.1, 10.0)) # for temperature
+    k2 = ConstantKernel(1.0) * RBF(length_scale=0.1, length_scale_bounds=(0.01, 0.5))  # for pH
+    kernel = k1 + k2 + WhiteKernel(noise_level=0.1)
+        
+    # fit GP
+    gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10, alpha=np.asarray(df['st_calcification_sd'])**2)
+    gp.fit(X_train, y_train)
+    
+    # create prediction grid and predict
+    X, Y = np.meshgrid(x, y)
+    grid_points = np.column_stack([X.ravel(), Y.ravel()])
+    Z = gp.predict(grid_points).reshape(X.shape)
+    
+    # plot the contour
+    contour = ax.contourf(X, Y, Z, levels=20, cmap='viridis')
+    ax.set_xlabel('Temperature ($^\\circ C$)')
+    ax.set_ylabel('pH$_T$')
+    ax.set_title(title)    
+    ax.scatter(df['temp'], df['phtot'], c='white', s=10, alpha=0.6, edgecolors='black', linewidths=0.5)
+    
+    # format
+    plt.colorbar(contour, ax=ax, label=legend_label)
 
+
+def plot_3d_surface_gp(df: pd.DataFrame, title: str="Calcification Rate vs. Temperature and pH", 
+                       z_label: str='Calcification Rate', resolution: int=50) -> go.Figure:
+    """
+    Args:
+        df (pd.DataFrame): DataFrame containing 'temp', 'phtot', and 'st_calcification' columns
+        title (str, optional): The title for the plot
+        z_label (str, optional): The label for the z-axis
+        resolution (int, optional): Resolution of the grid for interpolation
+
+    Returns:
+        plotly.graph_objects.Figure: The plotly figure object
+    """
+    X_train = df[['temp', 'phtot']].values
+    y_train = df['st_calcification'].values    
+
+    # define the kernel - variable-independent RBFs with noise
+    k1 = ConstantKernel(1.0) * RBF(length_scale=1.0, length_scale_bounds=(0.1, 10.0)) # for temperature
+    k2 = ConstantKernel(1.0) * RBF(length_scale=0.25, length_scale_bounds=(0.01, 0.5))  # for pH
+    kernel = k1 + k2 + WhiteKernel(noise_level=0.1)
+    
+    # fit GP
+    gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=10, alpha=np.asarray(df['st_calcification_sd'])**2)
+    gp.fit(X_train, y_train)
+
+    # create prediction grid and predict    
+    x = np.linspace(df['temp'].min(), df['temp'].max(), resolution)
+    y = np.linspace(df['phtot'].min(), df['phtot'].max(), resolution)
+    X, Y = np.meshgrid(x, y)
+    grid_points = np.column_stack([X.ravel(), Y.ravel()])
+    Z = gp.predict(grid_points).reshape(X.shape)
+    
+    # plot
+    fig = go.Figure()
+    fig.add_trace(go.Surface(
+        x=X, y=Y, z=Z,
+        colorscale='viridis',
+        colorbar=dict(title=z_label),
+        opacity=0.8,
+    ))
+    fig.add_trace(go.Scatter3d(
+        x=df['temp'],
+        y=df['phtot'],
+        z=df['st_calcification'],
+        mode='markers',
+        marker=dict(
+            size=4,
+            color='white',
+            line=dict(color='black', width=0.5),
+            opacity=0.2
+        ),
+        name='Data Points'
+    ))
+    
+    # format
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis_title='Temperature (°C)',
+            yaxis_title='pH<sub>T</sub>',
+            zaxis_title=z_label,
+            aspectmode='cube',
+            xaxis=dict(nticks=10, range=[df['temp'].min(), df['temp'].max()]),
+            yaxis=dict(nticks=10, range=[df['phtot'].min(), df['phtot'].max()]),
+            zaxis=dict(nticks=10, range=[-10, 10]),
+        ),
+        width=900,
+        height=700,
+        margin=dict(l=65, r=50, b=65, t=90),
+    )
+    
+    return fig
 
 def plot_funnel_from_model(
     model,
