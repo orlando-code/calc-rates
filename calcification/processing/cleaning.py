@@ -1,163 +1,182 @@
-# general
+import logging
 import unicodedata
+from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from calcification.processing import locations, taxonomy, units
 from calcification.utils import config, file_ops, utils
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-def preprocess_df(
-    df: pd.DataFrame, selection_dict: dict = {"include": "yes"}
-) -> pd.DataFrame:
-    """Clean dataframe fields and standardise for future processing"""
-    ### basic cleaning
-    df.columns = df.columns.str.normalize("NFKC").str.replace(
-        "μ", "u"
-    )  # replace any unicode versions of 'μ' with 'u'
-    df = df.map(
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize column names and clean strings."""
+    df.columns = df.columns.str.normalize("NFKC").str.replace("μ", "u")
+    df = df.applymap(
         lambda x: unicodedata.normalize("NFKD", str(x)).replace("\xa0", " ")
         if isinstance(x, str)
         else x
-    )  # clean non-breaking spaces from string cells
-    # general processing
-    df.rename(
-        columns=file_ops.read_yaml(config.resources_dir / "mapping.yaml")[
+    )
+    try:
+        mapping = file_ops.read_yaml(config.resources_dir / "mapping.yaml")[
             "sheet_column_map"
-        ],
-        inplace=True,
-    )  # rename columns to agree with cbsyst output
+        ]
+        df.rename(columns=mapping, inplace=True)
+    except Exception as e:
+        logger.warning(f"Could not apply column mapping: {e}")
     df.columns = (
-        df.columns.str.lower()
-    )  # columns lower case headers for less confusing access later on
-    df.columns = df.columns.str.replace(
-        " ", "_"
-    )  # process columns to replace whitespace with underscore
-    df.columns = df.columns.str.replace(
-        "[()]", "", regex=True
-    )  # remove '(' and ')' from column names
-    df["year"] = pd.to_datetime(
-        df["year"], format="%Y"
-    )  # datetime format for later plotting
-
-    ### deal with duplicate dois: flag up duplicate dois which also have 'include' as 'yes'
-    inclusion_df = df[df["include"] == "yes"]
-    duplicate_dois = inclusion_df[inclusion_df.duplicated(subset="doi", keep=False)]
-    if not duplicate_dois.empty and not all(pd.isna(duplicate_dois["doi"])):
-        print("\nDuplicate DOIs found, treat with caution:")
-        print([doi for doi in duplicate_dois.doi.unique() if doi is not np.nan])
-
-    ### formating: fill down necessary repeated metadata values
-    df[["doi", "year", "authors", "location", "species_types", "taxa"]] = (
-        df[["doi", "year", "authors", "location", "species_types", "taxa"]]
-        .infer_objects(copy=False)
-        .ffill()
+        df.columns.str.lower().str.replace(" ", "_").str.replace("[()]", "", regex=True)
     )
-    df[["coords", "cleaned_coords"]] = df.groupby("doi")[
-        ["coords", "cleaned_coords"]
-    ].ffill()  # fill only as far as the next DOI
-
-    if selection_dict:  # filter for selected values
-        for key, value in selection_dict.items():
-            if isinstance(value, list):
-                df = df[df[key].isin(value)]
-            else:
-                df = df[df[key] == value]
-
-    ### deal with missing n
-    if (
-        df["n"].dtype == "object"
-    ):  # Only perform string operations if column contains strings
-        df = df[
-            ~df["n"].str.contains("~", na=False)
-        ]  # remove any rows in which 'n' has '~' in the string
-        df = df[df.n != "M"]  # remove any rows in which 'n' is 'M'
-
-    ### infer data types
-    df.loc[:, df.columns != "year"] = df.loc[:, df.columns != "year"].apply(
-        utils.safe_to_numeric
-    )
-    problem_cols = [
-        "irr",
-        "ipar",
-        "sal",
-    ]  # some columns have rogue strings when they should all contain numbers: in this case, convert unconvertable values to NaN
-    for col in problem_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    ### remove any columns with 'unnamed' in the header: these are an artefact from messing around outside the spreadsheets necessary columns
-    df = df.loc[:, ~df.columns.str.contains("^unnamed")]
     return df
+
+
+def fill_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill metadata columns forward."""
+    meta_cols = ["doi", "year", "authors", "location", "species_types", "taxa"]
+    missing = [col for col in meta_cols if col not in df.columns]
+    if missing:
+        logger.warning(f"Missing metadata columns: {missing}")
+    present_cols = [col for col in meta_cols if col in df.columns]
+    if present_cols:
+        df[present_cols] = df[present_cols].infer_objects(copy=False).ffill()
+    if "coords" in df.columns and "cleaned_coords" in df.columns:
+        df[["coords", "cleaned_coords"]] = df.groupby("doi")[
+            ["coords", "cleaned_coords"]
+        ].ffill()
+    return df
+
+
+def filter_selection(
+    df: pd.DataFrame, selection_dict: Optional[dict] = None
+) -> pd.DataFrame:
+    """Filter dataframe based on selection dictionary."""
+    if selection_dict is None:
+        selection_dict = {"include": "yes"}
+    for key, value in selection_dict.items():
+        if key not in df.columns:
+            logger.warning(f"Selection key '{key}' not found in DataFrame columns.")
+            continue
+        df = (
+            df[df[key].isin(value)] if isinstance(value, list) else df[df[key] == value]
+        )
+    return df
+
+
+def convert_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert types of columns."""
+    if "year" in df.columns:
+        df["year"] = pd.to_datetime(df["year"], format="%Y", errors="coerce")
+    if "n" in df.columns and df["n"].dtype == "object":
+        df = df[~df["n"].str.contains("~", na=False)]
+        df = df[df.n != "M"]
+    for col in df.columns:
+        if col != "year":
+            df[col] = utils.safe_to_numeric(df[col])
+    for col in ["irr", "ipar", "sal"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def remove_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove unnamed columns."""
+    return df.loc[:, ~df.columns.str.contains("^unnamed")]
+
+
+def convert_ph_to_hplus(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert pH to hplus."""
+    if "phtot" in df.columns:
+        df["hplus"] = df["phtot"].apply(
+            lambda p: units.ph_to_hplus(p) if pd.notna(p) else None
+        )
+    return df
+
+
+def convert_irr_to_par(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert irradiance to PAR."""
+    if "irr" in df.columns and "ipar" in df.columns:
+        df["irr"] = df.apply(
+            lambda row: units.irradiance_conversion(row["ipar"], "PAR")
+            if pd.notna(row["ipar"])
+            else row["irr"],
+            axis=1,
+        )
+    return df
+
+
+def calculate_calcification_sd(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate calcification standard deviation."""
+    if "calcification_se" in df.columns and "n" in df.columns:
+        df["calcification_sd"] = df.apply(
+            lambda row: utils.calc_sd_from_se(row["calcification_se"], row["n"])
+            if pd.notna(row["calcification_se"]) and pd.notna(row["n"])
+            else row.get("calcification_sd"),
+            axis=1,
+        )
+    return df
+
+
+def standardise_calcification_rates(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardise calcification rates."""
+    if "calcification" in df.columns and "st_calcification_unit" in df.columns:
+        df[["st_calcification", "st_calcification_sd", "st_calcification_unit"]] = (
+            df.apply(
+                lambda x: pd.Series(
+                    units.rate_conversion(
+                        x.get("calcification"),
+                        x.get("calcification_sd"),
+                        x.get("st_calcification_unit"),
+                    )
+                )
+                if pd.notna(x.get("calcification"))
+                and pd.notna(x.get("st_calcification_unit"))
+                else pd.Series(["", "", ""]),
+                axis=1,
+            )
+        )
+    return df
+
+
+def preprocess_df(
+    df: pd.DataFrame, selection_dict: Optional[dict] = None
+) -> pd.DataFrame:
+    """Clean dataframe fields and standardise for future processing."""
+    try:
+        df = normalize_columns(df)
+        df = fill_metadata(df)
+        df = filter_selection(df, selection_dict)
+        df = convert_types(df)
+        df = remove_unnamed_columns(df)
+        return df
+    except Exception as e:
+        logger.error(f"Error during preprocessing: {e}")
+        raise
 
 
 def process_raw_data(
     df: pd.DataFrame,
     require_results: bool = True,
-    selection_dict: dict = {"include": "yes"},
     ph_conversion: bool = True,
+    selection_dict: Optional[dict] = None,
 ) -> pd.DataFrame:
-    """Process raw data from the spreadsheet to prepare for analysis
-    Args:
-        df (pd.DataFrame): DataFrame containing raw data
-        require_results (bool): Whether to require results for processing
-        selection_dict (dict): Dictionary of selections to filter the DataFrame
-
-    Returns:
-        pd.DataFrame: Processed DataFrame
-    """
-    df = preprocess_df(df, selection_dict=selection_dict)  # general processing
-    ### location processsing
-    df = locations.uniquify_multilocation_study_dois(
-        df
-    )  # for dois with multiple locations
-    df = locations.assign_coordinates(df)  # assign coordinates to locations
-    locations.save_locations_information(df)  # save locations information
-    df = locations.assign_ecoregions(df)  # assign ecoregions to locations
-
-    ### taxonomy
-    df = taxonomy.assign_taxonomical_info(
-        df
-    )  # create family, genus, species, and functional group columns from species binomials
-
-    ### units
-    df["irr"] = df.apply(
-        lambda row: units.irradiance_conversion(row["ipar"], "PAR")
-        if pd.notna(row["ipar"])
-        else row["irr"],
-        axis=1,
-    )  # convert integrated irradiance to irradiance
-
-    if ph_conversion:
-        df["hplus"] = df.apply(
-            lambda row: units.ph_to_hplus(row["phtot"])
-            if pd.notna(row["phtot"])
-            else None,
-            axis=1,
-        )  # convert pH to H+ concentration in μmol/kg seawater
-
-    if require_results:  # keep only rows with all the necessary data
-        df = df.dropna(subset=["n", "calcification"])
-
-    # calculate calcification standard deviation
-    df["calcification_sd"] = df.apply(
-        lambda row: utils.calc_sd_from_se(row["calcification_se"], row["n"])
-        if pd.notna(row["calcification_se"]) and pd.notna(row["n"])
-        else row["calcification_sd"],
-        axis=1,
-    )
-
-    # calculate standarised calcification rates and relevant units
-    df = units.map_units(df)  # map units to standardised units
-    df[["st_calcification", "st_calcification_sd", "st_calcification_unit"]] = df.apply(
-        lambda x: pd.Series(
-            units.rate_conversion(
-                x["calcification"], x["calcification_sd"], x["st_calcification_unit"]
-            )
-        )
-        if pd.notna(x["calcification"]) and pd.notna(x["st_calcification_unit"])
-        else pd.Series(["", "", ""]),
-        axis=1,
-    )
-
-    return df
+    """Process raw data from the spreadsheet to prepare for analysis."""
+    try:
+        df = preprocess_df(df, selection_dict)
+        df = locations.uniquify_multilocation_study_dois(df)
+        df = locations.assign_coordinates(df)
+        locations.save_locations_information(df)
+        df = locations.assign_ecoregions(df)
+        df = taxonomy.assign_taxonomical_info(df)
+        df = convert_irr_to_par(df)
+        if ph_conversion:
+            df = convert_ph_to_hplus(df)
+        if require_results:
+            df = df.dropna(subset=["n", "calcification"])
+        df = standardise_calcification_rates(df)
+        df = units.map_units(df)
+        return df
+    except Exception as e:
+        logger.error(f"Error during raw data processing: {e}")
+        raise
