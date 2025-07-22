@@ -22,20 +22,21 @@ def _convert_numpy(obj) -> dict | list | np.ndarray | float | int | str:
     Returns:
         Object with numpy types converted to Python native types
     """
-    if isinstance(obj, dict):
-        return {k: _convert_numpy(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [_convert_numpy(i) for i in obj]
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, np.number):
-        return obj.item()
-    elif isinstance(obj, (np.float32, np.float64)):
-        return float(obj)
-    elif isinstance(obj, (np.int32, np.int64)):
-        return int(obj)
-    else:
-        return obj
+    match obj:
+        case dict():
+            return {k: _convert_numpy(v) for k, v in obj.items()}
+        case list() | tuple():
+            return [_convert_numpy(i) for i in obj]
+        case np.ndarray():
+            return obj.tolist()
+        case np.number():
+            return obj.item()
+        case np.float32() | np.float64():
+            return float(obj)
+        case np.int32() | np.int64():
+            return int(obj)
+        case _:
+            return obj
 
 
 def read_yaml(yaml_fp) -> dict:
