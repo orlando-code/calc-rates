@@ -2,9 +2,8 @@ import subprocess
 from pathlib import Path
 
 
-# get module working directory
-def get_repo_root():
-    # Run 'git rev-parse --show-toplevel' command to get the root directory of the Git repository
+def get_repo_root() -> Path:
+    """Get the root directory of the Git repository."""
     git_root = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True
     )
@@ -17,7 +16,7 @@ def get_repo_root():
 # REPO DIRECTORIES
 repo_dir = get_repo_root()
 resources_dir = repo_dir / "resources"
-meta_dir = repo_dir / "meta_2022"
+meta_2022_dir = repo_dir / "meta_2022"
 module_dir = repo_dir / "calcification"
 fig_dir = repo_dir / "figures"
 
