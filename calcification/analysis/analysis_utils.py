@@ -1,7 +1,10 @@
+import numpy as np
 import pandas as pd
 from rpy2.robjects import default_converter, r
 from rpy2.robjects.conversion import localconverter
 from scipy.interpolate import make_interp_spline
+from scipy.stats import median_abs_deviation
+from scipy.stats import norm as scipy_norm
 
 from calcification.utils import config, file_ops
 
@@ -100,6 +103,49 @@ def get_formula_components(formula: str) -> dict:
         "predictors": predictors,
         "intercept": intercept,
     }
+
+
+def p_score(prediction: float, se: float, null_value: float = 0) -> float:
+    """
+    Calculate the p-value for a given prediction and standard error.
+    """
+    z = (prediction - null_value) / se
+    p = 2 * (1 - scipy_norm.cdf(abs(z)))  # two-tailed p-value
+    return p
+
+
+### assign certainty levels
+def assign_certainty(p_score: float) -> int:
+    """
+    Assign certainty levels based on p-value.
+    """
+    if p_score < 0.01:
+        return 4  # very high certainty
+    elif p_score < 0.05:
+        return 3  # high certainty
+    elif p_score < 0.1:
+        return 2  # medium certainty
+    else:
+        return 1  # low certainty
+
+
+def filter_robust_zscore(series: pd.Series, threshold: float = 20) -> pd.Series:
+    """
+    Filter out outliers based on robust z-scores.
+
+    Args:
+        series (pd.Series): The series to filter.
+        threshold (float): The z-score threshold for filtering.
+
+    Returns:
+        pd.Series: A boolean series indicating which values are not outliers.
+    """
+    median = np.median(series)
+    mad = median_abs_deviation(
+        series, scale="normal"
+    )  # scale for approx equivalence to std dev
+    robust_z = np.abs((series - median) / mad)
+    return robust_z < threshold
 
 
 def summarize_metafor_models(model_summaries, model_names=None):
