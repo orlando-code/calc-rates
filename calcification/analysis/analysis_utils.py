@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 from rpy2.robjects import default_converter, r
 from rpy2.robjects.conversion import localconverter
 from scipy.interpolate import make_interp_spline
@@ -253,3 +254,29 @@ def extrapolate_predictions(df, year=2100):
     df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
 
     return df
+
+
+def fit_curve(
+    df: pd.DataFrame, variable: str, effect_type: str, order: int
+) -> sm.regression.linear_model.RegressionResultsWrapper:
+    """
+    Fit a polynomial curve to the data.
+
+    Args:
+        df (pd.DataFrame): The dataframe containing the data.
+        variable (str): The independent variable.
+        effect_type (str): The dependent variable.
+        order (int): The order of the polynomial to fit.
+
+    Returns:
+        model: The fitted regression model.
+    """
+    # Remove NaNs
+    df = df[df[variable].notna() & df[effect_type].notna()]
+
+    # Create polynomial features
+    X = np.vander(df[variable], N=order + 1, increasing=True)
+
+    # Fit the model
+    model = sm.OLS(df[effect_type], X).fit()
+    return model
