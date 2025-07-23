@@ -1,5 +1,7 @@
 ### process climatology datasets
 
+import logging
+
 import numpy as np
 import pandas as pd
 from scipy import interpolate
@@ -7,30 +9,41 @@ from tqdm.auto import tqdm
 
 from calcification.utils import file_ops
 
+logger = logging.getLogger(__name__)
 
-### climatology
+
 def process_climatology_csv(fp: str, index_col: str = "doi") -> pd.DataFrame:
-    """Process climatology csv files provided in BH's format"""
-    df = pd.read_csv(fp).drop(columns=["data_ID", "Unnamed: 0"])
-    df = (
-        (df.copy())
-        .replace({"2021_2040": 2030, "2041_2060": 2050, "2081_2100": 2090})
-        .infer_objects(copy=False)
-    )  # rename columns to be indexable and less wordy
-    return df.set_index(index_col) if index_col else df
+    """Process climatology csv files provided in BH's format."""
+    try:
+        df = pd.read_csv(fp).drop(columns=["data_ID", "Unnamed: 0"])
+        df = df.replace(
+            {"2021_2040": 2030, "2041_2060": 2050, "2081_2100": 2090}
+        ).infer_objects(copy=False)
+        return df.set_index(index_col) if index_col else df
+    except Exception as e:
+        logger.error(f"Error processing climatology CSV: {e}")
+        raise
+
+
+def _detect_variable_type(fp) -> str:
+    """Detect variable type (ph or sst) from file name."""
+    name = str(getattr(fp, "name", fp))
+    if "ph" in name:
+        return "ph"
+    elif "sst" in name:
+        return "sst"
+    else:
+        raise ValueError(
+            "File path must contain 'ph' or 'sst' to determine variable type."
+        )
 
 
 def convert_climatology_csv_to_multiindex(
     fp: str, locations_yaml_fp: str
 ) -> pd.DataFrame:
     """Convert the climatology CSV file to a multi-index DataFrame."""
-    df = process_climatology_csv(fp, index_col="doi")  # load the CSV file
-
-    var = "ph" if "ph" in str(fp.name) else "sst" if "sst" in str(fp.name) else None
-    if not var:
-        raise ValueError(
-            "File path must contain 'ph' or 'sst' to determine variable type."
-        )
+    df = process_climatology_csv(fp, index_col="doi")
+    var = _detect_variable_type(fp)
     df = pd.concat(
         [
             df.iloc[:, :4],
@@ -40,13 +53,10 @@ def convert_climatology_csv_to_multiindex(
         ],
         axis=1,
     )
-
-    # load locations yaml as dataframe
     locations_df = pd.DataFrame(file_ops.read_yaml(locations_yaml_fp)).T
-    # reorder columns to be latitude, longitude, location
-    locations_df = locations_df[["latitude", "longitude", "location"]]
-
-    # merge locations with sst_df
+    locations_df = locations_df[
+        ["latitude", "longitude", "location"]
+    ]  # select and reorder columns
     df = df.merge(
         locations_df,
         left_index=True,
@@ -56,7 +66,6 @@ def convert_climatology_csv_to_multiindex(
     )
     df = df.loc[:, ~df.columns.str.endswith("_right")]
     df.reset_index(inplace=True, names="doi")
-
     return df
 
 
@@ -74,19 +83,16 @@ def generate_location_specific_climatology_anomalies(
     """
     df = df.sort_index()  # sort index to avoid PerformanceWarning about lexsort depth
     locations = df.index.unique()
-    anomaly_rows = []  # to hold newmods inputs
-    metadata_rows = []  # to track what each row corresponds to
-
+    anomaly_rows = []
+    metadata_rows = []
     for location in tqdm(
         locations, desc=f"Generating batched anomalies for {scenario_var}"
     ):
         location_df = df.loc[location]
         scenarios = location_df["scenario"].unique()
-
         for scenario in scenarios:
             scenario_df = location_df[location_df["scenario"] == scenario]
             time_frames = [1995] + list(scenario_df.time_frame.unique())
-
             for time_frame in time_frames:
                 if time_frame == 1995:
                     base = scenario_df[
@@ -118,7 +124,6 @@ def generate_location_specific_climatology_anomalies(
                     p90_scenario = time_scenario_df[
                         f"{scenario_var}_percentile_90_anomaly_ensemble"
                     ].mean()
-                    # Generate predictions for mean, p10, and p90 scenarios
                 for percentile, anomaly in [
                     ("mean", mean_scenario),
                     ("p10", p10_scenario),
@@ -134,7 +139,6 @@ def generate_location_specific_climatology_anomalies(
                             "scenario_var": scenario_var,
                             "scenario": scenario,
                             "time_frame": time_frame,
-                            # 'anomaly_value': anomaly,
                             "percentile": percentile,
                         }
                     )
@@ -163,10 +167,10 @@ def interpolate_and_extrapolate_predictions(
     grouping_cols = ["core_grouping", "scenario", "percentile", "time_frame"]
     value_cols = [col for col in df.columns if col not in grouping_cols]
 
-    # Filter only mean percentile
+    # filter only mean percentile
     df = df[df["percentile"] == "mean"].copy()
 
-    # Make the full year grid (including up to 2100)
+    # make the full year grid (including up to 2100)
     all_years = np.arange(df["time_frame"].min(), target_year + 1)
     unique_groups = df[["core_grouping", "scenario", "percentile"]].drop_duplicates()
     full_grid = unique_groups.merge(
@@ -213,21 +217,108 @@ def interpolate_and_extrapolate_predictions(
     return df_full
 
 
+# --- emissions data ---
+
+
 def process_emissions_sheet(sheet_df: pd.DataFrame, scenario_name: str) -> pd.DataFrame:
-    """Process the emissions sheet DataFrame as provided from supplementary data of https://doi.org/10.5194/gmd-13-3571-2020
+    """Process the emissions sheet DataFrame as provided from supplementary data of https://doi.org/10.5194/gmd-13-3571-2020."""
+    try:
+        sheet_df = sheet_df[["Gas", "CO2"]].iloc[3:]
+        sheet_df.rename(columns={"Gas": "year", "CO2": scenario_name}, inplace=True)
+        sheet_df["year"] = pd.to_numeric(sheet_df["year"], errors="coerce")
+        return sheet_df
+    except Exception as e:
+        logger.error(f"Error processing emissions sheet: {e}")
+        raise
 
-    Args:
-        sheet_df (pd.DataFrame): Dataframe with emissions data
-        scenario_name (str): Name of scenario to process
 
-    Returns:
-        pd.DataFrame: Dataframe with processed emissions data
-    """
-    sheet_df = sheet_df[["Gas", "CO2"]].iloc[
-        3:
-    ]  # select only years corresponding to CO2 emissions
-    sheet_df.rename(columns={"Gas": "year", "CO2": scenario_name}, inplace=True)
-    sheet_df["year"] = pd.to_numeric(
-        sheet_df["year"], errors="coerce"
-    )  # convert year to numeric
-    return sheet_df
+def get_scenario_emissions_from_file(
+    fp: str, scenario_names: list[str], end_year: int = 2150
+) -> pd.DataFrame:
+    """Process the emissions file as provided from supplementary data of https://doi.org/10.5194/gmd-13-3571-2020."""
+    emissions_data = pd.DataFrame()
+    for i, scenario_name in enumerate(scenario_names):
+        scenario_df = _get_scenario_emissions_from_sheet(
+            fp, scenario_name, end_year=end_year
+        )
+        if i == 0:
+            emissions_data = scenario_df.copy()
+        else:
+            emissions_data = pd.merge(
+                emissions_data,
+                scenario_df,
+                on="year",
+                how="outer",
+            )
+    return emissions_data
+
+
+def _get_historic_emissions_from_sheet(fp: str, start_year: int = 1950) -> pd.DataFrame:
+    """Read the historic emissions sheet as provided from supplementary data of https://doi.org/10.5194/gmd-13-3571-2020."""
+    sheet_df = pd.read_excel(
+        fp, sheet_name="T2 - History Year 1750 to 2014", skiprows=8
+    )
+    historic_emissions = process_emissions_sheet(sheet_df, "Historic")
+
+    return historic_emissions.loc[historic_emissions["year"] >= start_year, :]
+
+
+def _get_relevant_sheet_for_emissions_scenario(
+    fp: str, scenario_name: str
+) -> pd.DataFrame:
+    """Read the scenario emissions sheet as provided from supplementary data of https://doi.org/10.5194/gmd-13-3571-2020."""
+    # find relevant sheet name
+    sheet_names = pd.ExcelFile(fp).sheet_names
+    relevant_sheet_names = [
+        sheet_name for sheet_name in sheet_names if scenario_name in sheet_name
+    ]
+    # drop items containing '-lowNTCF' (alternative scenarios)
+    relevant_sheet_names = [
+        sheet_name
+        for sheet_name in relevant_sheet_names
+        if "-lowNTCF" not in sheet_name
+    ]
+    if len(relevant_sheet_names) != 1:
+        raise ValueError(
+            f"Expected 1 sheet name for scenario {scenario_name}, but found {len(relevant_sheet_names)}"
+        )
+    return relevant_sheet_names[0]
+
+
+def _get_scenario_emissions_from_sheet(
+    fp: str, scenario_name: str, end_year: int = 2150
+) -> pd.DataFrame:
+    """Read the scenario emissions sheet as provided from supplementary data of https://doi.org/10.5194/gmd-13-3571-2020."""
+    relevant_sheet_name = _get_relevant_sheet_for_emissions_scenario(fp, scenario_name)
+    sheet_df = pd.read_excel(fp, sheet_name=relevant_sheet_name, skiprows=8)
+    scenario_emissions = process_emissions_sheet(sheet_df, scenario_name)
+    return scenario_emissions.loc[scenario_emissions["year"] <= end_year, :]
+
+
+def combine_historic_and_scenario_emissions(
+    historic_emissions: pd.DataFrame, scenario_emissions: pd.DataFrame
+) -> pd.DataFrame:
+    """Combine historic and scenario emissions dataframes."""
+    # duplicate historic emissions for each scenario
+    historic_emissions_repeated = pd.concat(
+        [
+            historic_emissions["year"],
+            pd.concat(
+                [historic_emissions["Historic"]]
+                * (len(scenario_emissions.columns) - 1),  # number of scenarios
+                axis=1,
+            ),
+        ],
+        axis=1,
+    )
+    historic_emissions_repeated.columns = scenario_emissions.columns
+    return pd.concat([historic_emissions_repeated, scenario_emissions], axis=0)
+
+
+def get_emissions_data_from_file(fp: str, scenario_names: list[str]) -> pd.DataFrame:
+    """Get emissions data from file."""
+    historic_emissions = _get_historic_emissions_from_sheet(fp)
+    scenario_emissions = get_scenario_emissions_from_file(fp, scenario_names)
+    return combine_historic_and_scenario_emissions(
+        historic_emissions, scenario_emissions
+    )
