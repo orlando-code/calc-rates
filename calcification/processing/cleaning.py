@@ -194,8 +194,8 @@ def process_raw_data(
         if require_results:
             df = df.dropna(subset=["n", "calcification"])
         df = units.map_units(df)
-        df = standardise_calcification_rates(df)
         df = calculate_calcification_sd(df)
+        df = standardise_calcification_rates(df)
         return df
     except Exception as e:
         logger.error(f"Error during raw data processing: {e}")
