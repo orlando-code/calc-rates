@@ -1,5 +1,6 @@
 # general
 import os
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,8 @@ from rpy2.robjects import pandas2ri
 from scipy.stats import median_abs_deviation
 from scipy.stats import norm as scipy_norm
 from tqdm.auto import tqdm
+
+from calcification.analysis import analysis_utils
 
 # custom
 from calcification.processing import carbonate_processing, groups_processing
@@ -719,95 +722,7 @@ def predict_curve(
     return predicted, lower, upper
 
 
-### Meta-analysis
-def generate_formula(
-    effect_type: str,
-    treatment: str = None,
-    variables: list[str] = None,
-    include_intercept: bool = False,
-) -> str:
-    if variables is None:
-        variables = []
-
-    # add treatment-specific variable if needed
-    if treatment:
-        if isinstance(treatment, list):
-            for t in treatment:
-                if t == "phtot":
-                    variables.append("delta_ph")
-                elif t == "temp":
-                    variables.append("delta_t")
-                elif t in ["phtot_mv", "temp_mv", "phtot_temp_mv"]:
-                    variables.append("delta_ph")
-                    variables.append("delta_t")
-                else:
-                    raise ValueError(f"Unknown treatment: {t}")
-        else:
-            if treatment == "phtot":
-                variables.append("delta_ph")
-            elif treatment == "temp":
-                variables.append("delta_t")
-            elif treatment in ["phtot_mv", "temp_mv", "phtot_temp_mv"]:
-                variables.append("delta_ph")
-                variables.append("delta_t")
-            else:
-                raise ValueError(f"Unknown treatment: {treatment}")
-
-    # remove duplicates and process variables
-    variables = list(set(variables))
-    variable_mapping = file_ops.read_yaml(config.resources_dir / "mapping.yaml")[
-        "meta_model_factor_variables"
-    ]
-
-    # split into factor and regular variables
-    factor_vars = [f"factor({v})" for v in variables if v in variable_mapping]
-    other_vars = [v for v in variables if v not in variable_mapping]
-
-    # combine all parts into formula string
-    parts = other_vars + factor_vars
-    formula = f"{effect_type} ~ {' + '.join(parts)}"
-
-    # remove intercept if specified
-    return formula + " - 1" if not include_intercept else formula
-
-
-def get_formula_components(formula: str) -> dict:
-    """
-    Extracts the response variable, predictors, and intercept flag from a formula string.
-    """
-    formula_comps = {}
-    response_part, predictor_part = formula.split("~")
-    formula_comps["response"] = response_part.strip()
-
-    # clean and normalize predictor part
-    predictor_part = predictor_part.replace(" ", "").replace(
-        "-1", "+intercept_off"
-    )  # temporarily mark intercept removal
-    # split on + first, then check for * in each term
-    predictors_raw = predictor_part.split("+")
-    all_predictors = []
-    for term in predictors_raw:
-        if "*" in term:
-            # this is an interaction term, split it and process
-            interaction_terms = term.split("*")
-            all_predictors.extend(interaction_terms)
-        else:
-            all_predictors.append(term)
-    predictors_raw = all_predictors
-
-    intercept = "intercept_off" not in predictors_raw  # determine intercept
-    predictors_raw = [p for p in predictors_raw if p != "intercept_off"]
-    predictors_raw = [
-        p.replace("factor(", "").replace(")", "") for p in predictors_raw
-    ]  # remove factor() from around any predictors_raw if they have it
-    formula_comps["predictors"] = [
-        p for p in predictors_raw if p
-    ]  # remove empty strings
-    formula_comps["intercept"] = intercept
-
-    return formula_comps
-
-
+# --- Meta-analysis ---
 def process_meta_regplot_data(model, model_comps, x_mod, level, point_size, predlim):
     """
     Process data for meta-regression plotting.
@@ -965,11 +880,13 @@ def preprocess_df_for_meta_model(
 
     effect_type_var = effect_type_var or f"{effect_type}_var"
 
-    ### specify model
+    ### specify model
     if not formula:
-        formula = generate_formula(effect_type, treatment, variables=necessary_vars)
+        formula = analysis_utils.generate_metaregression_formula(
+            effect_type, treatment, variables=necessary_vars
+        )
 
-    formula_comps = get_formula_components(formula)
+    formula_comps = analysis_utils.get_formula_components(formula)
     # select only rows relevant to treatment
     if treatment:
         if isinstance(treatment, list):
@@ -1045,7 +962,7 @@ def run_metafor_mv(
     # activate R conversion
     ro.pandas2ri.activate()
 
-    formula_comps = get_formula_components(formula)
+    formula_comps = analysis_utils.get_formula_components(formula)
     all_necessary_vars = (
         ["original_doi", "ID"]
         + (necessary_vars or [])
@@ -1572,7 +1489,7 @@ def assign_certainty(p_score: float) -> int:
 
 
 #     if treatment_group == 'tTtP':
-#         ### option 1: calculate each relative to single control (simple) – the max pH and min T for species
+#         ### option 1: calculate each relative to single control (simple) – the max pH and min T for species
 #         # for each row in treatment_Group, calculate hedges_g_for_row and append to result_dfs
 #         if np.any(treatment_df.n == 1):
 #             print('will need to cluster by treatment level')
@@ -1617,7 +1534,7 @@ def assign_certainty(p_score: float) -> int:
 #     Returns:
 #         pandas.DataFrame: DataFrame with Hedges' g calculations
 #     """
-#     # TODO: implement simple method (single control): see deprecated code
+#     # TODO: implement simple method (single control): see deprecated code
 #     result_dfs = []
 #     result_dfs.extend(process_group_multivar(species_df, effect_type=effect_type))
 
@@ -1791,7 +1708,7 @@ def assign_certainty(p_score: float) -> int:
 
 # # To execute the forest plot function
 # ro.r('create_forest_plot(res, dat)')
-# # save the plot
+# # save the plot
 
 # # If you want to save the plot
 # r('pdf("forest_plot.pdf", width=12, height=10)')
@@ -1805,3 +1722,107 @@ def assign_certainty(p_score: float) -> int:
 # # import matplotlib.image as mpimg
 # # img = mpimg.imread('forest_plot.png')
 # # plt.imshow(img)
+
+
+class MetaForModel:
+    """
+    Encapsulates metafor model handling via rpy2.
+    Handles data preparation, model fitting, prediction, and diagnostics.
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        effect_type: str = "hedges_g",
+        effect_type_var: Optional[str] = None,
+        treatment: Optional[str] = None,
+        necessary_vars: Optional[List[str]] = None,
+        formula: Optional[str] = None,
+        random: str = "~ 1 | original_doi/ID",
+    ):
+        self.df = df.copy()
+        self.effect_type = effect_type
+        self.effect_type_var = effect_type_var or f"{effect_type}_var"
+        self.treatment = treatment
+        self.necessary_vars = necessary_vars
+        self.formula = formula
+        self.random = random
+        self.model = None
+        self.summary = None
+        self.fitted = False
+        self._prepare_data()
+
+    def _prepare_data(self):
+        """Preprocess and subset the DataFrame for R model fitting."""
+        # Use preprocess_df_for_meta_model logic
+        from calcification.analysis.analysis import (
+            get_formula_components,
+            preprocess_df_for_meta_model,
+        )
+
+        self.formula, self.df = preprocess_df_for_meta_model(
+            self.df,
+            self.effect_type,
+            self.effect_type_var,
+            self.treatment,
+            self.necessary_vars,
+            self.formula,
+        )
+        self.formula_comps = get_formula_components(self.formula)
+        # Ensure original_doi is string
+        self.df["original_doi"] = self.df["original_doi"].astype(str)
+
+    def fit(self):
+        """Fit the metafor model using rpy2."""
+        with (ro.default_converter + pandas2ri.converter).context():
+            df_r = pandas2ri.py2rpy(self.df)
+            self.model = metafor.rma_mv(
+                yi=ro.FloatVector(df_r.rx2(self.effect_type)),
+                V=ro.FloatVector(df_r.rx2(self.effect_type_var)),
+                data=df_r,
+                mods=ro.Formula(self.formula),
+                random=ro.Formula(self.random),
+            )
+            self.summary = base.summary(self.model)
+            self.fitted = True
+        return self
+
+    def predict(self, newmods: pd.DataFrame) -> pd.DataFrame:
+        """Predict using the fitted model for new moderator values."""
+        if not self.fitted:
+            raise RuntimeError("Model must be fitted before prediction.")
+        from calcification.analysis.analysis import predict_model
+
+        return predict_model(self.model, newmods)
+
+    def get_coefficients(self) -> np.ndarray:
+        """Extract coefficients from the fitted R model."""
+        if not self.fitted:
+            raise RuntimeError("Model must be fitted before extracting coefficients.")
+        return np.array(self.model.rx2("b"))
+
+    def get_summary(self) -> Any:
+        """Return the R summary object for the fitted model."""
+        if not self.fitted:
+            raise RuntimeError("Model must be fitted before getting summary.")
+        return self.summary
+
+    def get_formula(self) -> str:
+        return self.formula
+
+    @staticmethod
+    def generate_metaregression_formula(
+        effect_type: str,
+        treatment: Optional[str] = None,
+        variables: Optional[List[str]] = None,
+        include_intercept: bool = False,
+    ) -> str:
+        return analysis_utils.generate_metaregression_formula(
+            effect_type, treatment, variables, include_intercept
+        )
+
+    @staticmethod
+    def get_formula_components(formula: str) -> Dict[str, Any]:
+        from calcification.analysis.analysis import get_formula_components
+
+        return get_formula_components(formula)

@@ -3,6 +3,104 @@ from rpy2.robjects import default_converter, r
 from rpy2.robjects.conversion import localconverter
 from scipy.interpolate import make_interp_spline
 
+from calcification.utils import config, file_ops
+
+
+def generate_metaregression_formula(
+    effect_type: str,
+    treatment: str = None,
+    variables: list[str] = None,
+    include_intercept: bool = False,
+) -> str:
+    variables = variables or []
+    if treatment:
+
+        def add_treatment_vars(t):
+            if t == "phtot":
+                variables.append("delta_ph")
+            elif t == "temp":
+                variables.append("delta_t")
+            elif t in ["phtot_mv", "temp_mv", "phtot_temp_mv"]:
+                variables.append("delta_ph")
+                variables.append("delta_t")
+            else:
+                raise ValueError(f"Unknown treatment: {t}")
+
+        if isinstance(treatment, list):
+            for t in treatment:
+                add_treatment_vars(t)
+        else:
+            add_treatment_vars(treatment)
+
+    variable_mapping = file_ops.read_yaml(config.resources_dir / "mapping.yaml")[
+        "meta_model_factor_variables"
+    ]
+
+    # process variables
+    variables = list(set(variables))
+    factor_vars = [f"factor({v})" for v in variables if v in variable_mapping]
+    other_vars = [v for v in variables if v not in variable_mapping]
+
+    # combine into formula string
+    formula = f"{effect_type} ~ {' + '.join(other_vars + factor_vars)}"
+
+    # remove intercept if specified
+    return formula + " - 1" if not include_intercept else formula
+
+
+def get_formula_components(formula: str) -> dict:
+    """
+    Extracts the response variable, predictors, and intercept flag from a formula string.
+
+    Args:
+        formula (str): A formula string, e.g. "y ~ x1 + x2 - 1" or "y ~ factor(x1) + x2*x3".
+
+    Returns:
+        dict: {
+            "response": str,
+            "predictors": list[str],
+            "intercept": bool
+        }
+    """
+    # split formula into response and predictors
+    response_part, predictor_part = formula.split("~", 1)
+    response = response_part.strip()
+    predictors_str = predictor_part.strip()
+
+    # handle intercept removal: replace '-1' with a marker
+    predictors_str = predictors_str.replace(" ", "")
+    predictors_str = predictors_str.replace("-1", "+__NO_INTERCEPT__")
+
+    # split predictors on '+'
+    predictor_terms = predictors_str.split("+")
+
+    # flatten interaction terms (e.g., x1*x2 -> x1, x2)
+    predictors = []
+    for term in predictor_terms:
+        if "*" in term:  # interaction term: split to get individual predictors
+            predictors.extend(term.split("*"))
+        else:
+            predictors.append(term)
+
+    # determine if intercept is included
+    intercept = "__NO_INTERCEPT__" not in predictors
+    predictors = [p for p in predictors if p and p != "__NO_INTERCEPT__"]
+
+    # remove 'factor()' wrapper if present
+    predictors = [
+        p.replace("factor(", "").replace(")", "") if p.startswith("factor(") else p
+        for p in predictors
+    ]
+
+    # remove any empty strings (could happen if formula is malformed)
+    predictors = [p for p in predictors if p]
+
+    return {
+        "response": response,
+        "predictors": predictors,
+        "intercept": intercept,
+    }
+
 
 def summarize_metafor_models(model_summaries, model_names=None):
     """
