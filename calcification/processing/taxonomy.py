@@ -206,12 +206,15 @@ def assign_core_groupings(taxon_info: dict) -> str:
 
 def binomial_to_genus_species(binomial: str) -> tuple[str, str]:
     """Convert a binomial name to genus and species."""
-    binomial = binomial.replace(".", "").replace("cf", "")
-    split = [s for s in binomial.split(" ") if s]
-    if "spp" in binomial or "sp" in split:
-        genus = split[0]
-        species = "spp"
-    else:
-        genus = split[0]
-        species = split[-1] if len(split) > 1 else "spp"
+    split_binomial = [
+        s for s in binomial.replace(".", "").replace("cf", "").split() if s
+    ]
+    if not split_binomial:
+        return "Unknown", "Unknown"
+    genus = split_binomial[0]
+    species = (
+        "spp"
+        if "spp" in binomial or "sp" in split_binomial or len(split_binomial) == 1
+        else split_binomial[-1]
+    )
     return genus, species
