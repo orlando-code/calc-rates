@@ -1,10 +1,15 @@
 # general
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import rpy2.robjects as ro
 import seaborn as sns
+from matplotlib.colorbar import ColorbarBase
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.lines import Line2D
 from rpy2.robjects.packages import importr
 
@@ -17,7 +22,7 @@ from sklearn.gaussian_process.kernels import (
 )
 
 # custom
-from calcification.analysis import analysis
+from calcification.analysis import analysis, analysis_utils, meta_regression
 from calcification.plotting import plot_config, plot_utils
 
 # R
@@ -25,221 +30,500 @@ metafor = importr("metafor")
 grdevices = importr("grDevices")
 
 
-def meta_regplot(
-    model: ro.vectors.ListVector,
-    model_comps: tuple,
-    x_mod: str,
-    level: float = 95,
-    ci: bool = True,
-    pi: bool = True,
-    shade: bool = True,
-    point_size: str = "seinv",
-    point_color: str = "black",
-    point_fill: str = "white",
-    colorby: list = None,
-    line_color: str = "blue",
-    ci_color: str = "lightblue",
-    ci_line_color: str = "blue",
-    xlab: str = None,
-    ylab: str = None,
-    xlim: tuple[float, float] = None,
-    ylim: tuple[float, float] = None,
-    predlim: tuple[float, float] = None,
-    refline: float = 0,
-    figsize: tuple[float, float] = (10, 7),
-    title: str = None,
-    ax: matplotlib.axes.Axes = None,
-    future_global_anomaly_df: pd.DataFrame = None,
-    scenario_var: str = None,
-    all_legend: bool = True,
-) -> tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]:
-    """
-    Create a meta-regression plot from an rma.mv or rma object.
+@dataclass
+class MetaRegressionConfig:
+    color: str = "#1f77b4"
+    ci_color: str = "#aec7e8"
+    figsize: Tuple[int, int] = (8, 6)
+    dpi: int = 150
+    title: str = None
+    xlabel: str = "Predictor"
+    ylabel: str = "Effect size"
+    legend_loc: str = "best"
+    point_size: str = "seinv"
+    point_border_colours: str | list[str] = "black"
+    point_fill_colours: str | list[str] = "white"
+    colorby: list = None
+    line_color: str = "blue"
+    ci_color: str = "lightblue"
+    ci_line_color: str = "blue"
+    pi_color: str = "lightblue"
+    pi_line_color: str = "blue"
+    point_alpha: float = 0.8
+    refline: float = 0
+    full_legend: bool = False
+    legend_fontsize: int = 12
+    ylimits: tuple[float, float] = None
+    add_climatology_lines: bool = True
 
-    This function visualizes a meta-regression model, showing the effect of a moderator variable
-    on the outcome, along with confidence and prediction intervals.
 
-    Args:
-        model (rpy2.robjects.vectors.ListVector): An R rma.mv or rma model object from metafor package.
-        model_comps (tuple): Model components containing predictor and response info.
-        x_mod (str): Name of the moderator variable to plot on x-axis.
-        level (float, optional): Confidence level for intervals in percent. Default is 95.
-        ci (bool, optional): Whether to plot confidence intervals. Default is True.
-        pi (bool, optional): Whether to plot prediction intervals. Default is True.
-        shade (bool or str, optional): Whether to shade confidence intervals. If string, specifies the shade color. Default is True.
-        point_size (str or array-like, optional): Point sizes - either "seinv" (inverse of standard error), "vinv"
-            (inverse of variance), or an array of custom sizes. Default is "seinv".
-        point_color (str or array-like, optional): Color for point borders. Default is 'black'.
-        point_fill (str or array-like, optional): Fill color for points. Default is 'white'.
-        colorby (list, optional): Values to color points by. If provided, creates a color gradient. Default is None.
-        line_color (str, optional): Color for regression line. Default is 'blue'.
-        ci_color (str, optional): Color for CI shading. Default is 'lightblue'.
-        ci_line_color (str, optional): Color for CI lines. Default is 'blue'.
-        xlab (str, optional): Label for x-axis.
-        ylab (str, optional): Label for y-axis.
-        xlim (tuple[float, float], optional): Limits for x-axis (min, max).
-        ylim (tuple[float, float], optional): Limits for y-axis (min, max).
-        predlim (tuple[float, float], optional): Limits for predicted x-axis values (min, max).
-        refline (float, optional): Reference line to add at specific y-value. Default is 0.
-        figsize (tuple[float, float], optional): Figure size (width, height) in inches. Default is (10, 7).
-        title (str, optional): Plot title.
-        ax (matplotlib.axes.Axes, optional): Existing axis to plot on. If None, a new figure and axis will be created.
-        future_global_anomaly_df (pd.DataFrame, optional): DataFrame containing future climate scenario data for reference lines.
-        scenario_var (str, optional): Variable name in future_global_anomaly_df to use for reference lines.
-
-    Returns:
-        tuple[matplotlib.figure.Figure, matplotlib.axes.Axes]: The figure and axis objects containing the plot.
-    """
-    xi, yi, vi, norm_weights, xs, pred, ci_lb, ci_ub, pred_lb, pred_ub, mod_pos = (
-        analysis.process_meta_regplot_data(
-            model, model_comps, x_mod, level, point_size, predlim
+class MetaRegressionPlotter:
+    def __init__(
+        self,
+        model: ro.vectors.ListVector,
+        x_axis_moderator: str,
+        fig: plt.Figure = None,
+        ax: plt.Axes = None,
+        confidence_level_val: float = 0.95,
+        weight_pt_by: str = "seinv",
+        prediction_limits: tuple[float, float] = None,
+        config: Optional[MetaRegressionConfig] = None,
+        future_global_anomaly_df: pd.DataFrame = None,
+    ):
+        self.model_results = MetaRegressionResults(
+            model, x_axis_moderator, prediction_limits
         )
-    )
+        self.config = config or MetaRegressionConfig()
+        self.model_results.get_plotting_values()  # get the data for plotting
+        self.fig = fig
+        self.ax = ax
+        self.future_global_anomaly_df = future_global_anomaly_df
 
-    ### plot
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
+    def plot(
+        self,
+    ):
+        """Plot meta-regression results with confidence intervals."""
 
-    if isinstance(point_color, str):
-        point_color = [point_color] * len(xi)
-    if isinstance(point_fill, str):
-        point_fill = [point_fill] * len(xi)
+        fig, ax = self._define_axes()
 
-    if colorby is not None:  # create a color map for the points
-        colorby = np.array(colorby)
-        unique_colors = np.unique(colorby)
-        color_map = {
-            color: plt.cm.viridis(i / len(unique_colors))
-            for i, color in enumerate(unique_colors)
-        }
-        point_colors = [color_map[color] for color in colorby]
-    else:
-        point_colors = point_fill
+        # plot scatter points
+        point_border_colours, point_fill_colours = self._get_point_colours()
+        point_weights = self._get_point_weights()
+        sorted_indices = np.argsort(-point_weights)  # larger points plot at the back
+        for i in sorted_indices:
+            ax.scatter(
+                self.model_results.xi[i],
+                self.model_results.yi[i],
+                s=point_weights[i] ** 2,
+                edgecolor=point_border_colours[i],
+                facecolor=point_fill_colours[i],
+                zorder=3,
+                alpha=self.config.point_alpha,
+            )
 
-    sorted_indices = np.argsort(-norm_weights)  # larger points plot at the back
-    for i in sorted_indices:
+        # plot regression line
+        regression_line = self._plot_line(
+            ax,
+            self.model_results.xs,
+            self.model_results.pred,
+            color=self.config.color,
+            label=f"Meta-regression: effect ~ {self.model_results.polynomial_string}",
+            style="-",
+            linewidth=2,
+        )
+        self._plot_confidence_interval(
+            ax,
+            self.model_results.xs,
+            self.model_results.ci_lb,
+            self.model_results.ci_ub,
+            color=self.config.ci_color,
+            ci_line_color=self.config.ci_line_color,
+        )
+        self._plot_prediction_interval(
+            ax,
+            self.model_results.xs,
+            self.model_results.pred_lb,
+            self.model_results.pred_ub,
+            color=self.config.pi_color,
+            ci_line_color=self.config.pi_line_color,
+        )
+        # plot dummy data for legend
         ax.scatter(
-            xi[i],
-            yi[i],
-            s=norm_weights[i] ** 2,
-            edgecolor=point_color[i],
-            facecolor=point_colors[i] if colorby is not None else point_fill[i],
-            zorder=3,
-            alpha=0.8,
+            [],
+            [],
+            edgecolor=self.config.point_border_colours[0],
+            facecolor=self.config.point_fill_colours[0],
+            alpha=self.config.point_alpha,
+            label="Study points",
+        )  # points
+        ax.plot(
+            [],
+            [],
+            linestyle="--",
+            color=self.config.ci_line_color,
+            label="95% Confidence interval",
         )
+        ax.plot(
+            [],
+            [],
+            linestyle=":",
+            color=self.config.ci_line_color,
+            label="95% Prediction interval",
+        )
+        # format legend
+        self._plot_legend(ax, regression_line)
+        self._format_axes(ax)
+        self._format_fig(fig)
+        ax.legend(loc=self.config.legend_loc)
+        self._add_climatology_lines_to_plot(
+            ax, self.future_global_anomaly_df
+        ) if self.future_global_anomaly_df is not None else None
+        return fig, ax
 
-    if ci and shade:  # add confidence interval
-        if isinstance(shade, str):
-            poly_color = shade
+    def _define_axes(self):
+        if self.ax is None:
+            fig, ax = plt.subplots(figsize=self.config.figsize, dpi=self.config.dpi)
         else:
-            poly_color = ci_color
+            fig = self.ax.figure
+            ax = self.ax
+        return fig, ax
 
-        ax.fill_between(xs, ci_lb, ci_ub, color=poly_color, alpha=0.3)
+    def _format_axes(self, ax):
+        ax.set_xlabel(self.model_results.regression_model_str)
+        ax.set_ylabel(self.config.ylabel)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.axhline(
+            y=0, color="gray", linestyle="-", linewidth=1, label="Zero effect level"
+        ) if self.config.refline is not None else None
+        ax.set_xlim(
+            self.model_results.prediction_limits
+        ) if self.model_results.prediction_limits else None
+        ax.set_ylim(
+            self.model_results.prediction_limits
+        ) if self.config.ylimits else None
 
-    if ci:  # add confidence interval lines
-        ax.plot(xs, ci_lb, color=ci_line_color, linestyle="--", linewidth=1)
-        ax.plot(xs, ci_ub, color=ci_line_color, linestyle="--", linewidth=1)
-    if pi:  # add prediction interval lines
-        ax.plot(xs, pred_lb, color=ci_line_color, linestyle=":", linewidth=1)
-        ax.plot(xs, pred_ub, color=ci_line_color, linestyle=":", linewidth=1)
-        if shade:
-            ax.fill_between(xs, pred_lb, pred_ub, color=ci_color, alpha=0.1)
-
-    ax.scatter(
-        [],
-        [],
-        edgecolor=point_color[0],
-        facecolor=point_fill[0],
-        alpha=0.8,
-        label="Studies",
-    )
-    # Get coefficients and create a polynomial string for the legend
-    coeffs = np.array(model.rx2("b"))
-    # polynomial = Polynomial(coeffs[mod_pos])
-    polynomial = plot_utils.Polynomial(
-        np.concatenate([coeffs[mod_pos], coeffs[0]])
-    ).__str__()
-    regression_mod_str = "$\\Delta pH$" if x_mod == "delta_ph" else "$\\Delta T$"
-    # replace x with the variable name
-    polynomial = polynomial.replace("x", regression_mod_str)
-    regression_line = ax.plot(
-        xs, pred, color=line_color, linewidth=2, label=f"Meta-regression: {polynomial}"
-    )
-
-    ax.plot(
-        [], [], linestyle="--", color=ci_line_color, label="95% Confidence interval"
-    ) if ci else None
-    ax.plot(
-        [], [], linestyle=":", color=ci_line_color, label="95% Prediction interval"
-    ) if pi else None
-
-    ### formatting
-    ax.axhline(
-        y=refline, color="gray", label="Zero effect level", linestyle="-", linewidth=1
-    ) if refline is not None else None  # add reference line
-    ax.set_xlabel(
-        xlab
-        if xlab
-        else model_comps["predictors"][mod_pos]
-        if not model_comps["intercept"]
-        else model_comps["predictors"][mod_pos - 1],
-        fontsize=12,
-    )
-    ax.set_ylabel(
-        ylab if ylab else f"Effect size ({model_comps['response']})", fontsize=12
-    )
-    ax.set_title(title, fontsize=14) if title else None
-    ax.set_xlim(xlim) if xlim else predlim if predlim else None
-    ax.set_ylim(ylim) if ylim else None
-    ax.grid(True, linestyle="--", alpha=0.3)
-
-    if all_legend:
-        ax.legend(fontsize=10)
-        # if colorby, make legend for values
-        if colorby is not None:
-            # if colorby represents discrete values (not continuous)
-            if len(unique_colors) < 5:
-                legend_elements = []
-                for color in unique_colors:
-                    legend_elements.append(
-                        Line2D(
-                            [0],
-                            [0],
-                            marker="o",
-                            color="w",
-                            label=color,
-                            markerfacecolor=color_map[color],
-                            markersize=10,
+    def _plot_legend(self, ax, regression_line):
+        ax.legend(loc=self.config.legend_loc, fontsize=self.config.legend_fontsize)
+        # TODO: clarify what this actually does
+        if self.config.full_legend:
+            if self.config.colorby is not None:
+                # if colorby represents discrete values (not continuous)
+                if len(self.unique_colors) < 5:
+                    legend_elements = []
+                    for color in self.unique_colors:
+                        legend_elements.append(
+                            Line2D(
+                                [0],
+                                [0],
+                                marker="o",
+                                color="w",
+                                label=color,
+                                markerfacecolor=self.color_map[color],
+                                markersize=10,
+                            )
                         )
-                    )
-                ax.legend(
-                    handles=legend_elements,
-                    title="Point colours",
-                    fontsize=10,
-                    loc="upper left",
-                )
-            # if colorby represents continuous values, make a colorbar
-            else:
-                sm = plt.cm.ScalarMappable(
-                    cmap="viridis",
-                    norm=plt.Normalize(vmin=min(colorby), vmax=max(colorby)),
-                )
-                sm.set_array([])
-                cbar = plt.colorbar(sm, ax=ax)
-                cbar.set_label("Color by", fontsize=10)
-    else:  # only show regression line in legend if all_legend is False
-        ax.legend(
-            [regression_line[0]],
-            [f"Meta-regression: {polynomial}"],
-            fontsize=10,
-            loc="upper left",
+                    ax.legend(legend_elements, fontsize=self.config.legend_fontsize)
+        else:
+            ax.legend(
+                [regression_line[0]],
+                [f"Meta-regression: effect ~ {self.model_results.polynomial_string}"],
+            )
+
+    def _plot_line(self, ax, x, y, color, label, style, linewidth):
+        return ax.plot(
+            x, y, color=color, label=label, linestyle=style, linewidth=linewidth
         )
 
-    if ax is None:  # Only apply tight_layout if we created a new figure
-        fig.tight_layout()
+    def _format_fig(self, fig):
+        fig.suptitle(self.config.title, fontsize=14)
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
 
+    def _plot_confidence_interval(
+        self, ax, xs, ci_lb, ci_ub, color, ci_line_color, label=None
+    ):
+        ax.fill_between(xs, ci_lb, ci_ub, color=color, alpha=0.3)
+        for bound in (ci_lb, ci_ub):
+            self._plot_line(
+                ax, xs, bound, color=ci_line_color, style="--", linewidth=1, label=label
+            )
+
+    def _plot_prediction_interval(
+        self, ax, xs, pred_lb, pred_ub, color, ci_line_color, label=None
+    ):
+        ax.fill_between(xs, pred_lb, pred_ub, color=color, alpha=0.1)
+        for bound in (pred_lb, pred_ub):
+            self._plot_line(
+                ax, xs, bound, color=ci_line_color, style=":", linewidth=1, label=label
+            )
+
+    def _get_point_weights(self):
+        return meta_regression._compute_point_weights(
+            self.model_results.vi, self.config.point_size
+        )
+
+    def _get_point_colours(self):
+        # point border colours
+        if isinstance(self.config.point_border_colours, str):
+            point_border_colours = [self.config.point_border_colours] * len(
+                self.model_results.xi
+            )
+        elif isinstance(self.config.point_border_colours, list):
+            point_border_colours = self.config.point_border_colours
+        else:
+            raise ValueError("point_border_colours must be a string or list of strings")
+
+        # point fill colours
+        if isinstance(self.config.point_fill_colours, str):
+            point_fill_colours = [self.config.point_fill_colours] * len(
+                self.model_results.xi
+            )
+        elif isinstance(self.config.point_fill_colours, LinearSegmentedColormap):
+            point_fill_colours = self.config.point_fill_colours
+        elif isinstance(self.config.point_fill_colours, list):
+            # create a color map for the points
+            colorby = np.array(self.config.colorby)
+            self.unique_colors = np.unique(colorby)
+            self.color_map = {
+                color: plt.cm.viridis(i / len(self.unique_colors))
+                for i, color in enumerate(self.unique_colors)
+            }
+            point_fill_colours = [self.color_map[color] for color in colorby]
+        else:
+            raise ValueError(
+                "point_fill_colours must be a string, a numpy array, or LinearSegmentedColormap object"
+            )
+        return point_border_colours, point_fill_colours
+
+    def _get_anomaly_variable_from_moderator(self):
+        if self.model_results.moderator == "delta_ph":
+            return "ph"
+        elif self.model_results.moderator == "delta_t":
+            return "sst"
+        else:
+            raise ValueError(f"Moderator {self.model_results.moderator} not supported")
+
+    def _add_climatology_lines_to_plot(
+        self,
+        ax: matplotlib.axes.Axes,
+        future_global_anomaly_df: pd.DataFrame,
+        # scenario_variable: str,
+    ) -> matplotlib.axes.Axes:
+        """
+        Add climatology lines to the plot for different scenarios.
+
+        Args:
+            ax (matplotlib.axes.Axes): The axis to add the lines to.
+            future_global_anomaly_df (pd.DataFrame): DataFrame containing future climate scenario data. Must have scenario, time_frame, and mean_{scenario_variable}_anomaly columns.
+
+        Returns:
+            matplotlib.axes.Axes: The axis with the added lines.
+        """
+        if self.future_global_anomaly_df is None:
+            raise ValueError(
+                "future_global_anomaly_df argument is required to add climatology lines"
+            )
+        # determine variable from moderator
+        scenario_variable = self._get_anomaly_variable_from_moderator()
+
+        scenarios = future_global_anomaly_df["scenario"].unique()
+        scenario_colours = sns.color_palette("Reds", len(scenarios))
+        scenario_colour_dict = {
+            scenario: scenario_colours[i] for i, scenario in enumerate(scenarios)
+        }
+        original_ylim = ax.get_ylim()  # get the original y-axis limits
+        scenario_lines = []
+        for scenario in scenarios:
+            # add climatology lines to the plot
+            predicted_effect_sizes = future_global_anomaly_df[
+                (
+                    future_global_anomaly_df["time_frame"] == 2090
+                )  # TODO: extrapolate to 2100 and make dynamic
+                & (future_global_anomaly_df["scenario"] == scenario)
+            ][:][f"mean_{scenario_variable}_anomaly"]
+
+            # plot vertical lines for each predicted effect size
+            for effect_size in predicted_effect_sizes:
+                line = ax.vlines(
+                    x=effect_size,
+                    ymin=original_ylim[0],
+                    ymax=original_ylim[1],
+                    color=scenario_colour_dict[scenario],
+                    linestyle="--",
+                    label=plot_config.SCENARIO_MAP[scenario],
+                    zorder=5,
+                )
+                scenario_lines.append(line)
+        ax.set_ylim(original_ylim[0], original_ylim[1])  # crop to y lim
+        return ax
+
+
+def plot_multiple_metaregression_axes(
+    model: ro.vectors.ListVector,
+    x_axis_moderators: list[str],
+    future_global_anomaly_df: pd.DataFrame = None,
+    annotate_axes: bool = True,
+    annotate_axes_fontsize: int = 16,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Wrapper for MetaRegressionPlotter to plot multiple axes on the same figure."""
+    fig, ax = plt.subplots(1, len(x_axis_moderators), figsize=(12, 6), dpi=150)
+    for axis_index, x_axis_moderator in enumerate(x_axis_moderators):
+        MetaRegressionPlotter(
+            ax=ax[axis_index],
+            model=model,
+            x_axis_moderator=x_axis_moderator,
+            future_global_anomaly_df=future_global_anomaly_df,
+        ).plot()
+    if annotate_axes:
+        plot_utils.annotate_axes_with_letters(ax, fontsize=annotate_axes_fontsize)
+    return fig, ax
+
+
+class MetaRegressionResults:
+    def __init__(
+        self,
+        model: ro.vectors.ListVector,
+        moderator: str = None,
+        prediction_limits: tuple[float, float] = None,
+        confidence_level: float = 0.95,
+    ):
+        self.model = model
+        self.moderator = moderator
+        self.prediction_limits = prediction_limits
+        self.confidence_level_val = confidence_level
+        self.get_model_summary()  # moderator-agnostic methods
+        self.moderator_index = (
+            analysis_utils.get_moderator_index(self.model, self.moderator)
+            if self.moderator is not None
+            else None
+        )
+
+    # --- Moderator agnostic methods ---
+
+    def get_model_summary(self) -> None:
+        self.coeffs_vals = self._get_coeffs_vals()
+        self.moderator_names = analysis_utils.get_moderator_names(self.model)
+        self.moderator_stats = self._get_moderator_stats()
+        self.fit_method = str(self.model.rx2("method")[0])
+        self.model_metadata = self._get_model_metadata()
+        self.headline_stats = self._get_headline_stats()
+        self.test_stats = self._get_test_stats()
+
+    def _get_coeffs_vals(self):
+        return np.array(self.model.rx2("b"))
+
+    def _get_moderator_stats(self) -> pd.DataFrame:
+        """Get the stats for each moderator from the model."""
+        # table of estimate, se, zval, pval, ci.lb, ci.ub, prediction intervals?
+        stats_df = pd.DataFrame()
+        for stat_name in ["beta", "se", "zval", "pval", "ci.lb", "ci.ub"]:
+            stats_df[stat_name] = np.array(self.model.rx2(stat_name)).squeeze()
+        stats_df["moderator"] = self.moderator_names
+        stats_df = stats_df.set_index("moderator")
+        return stats_df
+
+    def _get_model_metadata(self) -> pd.DataFrame:
+        # k, fit method
+        metadata_df = pd.DataFrame()
+        for meta_name in ["k", "method"]:
+            metadata_df[meta_name] = self.model.rx2(meta_name)
+        return metadata_df
+
+    def _get_test_stats(self) -> pd.DataFrame:
+        """Get the test stats from the model."""
+        test_df = pd.DataFrame()
+        for test_name in ["QE", "QEp", "QM", "QMp"]:
+            test_df[test_name] = self.model.rx2(test_name)
+        return test_df
+
+    def _get_headline_stats(self):
+        """Get the headline stats from the model."""
+        headline_vars = ["logLik", "Deviance", "AIC", "BIC", "AICc"]
+        headline_vars_df = pd.DataFrame(self.model.rx2("fit.stats"))
+        if self.fit_method == "REML":
+            headline_vars_df = headline_vars_df.iloc[1]
+        elif self.fit_method == "ML":
+            headline_vars_df = headline_vars_df.iloc[0]
+        else:
+            raise ValueError(f"Unknown fit method: {self.fit_method}")
+        headline_vars_df.columns = headline_vars
+        return headline_vars_df
+
+    # --- Moderator specific methods ---
+    def _get_regression_model_str(self):
+        # TODO: automate this better
+        return "$\\Delta$ pH" if self.moderator == "delta_ph" else "$\\Delta$ T"
+
+    def _get_polynomial_string(self):
+        return (
+            plot_utils.Polynomial(
+                np.concatenate(
+                    [self.coeffs_vals[self.moderator_index], self.coeffs_vals[0]]
+                )
+            )
+            .__str__()
+            .replace("x", self.regression_model_str)
+        )
+
+    def _get_basic_model_data_for_moderator(self):
+        self.xi, self.yi, self.vi = meta_regression._extract_model_components(
+            self.model, self.moderator
+        )
+        return self.xi, self.yi, self.vi
+
+    def _get_prediction_values(
+        self,
+        xs: np.ndarray = None,
+        prediction_limits: tuple[float, float] = None,
+    ):
+        if xs is None:
+            self.xs, self.prediction_limits = (
+                meta_regression._get_xs_and_prediction_limits(
+                    self.xi, prediction_limits
+                )
+            )
+        else:
+            self.xs, self.prediction_limits = xs, prediction_limits
+        # get xs for plotting regression line
+
+        self.pred, self.ci_lb, self.ci_ub, self.pred_lb, self.pred_ub = (
+            meta_regression.metafor_predict_from_model(
+                self.model,
+                self.moderator,
+                self.xs,
+                self.confidence_level_val,
+            )
+        )
+
+    def get_plotting_values(self):
+        self.coeffs_vals = self._get_coeffs_vals()
+        self.regression_model_str = self._get_regression_model_str()
+        self.polynomial_string = self._get_polynomial_string()
+        self._get_basic_model_data_for_moderator()
+        self._get_prediction_values(self.prediction_limits)
+
+
+def plot_model_surface_2d(
+    model: meta_regression.MetaforModel,
+    moderator_names: list[str],
+    prediction_limits: dict[str, tuple[float, float]] = None,
+    num_points: int = 100,
+):
+    """Plot a surface of the model."""
+    # check that len(moderator_names) == 2
+    if len(moderator_names) != 2:
+        raise ValueError("plot_model_surface only supports 2 moderators")
+
+    # generate xs, ys from prediction_limits and num_points
+    xs = np.linspace(*sorted(prediction_limits[moderator_names[0]]), num_points)
+    ys = np.linspace(*sorted(prediction_limits[moderator_names[1]]), num_points)
+    xs, ys = np.meshgrid(xs, ys)
+
+    # get prediction surface
+    pred_surface, meshgrids = meta_regression.predict_nd_surface_from_model(
+        model,
+        moderator_names,
+        [xs, ys],
+    )
+
+    # get absolute max of pred_surface
+    abs_max = np.abs(pred_surface).max()
+
+    # plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    contour_ax = ax.contourf(
+        meshgrids[0],
+        meshgrids[1],
+        pred_surface,
+        levels=50,
+        cmap="coolwarm_r",
+        vmin=-abs_max,
+        vmax=abs_max,
+    )
+    # format
+    ax.set_xlabel(moderator_names[0])
+    ax.set_ylabel(moderator_names[1])
+    cbar = plt.colorbar(contour_ax, orientation="horizontal", fraction=0.05, shrink=0.8)
+    cbar.set_label(label="Relative calcification ($\\Delta$%)", size="large")
     return fig, ax
 
 
@@ -880,3 +1164,307 @@ def plot_global_timeseries_multi(
     )
 
     return fig, axes
+
+
+def prepare_emissions_predictions(
+    reshaped_preds_df,
+    climatology_processing,
+    emissions_data,
+    scenario="ssp585",
+):
+    """
+    Prepare emissions predictions DataFrame for plotting.
+
+    Args:
+        reshaped_preds_df (pd.DataFrame): DataFrame of predictions.
+        climatology_processing: Module or object with interpolate_and_extrapolate_predictions.
+        emissions_data (pd.DataFrame): DataFrame with emissions data.
+        scenario (str): Scenario to filter for.
+
+    Returns:
+        pd.DataFrame: Merged and processed DataFrame with predictions and emissions.
+    """
+    plot_preds = climatology_processing.interpolate_and_extrapolate_predictions(
+        reshaped_preds_df.copy()
+    )
+    plot_preds = plot_preds[plot_preds.scenario == scenario]
+    emissions = emissions_data[["year", "SSP5-8.5"]].rename(columns={"SSP5-8.5": "co2"})
+    emissions_predictions = pd.merge(
+        plot_preds, emissions, left_on="time_frame", right_on="year", how="left"
+    )
+    emissions_predictions.drop(columns="year", inplace=True)
+    emissions_predictions.sort_values(by="core_grouping", inplace=True)
+    # calculate p-scores and certainty
+    emissions_predictions["p_score"] = emissions_predictions.apply(
+        lambda row: analysis.p_score(row["pred"], row["se"], null_value=0), axis=1
+    )
+    emissions_predictions["certainty"] = emissions_predictions["p_score"].apply(
+        analysis.assign_certainty
+    )
+    return emissions_predictions
+
+
+# --- Burning Embers Plotter ---
+
+
+@dataclass
+class BurningEmbersConfig:
+    insufficient_data_cols: Optional[List[str]] = None
+    cmap_colors: Optional[List[str]] = None
+    vmin: float = 0
+    vmax: float = -75
+    n_levels: int = 100
+    figsize: Tuple[int, int] = (14, 6)
+    dpi: int = 300
+    title: str = "Projected impacts of climate change on reef calcifiers under SSP5-8.5\n(2000–2090)"
+
+
+class BurningEmbersPlotter:
+    # TODO: add config, dynamically vary the left and right axis variables
+    def __init__(self, config: Optional[BurningEmbersConfig] = None):
+        if config is None:
+            config = BurningEmbersConfig()
+        self.config = config
+        if self.config.insufficient_data_cols is None:
+            self.config.insufficient_data_cols = ["Foraminifera", "Molluscs"]
+        if self.config.cmap_colors is None:
+            self.config.cmap_colors = ["#ffffff", "#f9cb0f", "#c72529", "#812066"][::-1]
+
+    def _get_cmap(self):
+        return LinearSegmentedColormap.from_list(
+            "burning_embers", self.config.cmap_colors, N=256
+        )
+
+    def _get_cnorm(self):
+        return Normalize(vmin=self.config.vmin, vmax=self.config.vmax)
+
+    def plot(self, emissions_predictions):
+        categories = list(emissions_predictions.core_grouping.unique())
+        # n_categories = len(categories)
+        cmap = self._get_cmap()
+        cnorm = self._get_cnorm()
+        co2_vals = (
+            emissions_predictions[["time_frame", "co2"]]
+            .drop_duplicates()
+            .sort_values("time_frame")
+        )
+        co2_vals = co2_vals["co2"].astype(float, errors="ignore")
+        fig, ax = plt.subplots(figsize=self.config.figsize, dpi=self.config.dpi)
+        for i, category in enumerate(categories + self.config.insufficient_data_cols):
+            if category in self.config.insufficient_data_cols:
+                self._draw_insufficient_data_bar(ax, i, co2_vals)
+                continue
+            category_data = emissions_predictions[
+                emissions_predictions["core_grouping"] == category
+            ].sort_values("time_frame")
+            if len(category_data) == 0:
+                continue
+            interp_preds, interp_co2 = self._interpolate_preds(category_data, co2_vals)
+            self._draw_gradient_bar(ax, i, interp_preds, interp_co2, cmap, cnorm)
+            self._draw_bar_border(ax, i, interp_co2)
+            self._draw_certainty_dots(ax, i, category_data, co2_vals)
+        self._format_axes(ax, categories, co2_vals)
+        self._draw_present_day_line(
+            ax,
+            emissions_predictions,
+            co2_vals,
+            len(categories + self.config.insufficient_data_cols),
+        )
+        self._draw_colorbar(fig, cmap, cnorm)
+        self._format_fig(fig)
+        self._format_axes(fig, ax, categories)
+        return fig, ax
+
+    def _draw_insufficient_data_bar(self, ax, i, co2_vals):
+        ax.add_patch(
+            plt.Rectangle(
+                (i - 0.1, co2_vals.min()),
+                0.2,
+                co2_vals.max() - co2_vals.min(),
+                edgecolor="black",
+                facecolor="whitesmoke",
+                linewidth=1.5,
+                alpha=1,
+                zorder=10,
+            )
+        )
+        ax.text(
+            i,
+            (co2_vals.min() + co2_vals.max()) / 2,
+            "Insufficient data",
+            ha="center",
+            va="center",
+            fontsize=10,
+            rotation=270,
+            color="black",
+            zorder=20,
+        )
+
+    def _interpolate_preds(self, category_data, co2_vals):
+        interp_preds = np.interp(
+            np.linspace(0, len(category_data) - 1, self.config.n_levels),
+            np.arange(len(category_data)),
+            category_data["pred"].values,
+        )
+        interp_co2 = np.interp(
+            np.linspace(0, len(category_data) - 1, self.config.n_levels),
+            np.arange(len(category_data)),
+            category_data["co2"].values.astype(float),
+        )
+        return interp_preds, interp_co2
+
+    def _draw_gradient_bar(self, ax, i, interp_preds, interp_co2, cmap, cnorm):
+        ax.imshow(
+            np.atleast_2d(interp_preds[::-1]).T,
+            extent=(i - 0.1, i + 0.1, interp_co2.min(), interp_co2.max()),
+            aspect="auto",
+            cmap=cmap,
+            norm=cnorm,
+            alpha=1,
+            zorder=10,
+        )
+
+    def _draw_bar_border(self, ax, i, interp_co2):
+        ax.add_patch(
+            plt.Rectangle(
+                (i - 0.1, interp_co2.min()),
+                0.2,
+                interp_co2.max() - interp_co2.min(),
+                edgecolor="black",
+                facecolor="none",
+                linewidth=1.5,
+                zorder=11,
+            )
+        )
+
+    def _draw_certainty_dots(self, ax, i, category_data, co2_vals):
+        for co2_level in np.arange(300, co2_vals.max() + 200, 200):
+            closest_data = category_data.iloc[
+                (category_data["co2"] - co2_level).abs().argsort()[:1]
+            ]
+            if not closest_data.empty:
+                certainty = closest_data["certainty"].values[0]
+                if not np.isnan(certainty):
+                    dot_positions = np.linspace(-0.05, 0.05, int(certainty))
+                    for dot_pos in dot_positions:
+                        ax.plot(
+                            i + 0.25 + dot_pos,
+                            co2_level,
+                            "o",
+                            color="black",
+                            markersize=4,
+                            alpha=1,
+                            markeredgecolor="white",
+                        )
+
+    # def _format_axes(self, ax, categories, co2_vals):
+    #     ax.set_ylim(co2_vals.min(), co2_vals.max())
+
+    #     ax.set_ylabel("Atmospheric CO₂ concentration (ppm)", fontsize=12)
+
+    def _format_axes(self, ax, categories) -> None:
+        for spine in ["top", "right", "left", "bottom"]:
+            ax.spines[spine].set_visible(False)
+        ax.yaxis.grid(True, linestyle="--", alpha=0.7, zorder=-20)
+        ax.set_xticklabels(
+            categories + self.config.insufficient_data_cols,
+            rotation=0,
+            ha="center",
+            fontsize=10,
+        )
+        total_bars = self._get_number_of_bars(categories)
+        ax.set_xlim(-0.5, total_bars - 0.5)
+        ax.set_xticks(range(total_bars))
+
+    def _get_number_of_bars(self, categories):
+        return len(categories) + len(self.config.insufficient_data_cols)
+
+    def _format_fig(self, fig):
+        plt.suptitle(self.config.title, fontsize=14, y=1.05)
+        plt.tight_layout(rect=[0, 0.15, 1, 0.95])
+
+    def _draw_present_day_line(self, ax, emissions_predictions, co2_vals, n_total):
+        present_day_index = np.where(
+            co2_vals
+            == emissions_predictions[emissions_predictions.time_frame == 2025].co2.iloc[
+                0
+            ]
+        )[0][0]
+        ax.axhline(
+            y=co2_vals.iloc[present_day_index],
+            color="black",
+            linestyle="--",
+            linewidth=1.5,
+            label="Present day (2025)",
+            zorder=20,
+        )
+        ax.text(
+            0.2,
+            co2_vals.iloc[present_day_index] + 30,
+            f"Present day\n({co2_vals.iloc[present_day_index]:.0f}ppm)",
+            color="black",
+            fontsize=10,
+            ha="left",
+            va="center",
+            rotation=0,
+            zorder=20,
+        )
+
+    def _draw_colorbar(self, fig, cmap, cnorm):
+        cax = fig.add_axes([0.25, 0.05, 0.5, 0.03])
+        reversed_cmap = cmap.reversed()
+        cb = ColorbarBase(cax, cmap=reversed_cmap, norm=cnorm, orientation="horizontal")
+        cb.set_ticks(np.linspace(cnorm.vmin, cnorm.vmax, 4))
+        cb.set_ticklabels(
+            [
+                "Undetectable\n(0%)",
+                "Moderate\n(25%)",
+                "High\n(50%)",
+                "Very high\n(>75%)",
+            ]
+        )
+        cax.set_title(
+            "Percentage decrease in calcification (increase in dissolution) vs. historical baseline",
+            fontsize=10,
+        )
+
+    def plot_sst_anomaly_bars(
+        self,
+        sst_anomaly_data,
+        x_col="x",
+        anomaly_col="anomaly",
+        height_col="height",
+        label_col=None,
+    ):
+        """
+        Plot SST anomaly bars using the burning embers color scheme and class configuration.
+        Args:
+            sst_anomaly_data: DataFrame with columns for x, anomaly, and height.
+            x_col: Name of the column for x-axis positions.
+            anomaly_col: Name of the column for anomaly values (for color mapping).
+            height_col: Name of the column for bar heights.
+            label_col: Optional column for bar labels.
+        """
+        fig, ax = plt.subplots(figsize=self.config.figsize, dpi=self.config.dpi)
+        cmap = LinearSegmentedColormap.from_list(
+            "burning_embers", self.config.cmap_colors, N=256
+        )
+        norm = Normalize(vmin=self.config.vmin, vmax=self.config.vmax)
+        for idx, row in sst_anomaly_data.iterrows():
+            color = cmap(norm(row[anomaly_col]))
+            ax.bar(row[x_col], row[height_col], color=color, edgecolor="k")
+            if label_col:
+                ax.text(
+                    row[x_col],
+                    row[height_col],
+                    str(row[label_col]),
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+        self._draw_colorbar(ax, cmap, norm)
+        ax.set_title(self.config.title)
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(height_col)
+        plt.tight_layout()
+        plt.show()
