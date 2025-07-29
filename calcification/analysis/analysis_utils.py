@@ -1,55 +1,125 @@
 import numpy as np
 import pandas as pd
+import rpy2.robjects as ro
 import statsmodels.api as sm
-from rpy2.robjects import default_converter, r
-from rpy2.robjects.conversion import localconverter
 from scipy.interpolate import make_interp_spline
 from scipy.stats import median_abs_deviation
 from scipy.stats import norm as scipy_norm
 
+from calcification.analysis import analysis
 from calcification.utils import config, file_ops
+
+
+def preprocess_df_for_meta_model(
+    df: pd.DataFrame,
+    effect_type: str = "st_relative_calcification",
+    effect_type_var: bool = None,
+    treatment: list[str] = None,
+    formula: str = None,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    # TODO: get necessary variables more dynamically (probably via a mapping including factor)
+    data = df.copy()
+    df["original_doi"] = df["original_doi"].astype(str)
+
+    # select only rows relevant to treatment
+    if treatment:
+        if isinstance(treatment, list):
+            data = data[data["treatment"].astype(str).isin(treatment)]
+        else:
+            data = data[data["treatment"] == treatment]
+
+    n_investigation = len(data)
+    # remove nans for subset effect_type
+    required_columns = _get_required_columns(treatment, effect_type, effect_type_var)
+    data = data.dropna(
+        subset=[
+            required_col for required_col in required_columns if required_col != "1"
+        ]  # TODO: what is this doing?
+    )
+    data = data.convert_dtypes()
+
+    n_nans = n_investigation - len(data)
+
+    # remove outliers
+    nparams = len(formula.split("+"))
+    data, n_cooks_outliers = analysis.remove_cooks_outliers(
+        data, effect_type=effect_type, nparams=nparams, verbose=verbose
+    )
+
+    if verbose:
+        # summarise processing
+        print("\n----- PROCESSING SUMMARY -----")
+        print("Treatment: ", treatment)
+        print("Total samples in input data: ", len(df))
+        print("Total samples of relevant investigation: ", n_investigation)
+        print("Dropped due to NaN values in required columns:", n_nans)
+        print("Dropped due to Cook's distance:", len(n_cooks_outliers))
+        print(
+            f"Final sample count: {len(data)} ({n_nans + (len(df) - n_investigation)} rows dropped)"
+        )
+
+    return data
 
 
 def generate_metaregression_formula(
     effect_type: str,
     treatment: str = None,
-    variables: list[str] = None,
     include_intercept: bool = False,
 ) -> str:
-    variables = variables or []
-    if treatment:
-
-        def add_treatment_vars(t):
-            if t == "phtot":
-                variables.append("delta_ph")
-            elif t == "temp":
-                variables.append("delta_t")
-            elif t in ["phtot_mv", "temp_mv", "phtot_temp_mv"]:
-                variables.append("delta_ph")
-                variables.append("delta_t")
-            else:
-                raise ValueError(f"Unknown treatment: {t}")
-
-        if isinstance(treatment, list):
-            for t in treatment:
-                add_treatment_vars(t)
-        else:
-            add_treatment_vars(treatment)
-
+    treatment_vars = _get_treatment_vars(treatment)
     variable_mapping = file_ops.read_yaml(config.resources_dir / "mapping.yaml")[
         "meta_model_factor_variables"
     ]
-
-    # process variables
-    variables = list(set(variables))
-    factor_vars = [f"factor({v})" for v in variables if v in variable_mapping]
-    other_vars = [v for v in variables if v not in variable_mapping]
+    factor_vars = [f"factor({v})" for v in treatment_vars if v in variable_mapping]
+    other_vars = [v for v in treatment_vars if v not in variable_mapping]
 
     # combine into formula string
     formula = f"{effect_type} ~ {' + '.join(other_vars + factor_vars)}"
 
     # remove intercept if specified
     return formula + " - 1" if not include_intercept else formula
+
+
+def _get_required_columns(
+    treatment, effect_type, effect_type_var, required_columns=None
+):
+    # if required_columns is not None:
+    #     return required_columns
+
+    treatment_vars = _get_treatment_vars(treatment)
+    effect_type_var = effect_type_var or f"{effect_type}_var"
+    base_columns = [
+        effect_type,
+        effect_type_var,
+        "original_doi",
+        "ID",
+        "core_grouping",
+    ] + treatment_vars
+    return base_columns + required_columns if required_columns else base_columns
+
+
+def _get_treatment_vars(treatment: str) -> list[str]:
+    """Get the treatment variables for the model."""
+
+    def _get_treatment_var_from_single_treatment(treatment: str) -> list[str]:
+        if treatment == "phtot":
+            return ["delta_ph"]
+        elif treatment == "temp":
+            return ["delta_t"]
+        elif treatment in ["phtot_mv", "temp_mv", "phtot_temp_mv"]:
+            return ["delta_ph", "delta_t"]
+        else:
+            raise ValueError(f"Unknown treatment: {treatment}")
+
+    treatment_vars = []
+    if isinstance(treatment, list):
+        for t in treatment:
+            treatment_vars.extend(_get_treatment_var_from_single_treatment(t))
+    else:
+        treatment_vars.extend(_get_treatment_var_from_single_treatment(treatment))
+
+    return list(set(treatment_vars))
 
 
 def get_formula_components(formula: str) -> dict:
@@ -149,67 +219,6 @@ def filter_robust_zscore(series: pd.Series, threshold: float = 20) -> pd.Series:
     return robust_z < threshold
 
 
-def summarize_metafor_models(model_summaries, model_names=None):
-    """
-    Extracts model diagnostics from a list of metafor model summaries (as ListVectors via rpy2).
-
-    Parameters:
-        model_summaries (list): List of <rpy2.robjects.vectors.ListVector> metafor summaries.
-
-    Returns:
-        pd.DataFrame: Summary table of key diagnostics.
-    """
-    summary_data = []
-
-    for i, (summary, name) in enumerate(zip(model_summaries, model_names), start=1):
-        with localconverter(default_converter) as _:
-            # keys = [str(k) for k in list(summary.names)]
-            topline_summary = list(r.fitstats(summary))
-        # Convert R ListVector to Python dictionary
-        s = {str(k): summary.rx2(str(k)) for k in summary.names}
-
-        # Extract values safely
-        loglik, deviance, AIC, BIC, AICc = [
-            topline_summary[i] for i in range(len(topline_summary))
-        ]
-
-        QE_stat = s.get("QE", [None])[0]
-        # QE_df = s.get("QE", [None])[1] if len(s.get("QE", [])) > 1 else None
-        QE_pval = s.get("QEp", [None])[0]
-
-        QM_stat = s.get("QM", [None])[0]
-        # QM_df = s.get("QM", [None])[1] if len(s.get("QM", [])) > 1 else None
-        QM_pval = s.get("QMp", [None])[0]
-
-        var_comp = s.get("sigma2", [None, None])
-        sigma2_study = var_comp[0]
-        sigma2_within = var_comp[1] if len(var_comp) > 1 else None
-
-        summary_data.append(
-            {
-                "Model": name,
-                "Log-likelihood": f"{loglik:.0f}" if loglik is not None else None,
-                "Deviance": f"{deviance:.0f}" if deviance is not None else None,
-                "AIC": f"{AIC:.0f}" if AIC is not None else None,
-                "AICc": f"{AICc:.0f}" if AICc is not None else None,
-                # "QE (df)": f"{int(QE_df)}" if QE_df else None,
-                "QE stat": f"{QE_stat:.0f}" if QE_stat is not None else None,
-                "QE p-val": f"{QE_pval:.4f}" if QE_pval is not None else None,
-                # "QM (df)": f"{int(QM_df)}" if QM_df else None,
-                "QM stat": f"{QM_stat:.0f}" if QM_stat is not None else None,
-                "QM p-val": f"{QM_pval:.4f}" if QM_pval is not None else None,
-                "σ² (Study)": f"{sigma2_study:.0f}"
-                if sigma2_study is not None
-                else None,
-                "σ² (Within)": f"{sigma2_within:.0f}"
-                if sigma2_within is not None
-                else None,
-            }
-        )
-
-    return pd.DataFrame(summary_data).reset_index(drop=True)
-
-
 def extrapolate_predictions(df, year=2100):
     grouping_cols = ["scenario", "percentile", "core_grouping", "time_frame"]
     value_cols = [col for col in df.columns if col not in grouping_cols]
@@ -280,3 +289,17 @@ def fit_curve(
     # Fit the model
     model = sm.OLS(df[effect_type], X).fit()
     return model
+
+
+def get_moderator_names(model: ro.vectors.ListVector) -> list[str]:
+    """Get the names of the moderators from the model."""
+    x = ro.r.assign("x", model)  # noqa
+    beta_rownames = []
+    for rn in ro.r("rownames(x$beta)"):
+        beta_rownames.append(str(rn))
+    return beta_rownames
+
+
+def get_moderator_index(model: ro.vectors.ListVector, moderator_name: str) -> int:
+    """Get the index of the moderator variable in the predictors list, accounting for intercept."""
+    return get_moderator_names(model).index(moderator_name)
