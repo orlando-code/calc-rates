@@ -233,7 +233,10 @@ def calc_cooks_threshold(data: pd.Series, nparams: int) -> float:
 
 
 def remove_cooks_outliers(
-    df: pd.DataFrame, effect_type: str = "hedges_g", nparams: int = 3
+    df: pd.DataFrame,
+    effect_type: str = "hedges_g",
+    nparams: int = 3,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Remove outliers from a DataFrame based on Cook's distance.
@@ -249,7 +252,7 @@ def remove_cooks_outliers(
     outliers = data[data["cooks_d"] >= cooks_threshold]
     print(
         f"\nRemoved {len(outliers)} outlier(s) (from {len(data)} samples) based on Cook's distance threshold of {cooks_threshold:.2f}"
-    )
+    ) if verbose else None
     return data_no_outliers, outliers
 
 
@@ -290,7 +293,7 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
     grouped_data = []
     doi_bar = tqdm(result_df.doi.unique())
     for doi in doi_bar:
-        doi_bar.set_description(f"Processing {doi}")
+        doi_bar.set_description(f"Calculating effect sizes for {doi}")
         study_df = result_df[result_df["doi"] == doi]
         for irr_group, irr_df in study_df.groupby("irr_group"):
             for species, species_df in irr_df.groupby("species_types"):
@@ -317,7 +320,7 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
                 if len(grouped_data) > 0 and grouped_data[0] is not None
                 else None
             )
-    df = df.sort_values(by="doi").copy().reset_index()
+    df = df.sort_values(by="doi").copy().reset_index(drop=True)
     df["ID"] = df.index
 
     df.loc[df.phtot.isna(), "delta_ph"] = (
@@ -336,8 +339,8 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def calculate_control_series(control_df: pd.DataFrame) -> pd.Series:
-    """Calculates the representative control series, averaging numeric columns."""
+def calculate_control_values(control_df: pd.DataFrame) -> pd.Series:
+    """Calculates the representative control series by averaging numeric columns."""
     if control_df.empty:
         return pd.Series(dtype=object)  # return empty series if no control data
     if len(control_df) > 1:
@@ -372,7 +375,7 @@ def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
         if treatment_df.empty:  # skip if there's no treatment data
             return
 
-        control_series = calculate_control_series(control_df)
+        control_series = calculate_control_values(control_df)
 
         # calculate effect size for each row in treatment_df and create a list of results
         effect_rows = []
@@ -409,7 +412,7 @@ def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
     def process_orthogonal_group(df):
         # identify absolute control
         control_df = df[df["treatment"] == "control"]
-        control_series = calculate_control_series(control_df)
+        control_series = calculate_control_values(control_df)
 
         # for each row where treatment_level_t == treatment_level_ph, calculate effect size
         treatment_df = df[
@@ -476,6 +479,7 @@ def calc_treatment_effect_for_row(
     Returns:
         pandas.Series: Row with calculated effect sizes and additional metadata
     """
+    # raw values
     mu_t, sd_t, n_t = (
         treatment_row["calcification"],
         treatment_row["calcification_sd"],
@@ -529,16 +533,16 @@ def calc_treatment_effect_for_row(
         s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t
     )  # standardised hedges' g
 
-    # absolute differences between standardised calcification
-    st_abs_effect, st_abs_var = calc_absolute_rate(
-        s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t
-    )
-    # relative differences between standardised calcification
+    # relative differences between standardised calcification rates
     st_rc_effect, st_rc_var = (
         (s_mu_t, s_sd_t)
         if isinstance(treatment_row["st_calcification_unit"], str)
         and "delta" in treatment_row["st_calcification_unit"]
         else calc_relative_rate(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t)
+    )
+    # absolute differences between standardised calcification rates
+    st_abs_effect, st_abs_var = calc_absolute_rate(
+        s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t
     )
 
     # assign effect sizes
