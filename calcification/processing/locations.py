@@ -167,10 +167,7 @@ def standardize_coordinates(coord_string: str) -> tuple[float, float] | None:
     parts = re.split(r"\s*/\s*", coord_string)
     decimal_coords = []
     lat_lng_pattern = re.compile(
-        r"""([ NSEW])?\s*(\d+(?:\.\d+)?)\s*[° ]?\s*
-        (?:(\d+(?:\.\d+)?)\s*[′\']\s*)?
-        (?:(\d+(?:\.\d+)?)\s*[\"]\s*)?
-        ([ NSEW])?""",
+        r"""([ NSEW])?\s*(\d+(?:\.\d+)?)\s*[° ]?\s*(?:(\d+(?:\.\d+)?)\s*[′\']\s*)?(?:(\d+(?:\.\d+)?)\s*[\"]\s*)?([ NSEW])?""",
         re.VERBOSE,
     )
     for part in parts:
@@ -207,6 +204,7 @@ def _normalize_coord_string(coord_string):
         coord_string.replace("`", "'")
         .replace("′", "'")
         .replace("’", "'")
+        .replace("ʹ", "'")
         .replace("˙", "'")
         .replace("″", '"')
         .replace("''", '"')
