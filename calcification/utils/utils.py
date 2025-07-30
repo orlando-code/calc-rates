@@ -175,3 +175,8 @@ def calc_sd_from_se(se: float, n: int) -> float:
         float: standard deviation
     """
     return se * np.sqrt(n)
+
+
+def round_down_to_nearest(x: float, step: float) -> float:
+    """Round down to the nearest multiple of step."""
+    return step * np.floor(x / step)
