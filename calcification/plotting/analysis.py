@@ -24,6 +24,8 @@ from sklearn.gaussian_process.kernels import (
 # custom
 from calcification.analysis import analysis, analysis_utils, meta_regression
 from calcification.plotting import plot_config, plot_utils
+from calcification.processing import climatology as climatology_processing
+from calcification.utils import config, utils
 
 # R
 metafor = importr("metafor")
@@ -465,7 +467,7 @@ class MetaRegressionResults:
             self.xs, self.prediction_limits = xs, prediction_limits
         # get xs for plotting regression line
 
-        self.pred, self.ci_lb, self.ci_ub, self.pred_lb, self.pred_ub = (
+        self.pred, self.se, self.ci_lb, self.ci_ub, self.pred_lb, self.pred_ub = (
             meta_regression.metafor_predict_from_model(
                 self.model,
                 self.moderator,
@@ -1168,7 +1170,6 @@ def plot_global_timeseries_multi(
 
 def prepare_emissions_predictions(
     reshaped_preds_df,
-    climatology_processing,
     emissions_data,
     scenario="ssp585",
 ):
@@ -1177,7 +1178,6 @@ def prepare_emissions_predictions(
 
     Args:
         reshaped_preds_df (pd.DataFrame): DataFrame of predictions.
-        climatology_processing: Module or object with interpolate_and_extrapolate_predictions.
         emissions_data (pd.DataFrame): DataFrame with emissions data.
         scenario (str): Scenario to filter for.
 
@@ -1204,24 +1204,36 @@ def prepare_emissions_predictions(
     return emissions_predictions
 
 
-# --- Burning Embers Plotter ---
+# --- Burning Embers figures ---
 
 
 @dataclass
 class BurningEmbersConfig:
     insufficient_data_cols: Optional[List[str]] = None
     cmap_colors: Optional[List[str]] = None
-    vmin: float = 0
-    vmax: float = -75
+    vmin: float = -75  # Changed from 0 to -75
+    vmax: float = 0  # Changed from -75 to 0
     n_levels: int = 100
     figsize: Tuple[int, int] = (14, 6)
     dpi: int = 300
-    title: str = "Projected impacts of climate change on reef calcifiers under SSP5-8.5\n(2000–2090)"
+    end_year: int = 2100
+    title: str = f"Projected impacts of climate change on reef calcifiers in {end_year}"
+    forcing_col: str = "anomaly_value_sst"
+    emissions_scenario: str = "ssp585"
 
 
 class BurningEmbersPlotter:
     # TODO: add config, dynamically vary the left and right axis variables
-    def __init__(self, config: Optional[BurningEmbersConfig] = None):
+    def __init__(
+        self,
+        predictions_df: pd.DataFrame = None,
+        config: Optional[BurningEmbersConfig] = None,
+    ):
+        """
+        Args:
+            config: Optional[BurningEmbersConfig] = None
+            predictions_df: pd.DataFrame = None. Must contain scenario, time_frame, core_grouping, pred, se, p_score, and certainty columns.
+        """
         if config is None:
             config = BurningEmbersConfig()
         self.config = config
@@ -1229,58 +1241,93 @@ class BurningEmbersPlotter:
             self.config.insufficient_data_cols = ["Foraminifera", "Molluscs"]
         if self.config.cmap_colors is None:
             self.config.cmap_colors = ["#ffffff", "#f9cb0f", "#c72529", "#812066"][::-1]
+        self.predictions_df = predictions_df
+        self.predictions_df = self._prepare_forcing_data()
+        self.forcing_vals = self.predictions_df[self.config.forcing_col]
 
     def _get_cmap(self):
+        """Get the colormap in line with IPCC report colors e.g. https://www.ipcc.ch/report/ar6/wg2/figures/chapter-11/figure-11-006."""
         return LinearSegmentedColormap.from_list(
             "burning_embers", self.config.cmap_colors, N=256
         )
 
     def _get_cnorm(self):
+        """Normalise colormap to the range of the data."""
+        # TODO: fix this
+        # Get the actual range of prediction values from the data
+        if self.predictions_df is not None and "pred" in self.predictions_df.columns:
+            pred_values = self.predictions_df["pred"].dropna()
+            if len(pred_values) > 0:
+                data_min = pred_values.min()
+                data_max = pred_values.max()
+                # Ensure vmin < vmax and handle edge cases
+                if data_min == data_max:
+                    # If all values are the same, create a small range around the value
+                    vmin = data_min - 0.1
+                    vmax = data_max + 0.1
+                else:
+                    vmin = data_min
+                    vmax = data_max
+                return Normalize(vmin=vmin, vmax=vmax)
+
+        # Fallback to config values if data is not available
         return Normalize(vmin=self.config.vmin, vmax=self.config.vmax)
 
-    def plot(self, emissions_predictions):
-        categories = list(emissions_predictions.core_grouping.unique())
-        # n_categories = len(categories)
+    def _get_bar_categories(self):
+        """Get the categories to plot, combining categories with insufficient data cols."""
+        categories = list(self.predictions_df.core_grouping.unique())
+        # combine categories with insufficient data cols, removing these
+        categories = [
+            category
+            for category in categories
+            if not any(
+                subcategory in category
+                for subcategory in self.config.insufficient_data_cols
+            )
+        ]
+        insufficient_data_category = "/".join(self.config.insufficient_data_cols)
+        # categories = categories + [insufficient_data_category]
+        return categories, insufficient_data_category
+
+    def plot(self) -> tuple[plt.Figure, plt.Axes]:
+        """Plot the forcing predictions. 'Forcing' here refers to either CO2 concentration or SST anomaly."""
+        categories, insufficient_data_category = self._get_bar_categories()
         cmap = self._get_cmap()
         cnorm = self._get_cnorm()
-        co2_vals = (
-            emissions_predictions[["time_frame", "co2"]]
-            .drop_duplicates()
-            .sort_values("time_frame")
-        )
-        co2_vals = co2_vals["co2"].astype(float, errors="ignore")
+
         fig, ax = plt.subplots(figsize=self.config.figsize, dpi=self.config.dpi)
-        for i, category in enumerate(categories + self.config.insufficient_data_cols):
-            if category in self.config.insufficient_data_cols:
-                self._draw_insufficient_data_bar(ax, i, co2_vals)
-                continue
-            category_data = emissions_predictions[
-                emissions_predictions["core_grouping"] == category
+        for i, category in enumerate(categories):
+            category_data = self.predictions_df[
+                self.predictions_df["core_grouping"] == category
             ].sort_values("time_frame")
             if len(category_data) == 0:
+                print(f"No data for category: {category}")
+                self.config.insufficient_data_cols.append(category)
                 continue
-            interp_preds, interp_co2 = self._interpolate_preds(category_data, co2_vals)
-            self._draw_gradient_bar(ax, i, interp_preds, interp_co2, cmap, cnorm)
-            self._draw_bar_border(ax, i, interp_co2)
-            self._draw_certainty_dots(ax, i, category_data, co2_vals)
-        self._format_axes(ax, categories, co2_vals)
+            interp_preds, interp_forcing = self._interpolate_preds(category_data)
+            self._draw_gradient_bar(ax, i, interp_preds)
+            self._draw_bar_border(ax, i, interp_forcing)
+            self._draw_certainty_dots(ax, i)
+        # draw single (grouped) insufficient data bar
+        self._draw_insufficient_data_bar(ax, len(categories), self.forcing_vals)
+        self._format_axes(ax, categories + [insufficient_data_category])
         self._draw_present_day_line(
             ax,
-            emissions_predictions,
-            co2_vals,
-            len(categories + self.config.insufficient_data_cols),
         )
         self._draw_colorbar(fig, cmap, cnorm)
-        self._format_fig(fig)
-        self._format_axes(fig, ax, categories)
+        self._format_fig()
+        self._format_axes(ax, categories + [insufficient_data_category])
         return fig, ax
 
-    def _draw_insufficient_data_bar(self, ax, i, co2_vals):
+    def _draw_insufficient_data_bar(
+        self, ax: plt.Axes, i: int, forcing_values: pd.Series
+    ):
+        """Draw a bar for groups with insufficient data."""
         ax.add_patch(
             plt.Rectangle(
-                (i - 0.1, co2_vals.min()),
+                (i - 0.1, forcing_values.min()),
                 0.2,
-                co2_vals.max() - co2_vals.min(),
+                forcing_values.max() - forcing_values.min(),
                 edgecolor="black",
                 facecolor="whitesmoke",
                 linewidth=1.5,
@@ -1290,7 +1337,7 @@ class BurningEmbersPlotter:
         )
         ax.text(
             i,
-            (co2_vals.min() + co2_vals.max()) / 2,
+            (forcing_values.min() + forcing_values.max()) / 2,
             "Insufficient data",
             ha="center",
             va="center",
@@ -1300,36 +1347,64 @@ class BurningEmbersPlotter:
             zorder=20,
         )
 
-    def _interpolate_preds(self, category_data, co2_vals):
-        interp_preds = np.interp(
-            np.linspace(0, len(category_data) - 1, self.config.n_levels),
-            np.arange(len(category_data)),
-            category_data["pred"].values,
-        )
-        interp_co2 = np.interp(
-            np.linspace(0, len(category_data) - 1, self.config.n_levels),
-            np.arange(len(category_data)),
-            category_data["co2"].values.astype(float),
-        )
-        return interp_preds, interp_co2
+    def _interpolate_preds(self, category_data):
+        """Interpolate predictions and forcings to the number of levels specified in the config."""
+        # Get the actual forcing value range for this category
+        forcing_values = category_data[self.config.forcing_col].values.astype(float)
+        pred_values = category_data["pred"].values
 
-    def _draw_gradient_bar(self, ax, i, interp_preds, interp_co2, cmap, cnorm):
+        # Create evenly spaced forcing values across the range
+        forcing_range = np.linspace(
+            forcing_values.min(), forcing_values.max(), self.config.n_levels
+        )
+
+        # Interpolate predictions to match the forcing value range
+        interpolated_predictions = np.interp(
+            forcing_range,
+            forcing_values,
+            pred_values,
+        )
+
+        # The interpolated forcings are just the evenly spaced range
+        interpolated_forcings = forcing_range
+
+        return interpolated_predictions, interpolated_forcings
+
+    def _draw_gradient_bar(
+        self,
+        ax: plt.Axes,
+        i: int,
+        interp_preds: np.ndarray,
+    ) -> None:
+        """Draw a gradient bar with the necessary color map and normalization.
+
+        Args:
+            ax (plt.Axes): Axes object.
+            i (int): Index of the bar.
+            interp_preds (np.ndarray): Interpolated predictions.
+        """
         ax.imshow(
             np.atleast_2d(interp_preds[::-1]).T,
-            extent=(i - 0.1, i + 0.1, interp_co2.min(), interp_co2.max()),
+            extent=(i - 0.1, i + 0.1, self.forcing_vals.min(), self.forcing_vals.max()),
             aspect="auto",
-            cmap=cmap,
-            norm=cnorm,
+            cmap=self._get_cmap(),
+            norm=self._get_cnorm(),
             alpha=1,
             zorder=10,
         )
 
-    def _draw_bar_border(self, ax, i, interp_co2):
+    def _draw_bar_border(
+        self,
+        ax: plt.Axes,
+        i: int,
+        interpolated_forcings_values: np.ndarray,
+    ) -> None:
+        """Draw a border around the gradient bar, purely for aesthetics."""
         ax.add_patch(
             plt.Rectangle(
-                (i - 0.1, interp_co2.min()),
+                (i - 0.1, interpolated_forcings_values.min()),
                 0.2,
-                interp_co2.max() - interp_co2.min(),
+                interpolated_forcings_values.max() - interpolated_forcings_values.min(),
                 edgecolor="black",
                 facecolor="none",
                 linewidth=1.5,
@@ -1337,19 +1412,34 @@ class BurningEmbersPlotter:
             )
         )
 
-    def _draw_certainty_dots(self, ax, i, category_data, co2_vals):
-        for co2_level in np.arange(300, co2_vals.max() + 200, 200):
-            closest_data = category_data.iloc[
-                (category_data["co2"] - co2_level).abs().argsort()[:1]
+    def _draw_certainty_dots(
+        self,
+        ax: plt.Axes,
+        i: int,
+    ) -> None:
+        """Draw dots to indicate the certainty of the prediction at each forcing level."""
+        step = 0.5 if self.config.forcing_col == "anomaly_value_sst" else 200
+        max_val = utils.round_down_to_nearest(self.forcing_vals.max(), step)
+        min_val = utils.round_down_to_nearest(self.forcing_vals.min(), step)
+
+        dot_levels = np.arange(min_val, max_val + step, step)
+        # thin down to integer spacing if forcing_col is SST
+        if self.config.forcing_col == "anomaly_value_sst":
+            dot_levels = dot_levels[1::2]
+        for forcing_level in dot_levels:
+            closest_data = self.predictions_df.iloc[
+                (self.predictions_df[self.config.forcing_col] - forcing_level)
+                .abs()
+                .argsort()[:1]
             ]
             if not closest_data.empty:
                 certainty = closest_data["certainty"].values[0]
                 if not np.isnan(certainty):
-                    dot_positions = np.linspace(-0.05, 0.05, int(certainty))
-                    for dot_pos in dot_positions:
+                    dot_positions = np.linspace(-0.05, 0.05, 4)
+                    for certainty_level in range(certainty):
                         ax.plot(
-                            i + 0.25 + dot_pos,
-                            co2_level,
+                            i + 0.25 + dot_positions[certainty_level],
+                            forcing_level,
                             "o",
                             color="black",
                             markersize=4,
@@ -1357,51 +1447,57 @@ class BurningEmbersPlotter:
                             markeredgecolor="white",
                         )
 
-    # def _format_axes(self, ax, categories, co2_vals):
-    #     ax.set_ylim(co2_vals.min(), co2_vals.max())
-
-    #     ax.set_ylabel("Atmospheric CO₂ concentration (ppm)", fontsize=12)
-
-    def _format_axes(self, ax, categories) -> None:
+    def _format_axes(self, ax: plt.Axes, categories: list[str]) -> None:
+        """Format axes: remove spines, add grid, set and label x ticks, set x limits"""
         for spine in ["top", "right", "left", "bottom"]:
             ax.spines[spine].set_visible(False)
         ax.yaxis.grid(True, linestyle="--", alpha=0.7, zorder=-20)
+
         ax.set_xticklabels(
-            categories + self.config.insufficient_data_cols,
+            categories,
             rotation=0,
             ha="center",
             fontsize=10,
         )
-        total_bars = self._get_number_of_bars(categories)
-        ax.set_xlim(-0.5, total_bars - 0.5)
-        ax.set_xticks(range(total_bars))
+        ax.set_xlim(-0.5, len(categories) - 0.5)
+        ax.set_xticks(range(len(categories)))
+        ax.set_ylabel(
+            "SST anomaly (°C)"
+            if "sst" in self.config.forcing_col
+            else "CO₂ concentration (ppm)",
+            fontsize=12,
+        )
 
-    def _get_number_of_bars(self, categories):
-        return len(categories) + len(self.config.insufficient_data_cols)
-
-    def _format_fig(self, fig):
+    def _format_fig(self):
+        """Format the figure: add title, adjust layout"""
         plt.suptitle(self.config.title, fontsize=14, y=1.05)
         plt.tight_layout(rect=[0, 0.15, 1, 0.95])
 
-    def _draw_present_day_line(self, ax, emissions_predictions, co2_vals, n_total):
+    def _draw_present_day_line(self, ax):
+        """Draw a horizontal line at the present day forcing (CO2 or SST value)."""
         present_day_index = np.where(
-            co2_vals
-            == emissions_predictions[emissions_predictions.time_frame == 2025].co2.iloc[
-                0
-            ]
+            self.forcing_vals
+            == self.predictions_df[self.predictions_df.time_frame == 2025][
+                self.config.forcing_col
+            ].iloc[0]
         )[0][0]
         ax.axhline(
-            y=co2_vals.iloc[present_day_index],
+            y=self.forcing_vals.iloc[present_day_index],
             color="black",
             linestyle="--",
             linewidth=1.5,
             label="Present day (2025)",
             zorder=20,
         )
+        present_day_value_label = (
+            f"{self.forcing_vals.iloc[present_day_index]:.02f}°C"
+            if "sst" in self.config.forcing_col
+            else f"{self.forcing_vals.iloc[present_day_index]:.0f}ppm"
+        )
         ax.text(
             0.2,
-            co2_vals.iloc[present_day_index] + 30,
-            f"Present day\n({co2_vals.iloc[present_day_index]:.0f}ppm)",
+            self.forcing_vals.iloc[present_day_index] * 1.3,
+            f"Present day\n({present_day_value_label})",
             color="black",
             fontsize=10,
             ha="left",
@@ -1411,6 +1507,7 @@ class BurningEmbersPlotter:
         )
 
     def _draw_colorbar(self, fig, cmap, cnorm):
+        """Draw a colorbar with annotation of severity."""
         cax = fig.add_axes([0.25, 0.05, 0.5, 0.03])
         reversed_cmap = cmap.reversed()
         cb = ColorbarBase(cax, cmap=reversed_cmap, norm=cnorm, orientation="horizontal")
@@ -1428,43 +1525,102 @@ class BurningEmbersPlotter:
             fontsize=10,
         )
 
-    def plot_sst_anomaly_bars(
-        self,
-        sst_anomaly_data,
-        x_col="x",
-        anomaly_col="anomaly",
-        height_col="height",
-        label_col=None,
-    ):
-        """
-        Plot SST anomaly bars using the burning embers color scheme and class configuration.
-        Args:
-            sst_anomaly_data: DataFrame with columns for x, anomaly, and height.
-            x_col: Name of the column for x-axis positions.
-            anomaly_col: Name of the column for anomaly values (for color mapping).
-            height_col: Name of the column for bar heights.
-            label_col: Optional column for bar labels.
-        """
-        fig, ax = plt.subplots(figsize=self.config.figsize, dpi=self.config.dpi)
-        cmap = LinearSegmentedColormap.from_list(
-            "burning_embers", self.config.cmap_colors, N=256
+    def _generate_new_year_range(self, predictions_df: pd.DataFrame):
+        """Generate a dataframe containing the list of years to which predictions will be interpolated/extrapolated."""
+        nys = np.arange(
+            predictions_df["time_frame"].min(), predictions_df["time_frame"].max() + 1
         )
-        norm = Normalize(vmin=self.config.vmin, vmax=self.config.vmax)
-        for idx, row in sst_anomaly_data.iterrows():
-            color = cmap(norm(row[anomaly_col]))
-            ax.bar(row[x_col], row[height_col], color=color, edgecolor="k")
-            if label_col:
-                ax.text(
-                    row[x_col],
-                    row[height_col],
-                    str(row[label_col]),
-                    ha="center",
-                    va="bottom",
-                    fontsize=8,
-                )
-        self._draw_colorbar(ax, cmap, norm)
-        ax.set_title(self.config.title)
-        ax.set_xlabel(x_col)
-        ax.set_ylabel(height_col)
-        plt.tight_layout()
-        plt.show()
+        return pd.DataFrame({"time_frame": nys})
+
+    def _generate_full_predictions_grid(self, predictions_df: pd.DataFrame):
+        """Generate a full grid containing core_grouping, scenario, and time_frame columns ready to merge with interpolated/extrapolated predictions."""
+        unique_groups = predictions_df[["core_grouping", "scenario"]].drop_duplicates()
+        full_grid = unique_groups.merge(
+            self._generate_new_year_range(predictions_df), how="cross"
+        )
+        # merge metadata grid with mean predictions
+        return pd.merge(
+            full_grid,
+            predictions_df[predictions_df.percentile == "mean"],
+            on=["core_grouping", "scenario", "time_frame"],
+            how="left",
+        )
+
+    def _merge_with_emissions_data(self, predictions_grid_df: pd.DataFrame):
+        """Add emissions to the climatology range."""
+        # TODO: this should probably outside of the class
+        scenario_names = [
+            scenario_name.replace(" ", "")
+            for scenario_name in list(plot_config.SCENARIO_MAP.values())
+        ]
+        emissions_data = climatology_processing.get_emissions_data_from_file(
+            config.climatology_data_dir
+            / "SUPPLEMENT_DataTables_Meinshausen_6May2020.xlsx",
+            scenario_names,
+        )
+        # merge with predictions
+        merged = pd.merge(
+            predictions_grid_df,
+            emissions_data,
+            left_on="time_frame",
+            right_on="year",
+            how="left",
+        )
+        return merged.drop(columns="year").sort_values(by="core_grouping")
+
+    def _interpolate_predictions_to_climatology_range(
+        self, predictions_df: pd.DataFrame
+    ):
+        """Interpolate predictions to the climatology range. Quadratic interpolation used due to form of climatology data."""
+        # select mean prediction
+        predictions_df[self.config.forcing_col] = predictions_df.groupby(
+            ["core_grouping", "scenario"], observed=False
+        )[self.config.forcing_col].transform(
+            lambda x: x.interpolate(method="quadratic")
+        )
+        predictions_df["pred"] = predictions_df.groupby(
+            ["core_grouping", "scenario"], observed=False
+        )["pred"].transform(lambda x: x.interpolate(method="quadratic"))
+        predictions_df["se"] = predictions_df.groupby(
+            ["core_grouping", "scenario"], observed=False
+        )["se"].transform(lambda x: x.interpolate(method="quadratic"))
+        return predictions_df
+
+    def _prepare_forcing_data(
+        self,
+    ):
+        """Prepare forcing data for plotting.
+
+        Args:
+            predictions_df: DataFrame with scenario, time_frame, core_grouping, pred and se columns.
+
+        Returns:
+            DataFrame with scenario, time_frame, core_grouping, pred, se, p_score, and certainty columns ready for Burning Embers plot.
+        """
+        # extrapolate predictions to the end year
+        self.predictions_df = (
+            climatology_processing.interpolate_and_extrapolate_predictions(
+                self.predictions_df, target_year=self.config.end_year
+            )
+        )
+        # generate predictions over full range of years
+        predictions_grid_df = self._generate_full_predictions_grid(self.predictions_df)
+        # interpolate predictions to the climatology range
+        predictions_grid_df = self._interpolate_predictions_to_climatology_range(
+            predictions_grid_df
+        )
+        # sort by core_grouping and scenario to be ready for plotting
+        predictions_grid_df.sort_values(by=["core_grouping", "scenario"], inplace=True)
+        # calculate p-scores for each prediction
+        predictions_grid_df["p_score"] = predictions_grid_df.apply(
+            lambda row: analysis_utils.p_score(row["pred"], row["se"], null_value=0),
+            axis=1,
+        )
+        # assign certainty to each prediction
+        predictions_grid_df["certainty"] = predictions_grid_df["p_score"].apply(
+            analysis_utils.assign_certainty
+        )
+        # add emissions to the predictions
+        predictions_grid_df = self._merge_with_emissions_data(predictions_grid_df)
+        # Keep sorted by core_grouping and scenario for consistent plotting
+        return predictions_grid_df.sort_values(by=["core_grouping", "scenario"])
