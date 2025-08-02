@@ -74,17 +74,21 @@ def assign_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     df["loc"] = df.apply(lambda row: _resolve_coordinates(row, gmaps_coords), axis=1)
     df["latitude"] = df["loc"].apply(lambda x: x[0] if isinstance(x, tuple) else None)
     df["longitude"] = df["loc"].apply(lambda x: x[1] if isinstance(x, tuple) else None)
+    # drop rows for which latitude or longitude is NaN
+    df = df.dropna(subset=["latitude", "longitude"])
     return df
 
 
 def _resolve_coordinates(row, gmaps_coords):
     """Resolve coordinates from cleaned_coords, coords, or Google Maps."""
-    if pd.notna(row.get("cleaned_coords")):
+    if pd.notna(row.get("cleaned_coords")):  # prefer cleaned coordinates
         return standardize_coordinates(row["cleaned_coords"])
-    elif pd.notna(row.get("coords")):
+    elif pd.notna(row.get("coords")):  # use coordinates if there was no need to clean
         return standardize_coordinates(row["coords"])
-    elif row.get("location") in gmaps_coords:
-        return gmaps_coords[row["location"]]
+    elif (
+        row.get("location") in gmaps_coords
+    ):  # fall back on estimating coordinates from location name
+        return tuple(gmaps_coords[row["location"]])
     return None
 
 
