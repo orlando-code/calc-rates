@@ -28,25 +28,32 @@ def process_extracted_calcification_data(
     Returns:
         pd.DataFrame: DataFrame with effect sizes and all processing applied.
     """
+    treatment_group_df = process_raw_to_treatment_groups(fp, sheet_name, selection_dict)
+
+    effect_sizes_df = analysis.calculate_effect_for_df(treatment_group_df)
+
+    return effect_sizes_df, treatment_group_df
+
+
+def process_raw_to_treatment_groups(
+    fp: str, sheet_name: str = "all_data", selection_dict: Optional[dict] = None
+) -> pd.DataFrame:
+    """
+    Process raw data to treatment groups.
+    """
     if selection_dict is None:  # exclude selected rows
         selection_dict = {"include": "yes"}
 
-    # logging.info("Populating carbonate chemistry...")
     carbonate_df = carbonate_processing.populate_carbonate_chemistry(
         fp, sheet_name=sheet_name, selection_dict=selection_dict
     )
-    # logging.info("Assigning treatment groups...")
+
     carbonate_df = groups_processing.assign_treatment_groups_multilevel(carbonate_df)
 
     logging.info("Aggregating treatments with individual samples...")
-    carbonate_df = groups_processing.aggregate_treatments_rows_with_individual_samples(
+    return groups_processing.aggregate_treatments_rows_with_individual_samples(
         carbonate_df
     )
-
-    # logging.info("Calculating effect sizes...")
-    carbonate_df = analysis.calculate_effect_for_df(carbonate_df)
-
-    return carbonate_df
 
 
 def process_climatology_data(
