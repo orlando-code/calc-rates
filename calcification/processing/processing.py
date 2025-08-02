@@ -5,7 +5,6 @@ import cbsyst as cb
 import cbsyst.helpers as cbh
 import numpy as np
 import pandas as pd
-from scipy import interpolate
 from tqdm.auto import tqdm
 
 from calcification.processing import locations, taxonomy, units
@@ -350,7 +349,6 @@ def populate_carbonate_chemistry(
     measured_df = file_ops.get_highlighted(
         fp, sheet_name=sheet_name
     )  # keeping all cols
-    # measured_df = process_raw_data(measured_df, require_results=False, selection_dict=selection_dict)
     measured_df = preprocess_df(measured_df, selection_dict=selection_dict)
 
     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
@@ -798,60 +796,6 @@ def generate_location_specific_anomalies(df: pd.DataFrame, scenario_var: str = "
     )
 
 
-def interpolate_and_extrapolate_predictions(df, target_year=2100):
-    grouping_cols = ["core_grouping", "scenario", "percentile", "time_frame"]
-    value_cols = [col for col in df.columns if col not in grouping_cols]
-
-    # Filter only mean percentile
-    df = df[df["percentile"] == "mean"].copy()
-
-    # Make the full year grid (including up to 2100)
-    all_years = np.arange(df["time_frame"].min(), target_year + 1)
-    unique_groups = df[["core_grouping", "scenario", "percentile"]].drop_duplicates()
-    full_grid = unique_groups.merge(
-        pd.DataFrame({"time_frame": all_years}), how="cross"
-    )
-
-    # Merge full grid with existing predictions
-    df_full = pd.merge(
-        full_grid,
-        df,
-        on=["core_grouping", "scenario", "percentile", "time_frame"],
-        how="left",
-    )
-
-    # Now interpolate/extrapolate for each group
-    for (core_grouping, scenario, percentile), group_df in df_full.groupby(
-        ["core_grouping", "scenario", "percentile"]
-    ):
-        mask = (
-            (df_full["core_grouping"] == core_grouping)
-            & (df_full["scenario"] == scenario)
-            & (df_full["percentile"] == percentile)
-        )
-
-        available_years = group_df.dropna(subset=value_cols)["time_frame"].values
-
-        if len(available_years) < 2:
-            continue  # Not enough points to interpolate
-
-        for value_col in value_cols:
-            available_vals = group_df.dropna(subset=[value_col])[value_col].values
-
-            if len(available_vals) < 2:
-                continue  # Not enough data
-
-            # Fit spline
-            spline = interpolate.make_interp_spline(
-                available_years, available_vals, k=min(2, len(available_vals) - 1)
-            )
-
-            # Predict for all years
-            df_full.loc[mask, value_col] = spline(all_years)
-
-    return df_full
-
-
 def process_emissions_sheet(sheet_df: pd.DataFrame, scenario_name: str) -> pd.DataFrame:
     # Process the sheet DataFrame
     sheet_df = sheet_df[["Gas", "CO2"]].iloc[3:]  # years labelled 'Gas'
@@ -919,3 +863,57 @@ def process_emissions_sheet(sheet_df: pd.DataFrame, scenario_name: str) -> pd.Da
 #                  'control' if isinstance(x, str) and x == 'cTcP' else np.nan
 #     )
 #     return result_df
+
+
+# def interpolate_and_extrapolate_predictions(df, target_year=2100):
+#     grouping_cols = ["core_grouping", "scenario", "percentile", "time_frame"]
+#     value_cols = [col for col in df.columns if col not in grouping_cols]
+
+#     # Filter only mean percentile
+#     df = df[df["percentile"] == "mean"].copy()
+
+#     # Make the full year grid (including up to 2100)
+#     all_years = np.arange(df["time_frame"].min(), target_year + 1)
+#     unique_groups = df[["core_grouping", "scenario", "percentile"]].drop_duplicates()
+#     full_grid = unique_groups.merge(
+#         pd.DataFrame({"time_frame": all_years}), how="cross"
+#     )
+
+#     # Merge full grid with existing predictions
+#     df_full = pd.merge(
+#         full_grid,
+#         df,
+#         on=["core_grouping", "scenario", "percentile", "time_frame"],
+#         how="left",
+#     )
+
+#     # Now interpolate/extrapolate for each group
+#     for (core_grouping, scenario, percentile), group_df in df_full.groupby(
+#         ["core_grouping", "scenario", "percentile"]
+#     ):
+#         mask = (
+#             (df_full["core_grouping"] == core_grouping)
+#             & (df_full["scenario"] == scenario)
+#             & (df_full["percentile"] == percentile)
+#         )
+
+#         available_years = group_df.dropna(subset=value_cols)["time_frame"].values
+
+#         if len(available_years) < 2:
+#             continue  # Not enough points to interpolate
+
+#         for value_col in value_cols:
+#             available_vals = group_df.dropna(subset=[value_col])[value_col].values
+
+#             if len(available_vals) < 2:
+#                 continue  # Not enough data
+
+#             # Fit spline
+#             spline = interpolate.make_interp_spline(
+#                 available_years, available_vals, k=min(2, len(available_vals) - 1)
+#             )
+
+#             # Predict for all years
+#             df_full.loc[mask, value_col] = spline(all_years)
+
+#     return df_full
