@@ -218,21 +218,25 @@ def _normalize_coord_string(coord_string):
 
 
 def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
-    """Uniquify DOIs for studies with multiple locations. N.B. requires 'location', 'coords', and 'cleaned_coords' columns."""
+    """
+    Uniquify DOIs for studies with multiple locations based on unique (latitude, longitude) pairs.
+    For each unique (original_doi, latitude, longitude) combination, assign a unique DOI.
+    """
     temp_df = df.copy()
-    temp_df["original_doi"] = temp_df["doi"]
-    temp_df["location_lower"] = temp_df["location"].str.lower()
-    locs_df = temp_df.drop_duplicates(
-        ["doi", "location_lower", "coords", "cleaned_coords"]
+    temp_df.loc[:, "original_doi"] = temp_df["doi"]
+
+    latlon_cols = ["original_doi", "latitude", "longitude"]
+    locs_df = temp_df.dropna(subset=["latitude", "longitude"]).drop_duplicates(
+        latlon_cols
     )
-    locs_df.loc[:, "doi"] = utils.uniquify_repeated_values(locs_df.doi)
+    # Create a unique DOI for each (original_doi, latitude, longitude) combination
+    locs_df.loc[:, "doi"] = utils.uniquify_repeated_values(locs_df["original_doi"])
+    # Merge back to original dataframe on (original_doi, latitude, longitude)
     temp_df = temp_df.merge(
-        locs_df["doi"],
+        locs_df[latlon_cols + ["doi"]],
         how="left",
-        left_index=True,
-        right_index=True,
-        suffixes=("_old", ""),
+        on=latlon_cols,
+        suffixes=("", "_unique"),
     )
-    temp_df.drop(columns=["doi_old"], inplace=True)
-    temp_df["doi"] = temp_df.groupby("original_doi")["doi"].ffill()
+    temp_df.loc[:, "doi"] = temp_df["doi_unique"].fillna(temp_df["original_doi"])
     return temp_df
