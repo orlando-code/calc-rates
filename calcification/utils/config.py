@@ -22,5 +22,6 @@ fig_dir = repo_dir / "figures"
 
 # DATA DIRECTORIES
 data_dir = repo_dir / "data"
+clean_data_dir = data_dir / "clean"
 climatology_data_dir = data_dir / "climatology"
 tmp_data_dir = data_dir / "tmp"
