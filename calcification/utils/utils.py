@@ -137,13 +137,20 @@ def uniquify_repeated_values(vals: list, uniquify_str: str = "LOC") -> list:
             else letters
         )
 
-    counts = {}
+    from collections import Counter, defaultdict
+
+    # Precompute counts for all values to avoid repeated .count() calls
+    value_counts = Counter(vals)
+    counts = defaultdict(int)
     result = []
     for val in vals:
-        count = counts.get(val, 0)
-        suffix = f"-{uniquify_str}-{string.ascii_uppercase[count]}" if count else ""
+        count = counts[val]
+        if value_counts[val] > 1:
+            suffix = f"-{uniquify_str}-{string.ascii_uppercase[count]}"
+        else:
+            suffix = ""
         result.append(f"{val}{suffix}")
-        counts[val] = count + 1
+        counts[val] += 1
     return result
 
 
