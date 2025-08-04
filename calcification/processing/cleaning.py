@@ -183,8 +183,8 @@ def process_raw_data(
     """Process raw data from the spreadsheet to prepare for analysis."""
     try:
         df = preprocess_df(df, selection_dict)
-        df = locations.uniquify_multilocation_study_dois(df)
         df = locations.assign_coordinates(df)
+        df = locations.uniquify_multilocation_study_dois(df)
         locations.save_locations_information(df)
         df = locations.assign_ecoregions(df)
         df = taxonomy.assign_taxonomical_info(df)
