@@ -187,7 +187,7 @@ def interpolate_and_extrapolate_predictions(
 
     # Now interpolate/extrapolate for each group
     for (core_grouping, scenario, percentile), group_df in df_full.groupby(
-        ["core_grouping", "scenario", "percentile"]
+        ["core_grouping", "scenario", "percentile"], observed=False
     ):
         mask = (
             (df_full["core_grouping"] == core_grouping)
