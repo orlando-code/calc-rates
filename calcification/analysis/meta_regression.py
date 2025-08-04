@@ -31,7 +31,7 @@ class MetaforModel:
     def __init__(
         self,
         df: pd.DataFrame,
-        effect_type: str = "hedges_g",
+        effect_type: str = "st_relative_calcification",
         effect_type_var: Optional[str] = None,
         treatment: Optional[str] = None,
         formula: Optional[str] = None,
@@ -105,11 +105,11 @@ class MetaforModel:
         """Get the summary of the model."""
         print(self.summary)
 
-    def _save_summary(self) -> None:
+    def save_summary(self, summary_fp: str = None) -> None:
         """Save the summary to a file."""
         # summary_fp =
         # TODO: specify summary file path by model type
-        summary_fp = config.results_dir / "metafor_summary.txt"
+        summary_fp = summary_fp or config.results_dir / "metafor_summary.txt"
         with open("summary.txt", "w") as f:
             f.write(str(self.summary))
         logger.info(f"Summary saved to {summary_fp}")
@@ -134,7 +134,7 @@ class MetaforModel:
         )
         self.summary = base.summary(self.model)
         self.fitted = True
-        self._save_summary() if self.save_summary else None
+        self.save_summary() if self.save_summary else None
         logger.info("Model fitting complete.")
         return self
 
@@ -288,11 +288,12 @@ def metafor_predict_from_model(
     predict = ro.r("predict")
     pred_res = predict(model, newmods=Xnew_r, level=(confidence_level / 100))
     pred = np.array(pred_res.rx2("pred"))
+    se = np.array(pred_res.rx2("se"))
     ci_lb = np.array(pred_res.rx2("ci.lb"))
     ci_ub = np.array(pred_res.rx2("ci.ub"))
     pred_lb = np.array(pred_res.rx2("pi.lb"))
     pred_ub = np.array(pred_res.rx2("pi.ub"))
-    return pred, ci_lb, ci_ub, pred_lb, pred_ub
+    return pred, se, ci_lb, ci_ub, pred_lb, pred_ub
 
 
 def prediction_df_from_model(
@@ -302,16 +303,17 @@ def prediction_df_from_model(
     confidence_level: int = 95,
     npoints: int = 1000,
 ) -> pd.DataFrame:
-    pred, ci_lb, ci_ub, pred_lb, pred_ub = metafor_predict_from_model(
+    pred, se, ci_lb, ci_ub, pred_lb, pred_ub = metafor_predict_from_model(
         model, moderator_names, xs, confidence_level, npoints
     )
     return pd.DataFrame(
         {
             "pred": pred,
+            "se": se,
             "ci.lb": ci_lb,
             "ci.ub": ci_ub,
-            "pred.lb": pred_lb,
-            "pred.ub": pred_ub,
+            "pi.lb": pred_lb,
+            "pi.ub": pred_ub,
         }
     )
 
