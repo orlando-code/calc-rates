@@ -1,13 +1,11 @@
 # general
 import unicodedata
 
-import cbsyst as cb
 import cbsyst.helpers as cbh
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from calcification.processing import locations, taxonomy, units
 from calcification.utils import config, file_ops, utils
 
 
@@ -258,176 +256,16 @@ def preprocess_df(
     for col in problem_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    ### remove any columns with 'unnamed' in the header: these are an artefact from messing around outside the spreadsheets necessary columns
+    # remove any columns with 'unnamed' in the header: these are an artefact from messing around outside the spreadsheets necessary columns
     df = df.loc[:, ~df.columns.str.contains("^unnamed")]
     return df
 
 
-def process_raw_data(
-    df: pd.DataFrame,
-    require_results: bool = True,
-    selection_dict: dict = {"include": "yes"},
-    ph_conversion: bool = True,
-) -> pd.DataFrame:
-    """Process raw data from the spreadsheet to prepare for analysis
-    Args:
-        df (pd.DataFrame): DataFrame containing raw data
-        require_results (bool): Whether to require results for processing
-        selection_dict (dict): Dictionary of selections to filter the DataFrame
-
-    Returns:
-        pd.DataFrame: Processed DataFrame
-    """
-    df = preprocess_df(df, selection_dict=selection_dict)  # general processing
-    ### location processsing
-    df = locations.uniquify_multilocation_study_dois(
-        df
-    )  # for dois with multiple locations
-    df = locations.assign_coordinates(df)  # assign coordinates to locations
-    locations.save_locations_information(df)  # save locations information
-    df = locations.assign_ecoregions(df)  # assign ecoregions to locations
-
-    ### taxonomy
-    df = taxonomy.assign_taxonomical_info(
-        df
-    )  # create family, genus, species, and functional group columns from species binomials
-
-    ### units
-    df["irr"] = df.apply(
-        lambda row: units.irradiance_conversion(row["ipar"], "PAR")
-        if pd.notna(row["ipar"])
-        else row["irr"],
-        axis=1,
-    )  # convert integrated irradiance to irradiance
-
-    if ph_conversion:
-        df["hplus"] = df.apply(
-            lambda row: units.ph_to_hplus(row["phtot"])
-            if pd.notna(row["phtot"])
-            else None,
-            axis=1,
-        )  # convert pH to H+ concentration in μmol/kg seawater
-
-    if require_results:  # keep only rows with all the necessary data
-        df = df.dropna(subset=["n", "calcification"])
-
-    # calculate calcification standard deviation
-    df["calcification_sd"] = df.apply(
-        lambda row: calc_sd_from_se(row["calcification_se"], row["n"])
-        if pd.notna(row["calcification_se"]) and pd.notna(row["n"])
-        else row["calcification_sd"],
-        axis=1,
-    )
-
-    # calculate standarised calcification rates and relevant units
-    df = units.map_units(df)  # map units to standardised units
-    df[["st_calcification", "st_calcification_sd", "st_calcification_unit"]] = df.apply(
-        lambda x: pd.Series(
-            units.rate_conversion(
-                x["calcification"], x["calcification_sd"], x["st_calcification_unit"]
-            )
-        )
-        if pd.notna(x["calcification"]) and pd.notna(x["st_calcification_unit"])
-        else pd.Series(["", "", ""]),
-        axis=1,
-    )
-
-    return df
-
-
 ### carbonate chemistry
-def populate_carbonate_chemistry(
-    fp: str, sheet_name: str = "all_data", selection_dict: dict = {"include": "yes"}
-) -> pd.DataFrame:
-    df = process_raw_data(
-        pd.read_excel(fp, sheet_name=sheet_name),
-        require_results=False,
-        selection_dict=selection_dict,
-    )
-    ### load measured values
-    print("Loading measured values...")
-    measured_df = file_ops.get_highlighted(
-        fp, sheet_name=sheet_name
-    )  # keeping all cols
-    measured_df = preprocess_df(measured_df, selection_dict=selection_dict)
-
-    ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
-    # if one of ph is provided, ensure total ph is calculated
-    # Only convert pHnbs to pHtot if pHtot is NaN and pHnbs is available
-    mask_missing_phtot_with_nbs = (
-        measured_df["phtot"].isna()
-        & measured_df["phnbs"].notna()
-        & measured_df["temp"].notna()
-    )
-    measured_df.loc[mask_missing_phtot_with_nbs, "phtot"] = measured_df[
-        mask_missing_phtot_with_nbs
-    ].apply(
-        lambda row: cbh.pH_scale_converter(
-            pH=row["phnbs"],
-            scale="NBS",
-            Temp=row["temp"],
-            Sal=row["sal"] if pd.notna(row["sal"]) else 35,
-        ).get("pHtot", None),
-        axis=1,
-    )
-
-    # Only calculate pHtot from DIC and TA if pHtot is still NaN and required parameters are available
-    mask_missing_phtot_with_carb = (
-        measured_df["phtot"].isna()
-        & measured_df["dic"].notna()
-        & measured_df["ta"].notna()
-        & measured_df["temp"].notna()
-    )
-    if mask_missing_phtot_with_carb.any():
-        measured_df.loc[mask_missing_phtot_with_carb, "phtot"] = measured_df[
-            mask_missing_phtot_with_carb
-        ].apply(
-            lambda row: cb.Csys(
-                TA=row["ta"],
-                DIC=row["dic"],
-                T_in=row["temp"],
-                S_in=row["sal"] if pd.notna(row["sal"]) else 35,
-            ).pHtot[0],
-            axis=1,
-        )
-    # if phtot is still NaN, calculate from other parameters.
-    mask_missing_phtot_with_alt_carb = (
-        measured_df["phtot"].isna()
-        & measured_df["pco2"].notna()
-        & measured_df["ta"].notna()
-        & measured_df["temp"].notna()
-    )
-    if mask_missing_phtot_with_alt_carb.any():
-        measured_df.loc[mask_missing_phtot_with_alt_carb, "phtot"] = measured_df[
-            mask_missing_phtot_with_alt_carb
-        ].apply(
-            lambda row: cb.Csys(
-                TA=row["ta"],
-                pCO2=row["pco2"],
-                T_in=row["temp"],
-                S_in=row["sal"] if pd.notna(row["sal"]) else 35,
-            ).pHtot[0],
-            axis=1,
-        )
-
-    ### calculate carbonate chemistry
-    carb_metadata = file_ops.read_yaml(config.resources_dir / "mapping.yaml")
-    carb_chem_cols = carb_metadata["carbonate_chemistry_cols"]
-    out_values = carb_metadata["carbonate_chemistry_params"]
-    carb_df = measured_df[carb_chem_cols].copy()
-
-    # apply carbonate chemistry calculation row-wise
-    tqdm.pandas(desc="Calculating carbonate chemistry")
-    carb_df.loc[:, out_values] = carb_df.progress_apply(
-        lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1
-    )
-    return df.combine_first(carb_df)
-
-
 def calculate_carb_chem(row: pd.Series, out_values: list) -> dict:
     """(Re)calculate carbonate chemistry parameters from the dataframe row and return a dictionary."""
     try:
-        out_dict = cb.Csys(
+        out_dict = cbh.Csys(
             pHtot=row["phtot"],
             TA=row["ta"],
             T_in=row["temp"],
@@ -917,3 +755,162 @@ def process_emissions_sheet(sheet_df: pd.DataFrame, scenario_name: str) -> pd.Da
 #             df_full.loc[mask, value_col] = spline(all_years)
 
 #     return df_full
+
+
+# def populate_carbonate_chemistry_old(
+#     fp: str, sheet_name: str = "all_data", selection_dict: dict = {"include": "yes"}
+# ) -> pd.DataFrame:
+#     df = process_raw_data(
+#         pd.read_excel(fp, sheet_name=sheet_name),
+#         require_results=False,
+#         selection_dict=selection_dict,
+#     )
+#     ### load measured values
+#     print("Loading measured values...")
+#     measured_df = file_ops.get_highlighted(
+#         fp, sheet_name=sheet_name
+#     )  # keeping all cols
+#     measured_df = preprocess_df(measured_df, selection_dict=selection_dict)
+#     ### convert nbs values to total scale using cbsyst     # TODO: implement uncertainty propagation
+#     # if one of ph is provided, ensure total ph is calculated
+#     # Only convert pHnbs to pHtot if pHtot is NaN and pHnbs is available
+#     mask_missing_phtot_with_nbs = (
+#         measured_df["phtot"].isna()
+#         & measured_df["phnbs"].notna()
+#         & measured_df["temp"].notna()
+#     )
+#     measured_df.loc[mask_missing_phtot_with_nbs, "phtot"] = measured_df[
+#         mask_missing_phtot_with_nbs
+#     ].apply(
+#         lambda row: cbh.pH_scale_converter(
+#             pH=row["phnbs"],
+#             scale="NBS",
+#             Temp=row["temp"],
+#             Sal=row["sal"] if pd.notna(row["sal"]) else 35,
+#         ).get("pHtot", None),
+#         axis=1,
+#     )
+
+#     # Only calculate pHtot from DIC and TA if pHtot is still NaN and required parameters are available
+#     mask_missing_phtot_with_carb = (
+#         measured_df["phtot"].isna()
+#         & measured_df["dic"].notna()
+#         & measured_df["ta"].notna()
+#         & measured_df["temp"].notna()
+#     )
+#     if mask_missing_phtot_with_carb.any():
+#         measured_df.loc[mask_missing_phtot_with_carb, "phtot"] = measured_df[
+#             mask_missing_phtot_with_carb
+#         ].apply(
+#             lambda row: cb.Csys(
+#                 TA=row["ta"],
+#                 DIC=row["dic"],
+#                 T_in=row["temp"],
+#                 S_in=row["sal"] if pd.notna(row["sal"]) else 35,
+#             ).pHtot[0],
+#             axis=1,
+#         )
+#     # if phtot is still NaN, calculate from other parameters.
+#     mask_missing_phtot_with_alt_carb = (
+#         measured_df["phtot"].isna()
+#         & measured_df["pco2"].notna()
+#         & measured_df["ta"].notna()
+#         & measured_df["temp"].notna()
+#     )
+#     if mask_missing_phtot_with_alt_carb.any():
+#         measured_df.loc[mask_missing_phtot_with_alt_carb, "phtot"] = measured_df[
+#             mask_missing_phtot_with_alt_carb
+#         ].apply(
+#             lambda row: cb.Csys(
+#                 TA=row["ta"],
+#                 pCO2=row["pco2"],
+#                 T_in=row["temp"],
+#                 S_in=row["sal"] if pd.notna(row["sal"]) else 35,
+#             ).pHtot[0],
+#             axis=1,
+#         )
+
+#     ### calculate carbonate chemistry
+#     carb_metadata = file_ops.read_yaml(config.resources_dir / "mapping.yaml")
+#     carb_chem_cols = carb_metadata["carbonate_chemistry_cols"]
+#     out_values = carb_metadata["carbonate_chemistry_params"]
+#     carb_df = measured_df[carb_chem_cols].copy()
+
+#     # apply carbonate chemistry calculation row-wise
+#     tqdm.pandas(desc="Calculating carbonate chemistry")
+#     carb_df.loc[:, out_values] = carb_df.progress_apply(
+#         lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1
+#     )
+#     return df.combine_first(carb_df)
+
+
+# def process_raw_data(
+#     df: pd.DataFrame,
+#     require_results: bool = True,
+#     selection_dict: dict = {"include": "yes"},
+#     ph_conversion: bool = True,
+# ) -> pd.DataFrame:
+#     """Process raw data from the spreadsheet to prepare for analysis
+#     Args:
+#         df (pd.DataFrame): DataFrame containing raw data
+#         require_results (bool): Whether to require results for processing
+#         selection_dict (dict): Dictionary of selections to filter the DataFrame
+
+#     Returns:
+#         pd.DataFrame: Processed DataFrame
+#     """
+#     df = preprocess_df(df, selection_dict=selection_dict)  # general processing
+#     ### location processsing
+#     df = locations.uniquify_multilocation_study_dois(
+#         df
+#     )  # for dois with multiple locations
+#     df = locations.assign_coordinates(df)  # assign coordinates to locations
+#     locations.save_locations_information(df)  # save locations information
+#     df = locations.assign_ecoregions(df)  # assign ecoregions to locations
+
+#     ### taxonomy
+#     df = taxonomy.assign_taxonomical_info(
+#         df
+#     )  # create family, genus, species, and functional group columns from species binomials
+
+#     ### units
+#     df["irr"] = df.apply(
+#         lambda row: units.irradiance_conversion(row["ipar"], "PAR")
+#         if pd.notna(row["ipar"])
+#         else row["irr"],
+#         axis=1,
+#     )  # convert integrated irradiance to irradiance
+
+#     if ph_conversion:
+#         df["hplus"] = df.apply(
+#             lambda row: units.ph_to_hplus(row["phtot"])
+#             if pd.notna(row["phtot"])
+#             else None,
+#             axis=1,
+#         )  # convert pH to H+ concentration in μmol/kg seawater
+
+#     if require_results:  # keep only rows with all the necessary data
+#         df = df.dropna(subset=["n", "calcification"])
+
+#     # calculate calcification standard deviation
+#     df["calcification_sd"] = df.apply(
+#         lambda row: calc_sd_from_se(row["calcification_se"], row["n"])
+#         if pd.notna(row["calcification_se"]) and pd.notna(row["n"])
+#         else row["calcification_sd"],
+#         axis=1,
+#     )
+
+#     # calculate standarised calcification rates and relevant units
+#     df = units.map_units(df)  # map units to standardised units
+#     df[["st_calcification", "st_calcification_sd", "st_calcification_unit"]] = df.apply(
+#         lambda x: pd.Series(
+#             units.rate_conversion(
+#                 x["calcification"], x["calcification_sd"], x["st_calcification_unit"]
+#             )
+#         )
+#         if pd.notna(x["calcification"]) and pd.notna(x["st_calcification_unit"])
+#         else pd.Series(["", "", ""]),
+#         axis=1,
+#     )
+
+#     return df
