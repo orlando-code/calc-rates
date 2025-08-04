@@ -232,6 +232,7 @@ def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
     # Create a unique DOI for each (original_doi, latitude, longitude) combination
     locs_df.loc[:, "doi"] = utils.uniquify_repeated_values(locs_df["original_doi"])
     # Merge back to original dataframe on (original_doi, latitude, longitude)
+    og_index = temp_df.index
     temp_df = temp_df.merge(
         locs_df[latlon_cols + ["doi"]],
         how="left",
@@ -239,4 +240,4 @@ def uniquify_multilocation_study_dois(df: pd.DataFrame) -> pd.DataFrame:
         suffixes=("", "_unique"),
     )
     temp_df.loc[:, "doi"] = temp_df["doi_unique"].fillna(temp_df["original_doi"])
-    return temp_df
+    return temp_df.set_index(og_index)  # keep original index for downstream processing
