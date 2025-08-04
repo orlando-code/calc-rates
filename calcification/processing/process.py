@@ -91,27 +91,29 @@ def process_climatology_data(
         sst_clim_path, locations_path
     )
 
-    merged_clim_df = pd.merge(sst_climatology, ph_climatology)
+    sst_ph_climatology_df = pd.merge(sst_climatology, ph_climatology)
 
-    merged_clim_df_mi = merged_clim_df.set_index(
+    sst_ph_climatology_df_mi = sst_ph_climatology_df.set_index(
         ["doi", "location", "longitude", "latitude"]
     )
     experimental_df_mi = experimental_df.set_index(
         ["doi", "location", "longitude", "latitude"]
     )
-    local_climatology_df = experimental_df_mi.join(merged_clim_df_mi, how="inner")
+    local_climatology_df = experimental_df_mi.join(
+        sst_ph_climatology_df_mi, how="inner"
+    )
 
     logging.info(
-        f"Unique locations in climatology: {len(merged_clim_df_mi.index.unique())}, "
+        f"Unique locations in climatology: {len(sst_ph_climatology_df_mi.index.unique())}, "
         f"locations in working experimental dataframe: {len(experimental_df.drop_duplicates('doi', keep='first'))}"
     )
 
     # exclude aquaria locations # TODO: make this more robust/automated
-    local_climatology_df = local_climatology_df[
-        ~local_climatology_df.index.get_level_values("location").str.contains(
-            "monaco|portugal|uk", case=False, na=False
-        )
-    ]
+    # local_climatology_df = local_climatology_df[
+    #     ~local_climatology_df.index.get_level_values("location").str.contains(
+    #         "monaco|portugal|uk", case=False, na=False
+    #     )
+    # ]
 
     ph_anomalies = climatology.generate_location_specific_climatology_anomalies(
         local_climatology_df, "ph"
