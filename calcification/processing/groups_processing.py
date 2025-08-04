@@ -55,6 +55,7 @@ def aggregate_treatments_rows_with_individual_samples(df: pd.DataFrame) -> pd.Da
         "treatment_level_ph",
         "treatment_level_t",
         "calcification_unit",
+        "irr_group",
     ]
     # select only groups where all n==1 (i.e. only single-sample treatments)
     mask = df.groupby(group_cols)["n"].transform(lambda x: (x == 1).all())
@@ -93,9 +94,9 @@ def aggregate_treatments_rows_with_individual_samples(df: pd.DataFrame) -> pd.Da
                 irr=("irr", "mean"),
                 irr_sd=("irr", "std"),
                 calcification=("calcification", "mean"),
-                calcification_sd=("calcification_sd", "std"),
+                calcification_sd=("calcification", "std"),
                 st_calcification=("st_calcification", "mean"),
-                st_calcification_sd=("st_calcification_sd", "std"),
+                st_calcification_sd=("st_calcification", "std"),
                 st_calcification_unit=("st_calcification_unit", "first"),
                 n=("n", "count"),
             )
@@ -229,7 +230,6 @@ def assign_treatment_groups_multilevel(
         "doi"
     ):  # group irradiance values by study (DOI)
         grouped_df = group_irradiance(study_df, atol=irr_atol)
-        # update the result dataframe with the grouped irradiance values
         result_df.loc[grouped_df.index, "irr_group"] = grouped_df["irr_group"]
 
     # process each group
@@ -268,7 +268,8 @@ def assign_treatment_groups_multilevel(
             "treatment_group",
             "treatment_level_t",
             "treatment_level_ph",
-        ]:  # update original DataFrame using loc indexing (more efficient)
+            "irr_group",
+        ]:  # update original DataFrame using loc indexing
             result_df.loc[combined_df.index, col] = combined_df[col]
     # vectorized updating
     conditions = [
