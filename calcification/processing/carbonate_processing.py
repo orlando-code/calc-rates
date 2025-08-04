@@ -36,7 +36,6 @@ def populate_carbonate_chemistry(
     logger.info("Loading measured values...")
     measured_df = file_ops.get_highlighted(fp, sheet_name=sheet_name)
     measured_df = cleaning.preprocess_df(measured_df, selection_dict=selection_dict)
-
     measured_df = _convert_ph_scales(measured_df)
     measured_df = _calculate_missing_phtot(measured_df)
 
@@ -49,7 +48,25 @@ def populate_carbonate_chemistry(
     carb_df.loc[:, out_values] = carb_df.progress_apply(
         lambda row: pd.Series(calculate_carb_chem(row, out_values)), axis=1
     )
-    return df.combine_first(carb_df)
+
+    # combine dataframes: fill NaN values in df with values from carb_df
+    # only fill where df has NaN values and carb_df has non-NaN values
+    combined_df = df.copy()
+
+    # create a mask for where df has NaN values and carb_df has non-NaN values
+    fill_mask = df.isna() & carb_df.notna()
+
+    # fill only the NaN values in df with corresponding values from carb_df
+    for col in df.columns:
+        if col in carb_df.columns and fill_mask[col].any():
+            combined_df.loc[fill_mask[col], col] = carb_df.loc[fill_mask[col], col]
+
+    # log information about the combination
+    nan_filled = fill_mask.sum().sum()
+    if nan_filled > 0:
+        logger.info(f"Filled {nan_filled} NaN values by combining dataframes")
+
+    return combined_df
 
 
 def _convert_ph_scales(df: pd.DataFrame) -> pd.DataFrame:
