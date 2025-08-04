@@ -11,8 +11,6 @@ import statsmodels.api as sm
 from tqdm.auto import tqdm
 
 # custom
-from calcification.processing import carbonate_processing, groups_processing
-from calcification.utils import config, file_ops
 
 metafor = rpackages.importr("metafor")
 base = rpackages.importr("base")
@@ -291,17 +289,35 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # group by relevant factors and apply processing
     grouped_data = []
+    nan_dois = result_df[
+        result_df[
+            [
+                "calcification",
+                "calcification_sd",
+                "st_calcification",
+                "st_calcification_sd",
+                "n",
+            ]
+        ]
+        .isna()
+        .any(axis=1)
+    ].doi.unique()
     doi_bar = tqdm(result_df.doi.unique())
     for doi in doi_bar:
+        if doi in nan_dois:
+            print("problem", doi)
         doi_bar.set_description(f"Calculating effect sizes for {doi}")
         study_df = result_df[result_df["doi"] == doi]
-        for irr_group, irr_df in study_df.groupby("irr_group"):
-            for species, species_df in irr_df.groupby("species_types"):
-                df = process_group_multivar(species_df)
+        for _, irr_df in study_df.groupby("irr_group"):
+            for _, species_df in irr_df.groupby("species_types"):
+                # df = process_group_multivar(
+                #     species_df
+                # )  # TODO: replace this with a simple per-row calculation
+                df = calculate_row_effect(species_df)
                 if isinstance(df, pd.Series):
                     df = pd.DataFrame([df].T)
                 if df is not None:
-                    grouped_data.extend(df)
+                    grouped_data.append(df)
 
     if isinstance(grouped_data, list):
         valid_dfs = [
@@ -356,96 +372,34 @@ def calculate_control_values(control_df: pd.DataFrame) -> pd.Series:
     return control_series
 
 
-def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_row_effect(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Process a group of species data to calculate effect size.
+    Calculate the effect size for each row of a dataframe which contains a control and some number of treatments.
+    This method ignores treatment groups, other than to identify the control.
 
     Args:
-        df (pd.DataFrame): DataFrame containing data for a specific species
+        df (pd.DataFrame): DataFrame containing control and treatment data
 
     Returns:
-        pd.DataFrame: DataFrame with effect size calculations
+        pd.DataFrame: Row with calculated effect sizes and additional metadata
     """
-
-    def process_group(group, control_level_col):
-        control_level = min(group[control_level_col])
-        control_df = group[group[control_level_col] == control_level]
-        treatment_df = group[group[control_level_col] > control_level]
-
-        if treatment_df.empty:  # skip if there's no treatment data
-            return
-
-        control_series = calculate_control_values(control_df)
-
-        # calculate effect size for each row in treatment_df and create a list of results
-        effect_rows = []
-        for _, row in treatment_df.iterrows():
-            effect_row = calc_treatment_effect_for_row(row, control_series)
-            effect_rows.append(effect_row)
-
-        # concatenate all rows to create the effect_size DataFrame
-        if effect_rows:
-            effect_size = pd.concat(effect_rows, axis=1).T.copy()
-
-            # update treatment label
-            if control_level_col == "treatment_level_t":
-                effect_size["treatment_level_ph"] = group.name
-                if group.name >= 1:
-                    effect_size["treatment"] = "temp_mv"
-            elif control_level_col == "treatment_level_ph":
-                effect_size["treatment_level_t"] = group.name
-                if group.name >= 1:
-                    effect_size["treatment"] = "phtot_mv"
-
-            return effect_size
+    # identify control
+    control_df = df[df["treatment"] == "control"]
+    if control_df.empty:
+        print("control_df is empty for doi", df.doi.iloc[0])
+        print("losing", df.shape[0], "rows")
         return None
-
-    # process each group and append results
-    results_ph = df.groupby("treatment_level_ph").apply(
-        process_group, control_level_col="treatment_level_t"
-    )
-    results_t = df.groupby("treatment_level_t").apply(
-        process_group, control_level_col="treatment_level_ph"
-    )
-
-    # TODO: this doesn't add effects for where BOTH treatment levels change at once i.e. multivariate, the part which isn't in-level comparison
-    def process_orthogonal_group(df):
-        # identify absolute control
-        control_df = df[df["treatment"] == "control"]
-        control_series = calculate_control_values(control_df)
-
-        # for each row where treatment_level_t == treatment_level_ph, calculate effect size
-        treatment_df = df[
-            (df["treatment_level_t"] == df["treatment_level_ph"])
-            & (df["treatment"] != "control")
-        ]
-        if treatment_df.empty:
-            return None
-        # Calculate effect size for each row in treatment_df
-        effect_rows = []
-
-        for _, row in treatment_df.iterrows():
-            effect_row = calc_treatment_effect_for_row(row, control_series)
-            effect_rows.append(effect_row)
-        # Concatenate all rows to create the effect_size DataFrame
-        if effect_rows:
-            effect_size = pd.concat(effect_rows, axis=1).T.copy()
-            # update treatment label
-            effect_size["treatment"] = "phtot_temp_mv"
-            return effect_size
-
-    # process orthogonal group
-    results_orthogonal = process_orthogonal_group(df)
-
-    results = []
-    if not results_ph.empty:
-        results.append(results_ph.reset_index(drop=True))
-    if not results_t.empty:
-        results.append(results_t.reset_index(drop=True))
-    if results_orthogonal is not None:
-        results.append(results_orthogonal)
-
-    return results
+    control_series = calculate_control_values(control_df)
+    # calculate effect size for each row in treatment_df and create a list of results
+    effect_rows = []
+    for _, row in df.iterrows():
+        if row["treatment"] == "control":
+            continue
+        effect_row = calc_treatment_effect_for_row(row, control_series)
+        effect_rows.append(effect_row)
+    if effect_rows:
+        return pd.concat(effect_rows, axis=1).T.copy()
+    return None
 
 
 def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
@@ -503,9 +457,21 @@ def calc_treatment_effect_for_row(
     )
     t_in_c, ph_c = control_data["temp"], control_data["phtot"]
 
-    if np.isnan(mu_t) or np.isnan(mu_c) or np.isnan(sd_t) or np.isnan(sd_c):
+    if (
+        np.isnan(mu_t)
+        or np.isnan(mu_c)
+        or np.isnan(sd_t)
+        or np.isnan(sd_c)
+        or np.isnan(s_mu_t)
+        or np.isnan(s_mu_c)
+        or np.isnan(s_sd_t)
+        or np.isnan(s_sd_c)
+    ):
         print(
-            f"Missing data for effect size calculation. mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]"
+            f"Missing data for effect size calculation. "
+            f"Raw: mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, "
+            f"Std: s_mu_t: {s_mu_t:.3f}, s_mu_c: {s_mu_c:.3f}, s_sd_t: {s_sd_t:.3f}, s_sd_c: {s_sd_c:.3f}, "
+            f"n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]"
         )
         print(treatment_row.doi)
 
@@ -560,6 +526,10 @@ def calc_treatment_effect_for_row(
             "st_relative_calcification_var": st_rc_var,
             "st_absolute_calcification": st_abs_effect,
             "st_absolute_calcification_var": st_abs_var,
+            "st_cohens_d": st_d_effect,
+            "st_cohens_d_var": st_d_var,
+            "st_hedges_g": st_hg_effect,
+            "st_hedges_g_var": st_hg_var,
         }
     )
 
@@ -587,79 +557,170 @@ def calc_treatment_effect_for_row(
     return row_copy
 
 
-def calculate_effect_sizes_end_to_end(
-    raw_data_fp: str,
-    data_sheet_name: str,
-    climatology_data_fp: str = None,
-    selection_dict: dict = {"include": "yes"},
-) -> pd.DataFrame:
-    """
-    Calculate effect sizes from raw data and align with climatology data.
+# def calculate_effect_sizes_end_to_end(
+#     raw_data_fp: str,
+#     data_sheet_name: str,
+#     climatology_data_fp: str = None,
+#     selection_dict: dict = {"include": "yes"},
+# ) -> pd.DataFrame:
+#     """
+#     Calculate effect sizes from raw data and align with climatology data.
 
-    Args:
-        raw_data_fp (str or Path): Path to raw data file
-        data_sheet_name (str): Name of the sheet containing data
-        climatology_data_fp (str or Path): Path to climatology data file
-        selection_dict (dict): Dictionary of selection criteria
+#     Args:
+#         raw_data_fp (str or Path): Path to raw data file
+#         data_sheet_name (str): Name of the sheet containing data
+#         climatology_data_fp (str or Path): Path to climatology data file
+#         selection_dict (dict): Dictionary of selection criteria
 
-    Returns:
-        pd.DataFrame: DataFrame with calculated effect sizes
-    """
-    # load and process carbonate chemistry data
-    carbonate_df = carbonate_processing.populate_carbonate_chemistry(
-        raw_data_fp, data_sheet_name, selection_dict=selection_dict
-    )
+#     Returns:
+#         pd.DataFrame: DataFrame with calculated effect sizes
+#     """
+#     # load and process carbonate chemistry data
+#     carbonate_df = carbonate_processing.populate_carbonate_chemistry(
+#         raw_data_fp, data_sheet_name, selection_dict=selection_dict
+#     )
 
-    # prepare for alignment with climatology by uniquifying DOIs
-    print(
-        f"\nShape of dataframe with all rows marked for inclusion: {carbonate_df.shape}"
-    )
+#     # prepare for alignment with climatology by uniquifying DOIs
+#     print(
+#         f"\nShape of dataframe with all rows marked for inclusion: {carbonate_df.shape}"
+#     )
 
-    # save selected columns of carbonate dataframe to file for reference
-    carbonate_save_fields = file_ops.read_yaml(config.resources_dir / "mapping.yaml")[
-        "carbonate_save_columns"
-    ]
-    carbonate_df[carbonate_save_fields].to_csv(
-        config.tmp_data_dir / "carbonate_chemistry.csv", index=False
-    )
+#     # save selected columns of carbonate dataframe to file for reference
+#     carbonate_save_fields = file_ops.read_yaml(config.resources_dir / "mapping.yaml")[
+#         "carbonate_save_columns"
+#     ]
+#     carbonate_df[carbonate_save_fields].to_csv(
+#         config.tmp_data_dir / "carbonate_chemistry.csv", index=False
+#     )
 
-    # assign treatment groups
-    carbonate_df_tgs = groups_processing.assign_treatment_groups_multilevel(
-        carbonate_df
-    )
+#     # assign treatment groups
+#     carbonate_df_tgs = groups_processing.assign_treatment_groups_multilevel(
+#         carbonate_df
+#     )
 
-    carbonate_df_tgs_no_ones = (
-        groups_processing.aggregate_treatments_rows_with_individual_samples(
-            carbonate_df_tgs
-        )
-    )
-    # calculate effect size
-    print("\nCalculating effect sizes...")
-    effects_df = calculate_effect_for_df(carbonate_df_tgs_no_ones).reset_index(
-        drop=True
-    )
+#     carbonate_df_tgs_no_ones = (
+#         groups_processing.aggregate_treatments_rows_with_individual_samples(
+#             carbonate_df_tgs
+#         )
+#     )
+#     # calculate effect size
+#     print("\nCalculating effect sizes...")
+#     effects_df = calculate_effect_for_df(carbonate_df_tgs_no_ones).reset_index(
+#         drop=True
+#     )
 
-    # save results
-    save_cols = file_ops.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
-    effects_df["year"] = pd.to_datetime(effects_df["year"]).dt.strftime(
-        "%Y"
-    )  # cast year from pd.timestamp to integer
-    # check for missing columns in save_cols
-    missing_columns = [col for col in save_cols if col not in effects_df.columns]
-    if missing_columns:
-        print(
-            f"\nWARNING: The following columns in save_cols are not in effects_df: {missing_columns}"
-        )
-        # filter save_cols to only include columns that exist in effects_df
-        available_save_cols = [col for col in save_cols if col in effects_df.columns]
-        effects_df[available_save_cols].to_csv(
-            config.tmp_data_dir / "effect_sizes.csv", index=False
-        )
-    else:
-        effects_df[save_cols].to_csv(
-            config.tmp_data_dir / "effect_sizes.csv", index=False
-        )
+#     # save results
+#     save_cols = file_ops.read_yaml(config.resources_dir / "mapping.yaml")["save_cols"]
+#     effects_df["year"] = pd.to_datetime(effects_df["year"]).dt.strftime(
+#         "%Y"
+#     )  # cast year from pd.timestamp to integer
+#     # check for missing columns in save_cols
+#     missing_columns = [col for col in save_cols if col not in effects_df.columns]
+#     if missing_columns:
+#         print(
+#             f"\nWARNING: The following columns in save_cols are not in effects_df: {missing_columns}"
+#         )
+#         # filter save_cols to only include columns that exist in effects_df
+#         available_save_cols = [col for col in save_cols if col in effects_df.columns]
+#         effects_df[available_save_cols].to_csv(
+#             config.tmp_data_dir / "effect_sizes.csv", index=False
+#         )
+#     else:
+#         effects_df[save_cols].to_csv(
+#             config.tmp_data_dir / "effect_sizes.csv", index=False
+#         )
 
-    print(f"\nShape of dataframe with effect sizes: {effects_df.shape}")
+#     print(f"\nShape of dataframe with effect sizes: {effects_df.shape}")
 
-    return effects_df
+#     return effects_df
+
+
+# def process_group_multivar(df: pd.DataFrame) -> pd.DataFrame:
+#     """
+#     Process a group of species data to calculate effect size.
+
+#     Args:
+#         df (pd.DataFrame): DataFrame containing data for a specific species
+
+#     Returns:
+#         pd.DataFrame: DataFrame with effect size calculations
+#     """
+
+#     def process_group(group, control_level_col):
+#         control_level = min(group[control_level_col])
+#         control_df = group[group[control_level_col] == control_level]
+#         treatment_df = group[group[control_level_col] > control_level]
+
+#         if treatment_df.empty:  # skip if there's no treatment data
+#             return
+
+#         control_series = calculate_control_values(control_df)
+
+#         # calculate effect size for each row in treatment_df and create a list of results
+#         effect_rows = []
+#         for _, row in treatment_df.iterrows():
+#             effect_row = calc_treatment_effect_for_row(row, control_series)
+#             effect_rows.append(effect_row)
+
+#         # concatenate all rows to create the effect_size DataFrame
+#         if effect_rows:
+#             effect_size = pd.concat(effect_rows, axis=1).T.copy()
+
+#             # update treatment label
+#             if control_level_col == "treatment_level_t":
+#                 effect_size["treatment_level_ph"] = group.name
+#                 if group.name >= 1:
+#                     effect_size["treatment"] = "temp_mv"
+#             elif control_level_col == "treatment_level_ph":
+#                 effect_size["treatment_level_t"] = group.name
+#                 if group.name >= 1:
+#                     effect_size["treatment"] = "phtot_mv"
+
+#             return effect_size
+#         return None
+
+#     # process each group and append results
+#     results_ph = df.groupby("treatment_level_ph").apply(
+#         process_group, control_level_col="treatment_level_t"
+#     )
+#     results_t = df.groupby("treatment_level_t").apply(
+#         process_group, control_level_col="treatment_level_ph"
+#     )
+
+#     def process_orthogonal_group(df):
+#         # identify absolute control
+#         control_df = df[df["treatment"] == "control"]
+#         control_series = calculate_control_values(control_df)
+
+#         # for each row where treatment_level_t == treatment_level_ph, calculate effect size
+#         treatment_df = df[
+#             (df["treatment_level_t"] == df["treatment_level_ph"])
+#             & (df["treatment"] != "control")
+#         ]
+#         if treatment_df.empty:
+#             return None
+#         # Calculate effect size for each row in treatment_df
+#         effect_rows = []
+
+#         for _, row in treatment_df.iterrows():
+#             effect_row = calc_treatment_effect_for_row(row, control_series)
+#             effect_rows.append(effect_row)
+#         # Concatenate all rows to create the effect_size DataFrame
+#         if effect_rows:
+#             effect_size = pd.concat(effect_rows, axis=1).T.copy()
+#             # update treatment label
+#             effect_size["treatment"] = "phtot_temp_mv"
+#             return effect_size
+
+#     # process orthogonal group
+#     results_orthogonal = process_orthogonal_group(df)
+
+#     results = []
+#     if not results_ph.empty:
+#         results.append(results_ph.reset_index(drop=True))
+#     if not results_t.empty:
+#         results.append(results_t.reset_index(drop=True))
+#     if results_orthogonal is not None:
+#         results.append(results_orthogonal)
+
+#     return results
