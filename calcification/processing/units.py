@@ -128,6 +128,10 @@ def rate_conversion(
 
     Returns:
         tuple[float, float | None, str]: The converted rate value, error, and unit.
+
+    Notes:
+        - if unit is area-normalised, will return gCaCO3 per day per cm2
+        - if unit is mass-normalised, will return gCaCO3 per day per g
     """
     if rate_unit is None or rate_unit != rate_unit:
         if rate_error is not None:
@@ -175,7 +179,7 @@ def map_units(df: pd.DataFrame) -> pd.DataFrame:
     """Map units to standardised units."""
     map_dict = file_ops.read_yaml(config.resources_dir / "mapping.yaml")["unit_map"]
     inverted_map = {val: key for key, values in map_dict.items() for val in values}
-    df["st_calcification_unit"] = df["calcification_unit"].map(inverted_map)
+    df.loc[:, "st_calcification_unit"] = df["calcification_unit"].map(inverted_map)
     if df["st_calcification_unit"].isnull().any():
         missing_units = df.loc[
             df["st_calcification_unit"].isnull(), "calcification_unit"
