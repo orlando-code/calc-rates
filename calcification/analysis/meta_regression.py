@@ -1,6 +1,5 @@
 import logging
 import os
-from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -49,11 +48,11 @@ class MetaforModel:
         self.model = None
         self.summary = None
         self.fitted = False
-        self.required_columns = analysis_utils._get_required_columns(
-            self.treatment, self.effect_type, self.effect_type_var, required_columns
-        )
         self.formula = self._get_model_formula() if formula is None else formula
         self.formula_components = self._get_formula_components()
+        self.required_columns = analysis_utils._get_required_columns(
+            self.treatment, self.effect_type, self.formula_components, required_columns
+        )
         self._prepare_data()
         self._get_r_df()
         self.save_summary = save_summary
@@ -69,14 +68,15 @@ class MetaforModel:
         self.df = analysis_utils.preprocess_df_for_meta_model(
             self.df,
             self.effect_type,
-            self.effect_type_var,
             self.treatment,
-            self.formula,
+            self.formula_components,
             self.verbose,
         )
 
     def _get_formula_components(self) -> dict:
-        return analysis_utils.get_formula_components(self.formula)
+        formula_components = analysis_utils.get_formula_components(self.formula)
+        self.intercept = formula_components["intercept"]
+        return formula_components
 
     def predict_on_moderator_values(
         self, moderator_names: list[str], moderator_vals: pd.DataFrame
@@ -99,6 +99,7 @@ class MetaforModel:
         return {
             "formula": self.formula,
             "formula_components": self.formula_components,
+            "treatment": self.treatment,
         }
 
     def get_model_summary(self) -> None:
@@ -168,15 +169,19 @@ def predict_curve(
 
 # --- Meta-analysis ---
 def _extract_model_components(
-    model: ro.vectors.ListVector, moderator_name: str
+    model: ro.vectors.ListVector, moderator_names: str | list[str]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Extract xi (moderator values), yi (effect sizes), vi (variance) from the model, and mask out missing values."""
-    moderator_index = analysis_utils.get_moderator_index(model, moderator_name)
+    moderator_index = analysis_utils.get_moderator_index(model, moderator_names)
+    if isinstance(moderator_index, list):
+        moderator_indices = moderator_index
+    else:
+        moderator_indices = [moderator_index]
     yi = np.array(model.rx2("yi.f"))
     vi = np.array(model.rx2("vi.f"))
-    xi = np.array(model.rx2("X.f"))[:, moderator_index]
+    xi = np.array(model.rx2("X.f"))[:, moderator_indices]
     # mask for missing values
-    mask = ~np.isnan(yi) & ~np.isnan(vi) & ~np.isnan(xi).any(axis=0)
+    mask = (~np.isnan(yi)) & (~np.isnan(vi)) & (~np.isnan(xi).any(axis=1))
     if not all(mask):
         yi = yi[mask]
         vi = vi[mask]
@@ -214,10 +219,19 @@ def _get_xs_and_prediction_limits(
     num_prediction_points: int = 1000,
 ) -> tuple[np.ndarray, tuple[float, float]]:
     """Compute xs (x values for regression line) and prediction_limits (min and max x values) if not provided."""
-    range_xi = max(xi) - min(xi)
-    if prediction_limits is None:
-        prediction_limits = (min(xi) - 0.1 * range_xi, max(xi) + 0.1 * range_xi)
-    xs = np.linspace(prediction_limits[0], prediction_limits[1], num_prediction_points)
+    xs = np.zeros((num_prediction_points, xi.shape[1]))
+    if np.shape(xi)[0] > 1:  # for polynomials
+        for i in range(xi.shape[1]):
+            if i == 0:
+                xs[:, i] = np.linspace(
+                    np.min(xi[:, i]), np.max(xi[:, i]), num_prediction_points
+                )
+            else:
+                xs[:, i] = xs[:, i - 1] ** (i + 1)
+
+    else:
+        xs = np.linspace(np.min(xi), np.max(xi), num_prediction_points)
+
     return xs, prediction_limits
 
 
@@ -244,7 +258,7 @@ def _build_newmods_matrix(
     Xnew = np.tile(X_means, (npoints, 1))
     for i, mod in enumerate(moderator_names):
         mod_idx = all_mods.index(mod)
-        Xnew[:, mod_idx] = xs[i, :]
+        Xnew[:, mod_idx] = xs[:, i]
     # handle interaction effects (e.g., "delta_ph:delta_t")
     interaction_mods = [mod for mod in all_mods if ":" in mod]
     for interaction_mod in interaction_mods:
@@ -276,14 +290,17 @@ def metafor_predict_from_model(
     """
     if isinstance(moderator_names, str):
         moderator_names = [moderator_names]
-    if len(xs.shape) != 1:
-        if xs.shape[0] != len(moderator_names):
-            raise ValueError("xs columns must match number of moderator_names")
+    # if len(xs.shape) != 1:
+    #     if xs.shape[0] != len(moderator_names):
+    #         raise ValueError("xs columns must match number of moderator_names")
     xs = np.atleast_2d(xs)
 
     Xnew = _build_newmods_matrix(model, moderator_names, xs, npoints=npoints)
     # convert to R matrix
     Xnew_r = ro.r.matrix(ro.FloatVector(Xnew.flatten()), nrow=Xnew.shape[0], byrow=True)
+    # fit model on everything
+    # predict on everything else but with the main moderator set to zero
+    # subtract from actual datapoints
     # predict
     predict = ro.r("predict")
     pred_res = predict(model, newmods=Xnew_r, level=(confidence_level / 100))
@@ -409,15 +426,19 @@ def _generate_interactive_moderator_value(
     return mod_matrix[:, mod1_idx] * mod_matrix[:, mod2_idx]
 
 
-@dataclass
 class DredgeConfig:
-    """Configuration for dredge analysis."""
+    """Configuration for dredge analysis.
+
+    N.B. provide global_formula as e.g.
+    """
 
     effect_type: str = "st_relative_calcification"
-    treatment: list[str] = None
+    treatment: list[str] = ["temp", "phtot", "phtot_temp_mv"]
     x_var: str = "temp"
     n_cores: int = 16
-    global_formula: Optional[str] = None
+    global_formula: Optional[str] = (
+        f"{effect_type} ~ phtot + temp + delta_ph + delta_t + I(delta_t^2) + factor(core_grouping) - 1"
+    )
     random_effects: str = "~ 1 | original_doi/ID"
 
 
@@ -429,7 +450,12 @@ class DredgeAnalysis:
     robust error handling and automatic fallback.
     """
 
-    def __init__(self, df: pd.DataFrame, config: Optional[DredgeConfig] = None):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        config: Optional[DredgeConfig] = None,
+        treatment: Optional[list[str]] = None,
+    ):
         """
         Initialize DredgeAnalysis with data and configuration.
 
@@ -441,6 +467,7 @@ class DredgeAnalysis:
         self.config = config or DredgeConfig()
         self.results = None
         self._validate_data()
+        self.treatment = treatment or self.config.treatment
 
     def _validate_data(self) -> None:
         """Validate that required columns exist in the DataFrame."""
@@ -459,7 +486,7 @@ class DredgeAnalysis:
             self.df,
             self.config.effect_type,
             effect_type_var=None,
-            treatment=self.config.treatment,
+            treatment=self.treatment,
             formula=self.config.global_formula,
         )
 
