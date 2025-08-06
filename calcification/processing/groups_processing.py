@@ -50,6 +50,7 @@ def aggregate_treatments_rows_with_individual_samples(df: pd.DataFrame) -> pd.Da
     """
     # aggregate data by treatment group (within each study, separate by species_types, calcification_unit, and treatment levels)
     group_cols = [
+        "original_doi",
         "doi",
         "species_types",
         "treatment_level_ph",
