@@ -67,34 +67,126 @@ def interpolate_spline(
 
 
 class Polynomial:
-    """Fancy formatting for polynomial strings
+    """Infer mathematical equation form and return in standard notation with 'x' as variable
+
+    Takes coefficient names and values, infers the mathematical structure, and returns
+    a standardized equation using 'x' as the variable (e.g., 'x$^2$+x+3').
 
     Args:
-        coefficients (list): List of coefficients for the polynomial.
+        coefficient_names (list): List of coefficient names.
+            - "intrcpt" for intercept terms (power 0)
+            - "I(var^power)" for R-style power terms (e.g., "I(temp^2)" becomes x^2)
+            - "var^power" for power terms (e.g., "ph^2" becomes x^2)
+            - "var" for linear terms (e.g., "temp" becomes x)
+        coefficient_values (list): List of numerical coefficient values.
         dps (int, optional): Decimal places to round coefficients to. Default is 2.
 
     Returns:
-        str: Formatted polynomial string.
+        str: Standardized mathematical equation string using 'x' as variable.
 
     Methods:
-        __str__(): Returns the formatted polynomial string.
-        format_coeff(coeff): Formats the coefficient for display.
-        format_power(power): Formats the power for display.
+        __str__(): Returns the standardized equation string.
+        format_coeff(coeff): Formats the coefficient for display (legacy).
+        format_power(power): Formats the power for display (legacy).
+        format_power_term(var_name, power): Formats a power term with variable and power (legacy).
     """
 
-    def __init__(self, coefficients, dps=2):
-        self.coeffs = coefficients
+    def __init__(self, coefficient_names, coefficient_values, dps=2):
+        self.coeff_names = coefficient_names
+        self.coeff_vals = coefficient_values
         self.dps = dps
 
     def __str__(self):
-        chunks = []
-        for coeff, power in zip(self.coeffs, range(len(self.coeffs) - 1, -1, -1)):
+        # Dictionary to store terms by power: {power: coefficient}
+        term_powers = {}
+
+        for coeff_name, coeff_val in zip(self.coeff_names, self.coeff_vals):
+            if coeff_val == 0:
+                continue
+
+            # Round coefficient value
+            coeff_val = round(coeff_val, self.dps)
+
+            # Determine the power of this term
+            if coeff_name.lower() == "intrcpt":
+                # Intercept term - power 0
+                power = 0
+            elif coeff_name.startswith("I(") and coeff_name.endswith(")"):
+                # R-style I(var^power) term
+                inner_expr = coeff_name[2:-1]  # Remove "I(" and ")"
+                if "^" in inner_expr:
+                    var_name, power_str = inner_expr.split("^", 1)
+                    try:
+                        power = int(power_str)
+                    except ValueError:
+                        # If power is not an integer, treat as linear
+                        power = 1
+                else:
+                    # I(var) without power - treat as linear
+                    power = 1
+            elif "^" in coeff_name:
+                # Power term - extract power
+                var_name, power_str = coeff_name.split("^", 1)
+                try:
+                    power = int(power_str)
+                except ValueError:
+                    # If power is not an integer, treat as linear
+                    power = 1
+            else:
+                # Linear term
+                power = 1
+
+            # Store coefficient for this power
+            if power in term_powers:
+                term_powers[power] += coeff_val
+            else:
+                term_powers[power] = coeff_val
+
+        if not term_powers:
+            return "0"
+
+        # Build the equation in standard form, sorted by decreasing powers
+        terms = []
+        for power in sorted(term_powers.keys(), reverse=True):
+            coeff = term_powers[power]
             if coeff == 0:
                 continue
-            chunks.append(self.format_coeff(round(coeff, self.dps)))
-            chunks.append(self.format_power(power))
-        chunks[0] = chunks[0].lstrip("+")
-        return "".join(chunks)
+
+            # Format the term based on power and coefficient
+            if power == 0:
+                # Constant term
+                term = str(coeff)
+            elif power == 1:
+                # Linear term
+                if coeff == 1:
+                    term = "x"
+                elif coeff == -1:
+                    term = "-x"
+                else:
+                    term = f"{coeff}x"
+            else:
+                # Higher power term
+                if coeff == 1:
+                    term = f"x$^{power}$"
+                elif coeff == -1:
+                    term = f"-x$^{power}$"
+                else:
+                    term = f"{coeff}x$^{power}$"
+
+            terms.append(term)
+
+        # Join terms with appropriate signs
+        if not terms:
+            return "0"
+
+        result = terms[0]
+        for term in terms[1:]:
+            if term.startswith("-"):
+                result += term
+            else:
+                result += f"+{term}"
+
+        return result
 
     @staticmethod
     def format_coeff(coeff):
@@ -102,7 +194,17 @@ class Polynomial:
 
     @staticmethod
     def format_power(power):
-        return "x" if power == 1 else "x^{0}".format(power) if power != 0 else ""
+        return "x" if power == 1 else f"x$^{power}$" if power != 0 else ""
+
+    @staticmethod
+    def format_power_term(var_name, power):
+        """Format a power term with variable name and power."""
+        if power == 0:
+            return ""
+        elif power == 1:
+            return var_name
+        else:
+            return f"{var_name}$^{power}$"
 
 
 def format_geo_axes(
