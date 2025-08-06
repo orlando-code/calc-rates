@@ -134,27 +134,100 @@ def calculate_calcification_sd(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def standardise_calcification_rates(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardise calcification rates."""
-    try:
-        df[["st_calcification", "st_calcification_sd", "st_calcification_unit"]] = (
-            df.apply(
-                lambda x: pd.Series(
-                    units.rate_conversion(
-                        x.get("calcification"),
-                        x.get("calcification_sd"),
-                        x.get("st_calcification_unit"),
-                    )
+    """Standardise calcification rates with proper error handling."""
+    df_copy = df.copy()
+
+    # Track problematic rows
+    problematic_rows = []
+    successful_conversions = 0
+
+    for idx, row in df_copy.iterrows():
+        try:
+            # Check if we have the required data for conversion
+            if pd.notna(row.get("calcification")) and pd.notna(
+                row.get("st_calcification_unit")
+            ):
+                # Perform the conversion
+                converted_rate, converted_sd, converted_unit = units.rate_conversion(
+                    row.get("calcification"),
+                    row.get("calcification_sd"),
+                    row.get("st_calcification_unit"),
                 )
-                if pd.notna(x.get("calcification"))
-                and pd.notna(x.get("st_calcification_unit"))
-                else pd.Series(["", "", ""]),
-                axis=1,
+
+                # Check if conversion was successful (not just copying original values)
+                if (
+                    converted_unit
+                    and converted_unit != ""
+                    and not converted_unit.startswith("Error")
+                ):
+                    df_copy.loc[idx, "st_calcification"] = converted_rate
+                    df_copy.loc[idx, "st_calcification_sd"] = converted_sd
+                    df_copy.loc[idx, "st_calcification_unit"] = converted_unit
+                    successful_conversions += 1
+                else:
+                    # Conversion failed or returned error
+                    problematic_rows.append(
+                        {
+                            "index": idx,
+                            "doi": row.get("doi", "Unknown"),
+                            "calcification": row.get("calcification"),
+                            "calcification_unit": row.get("calcification_unit"),
+                            "st_calcification_unit": row.get("st_calcification_unit"),
+                            "error": f"Conversion failed: {converted_unit}"
+                            if converted_unit
+                            else "No unit mapping",
+                        }
+                    )
+            else:
+                # Missing required data
+                missing_data = []
+                if pd.isna(row.get("calcification")):
+                    missing_data.append("calcification")
+                if pd.isna(row.get("st_calcification_unit")):
+                    missing_data.append("st_calcification_unit")
+
+                problematic_rows.append(
+                    {
+                        "index": idx,
+                        "doi": row.get("doi", "Unknown"),
+                        "calcification": row.get("calcification"),
+                        "calcification_unit": row.get("calcification_unit"),
+                        "st_calcification_unit": row.get("st_calcification_unit"),
+                        "error": f"Missing required data: {', '.join(missing_data)}",
+                    }
+                )
+
+        except Exception as e:
+            # Individual row conversion failed
+            problematic_rows.append(
+                {
+                    "index": idx,
+                    "doi": row.get("doi", "Unknown"),
+                    "calcification": row.get("calcification"),
+                    "calcification_unit": row.get("calcification_unit"),
+                    "st_calcification_unit": row.get("st_calcification_unit"),
+                    "error": f"Exception: {str(e)}",
+                }
             )
-        )
-    except Exception as e:
-        logger.error(f"Error during calcification rate standardisation: {e}")
-        raise
-    return df
+
+    # Log results
+    total_rows = len(df_copy)
+    logger.info(
+        f"Unit standardization complete: {successful_conversions}/{total_rows} rows converted successfully"
+    )
+
+    if problematic_rows:
+        logger.warning(f"Found {len(problematic_rows)} problematic rows:")
+        for problem in problematic_rows[:10]:  # Show first 10 problems
+            logger.warning(
+                f"  Row {problem['index']} (DOI: {problem['doi']}): {problem['error']}"
+            )
+        if len(problematic_rows) > 10:
+            logger.warning(
+                f"  ... and {len(problematic_rows) - 10} more problematic rows"
+            )
+
+    return df_copy
 
 
 def preprocess_df(
