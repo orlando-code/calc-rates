@@ -1,0 +1,14 @@
+effect_types:
+  - st_relative_calcification
+  - st_absolute_calcification
+model_formulae:
+  - delta_ph
+  - delta_t
+  - delta_ph + delta_t
+  - delta_ph * delta_t
+include_intercept:
+  - true
+  - false
+include_core_grouping:
+  - true
+  - false
