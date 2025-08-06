@@ -36,16 +36,20 @@ grdevices = importr("grDevices")
 class MetaRegressionConfig:
     color: str = "#1f77b4"
     ci_color: str = "#aec7e8"
-    figsize: Tuple[int, int] = (8, 6)
+    figsize: Tuple[int, int] = (6, 10)
     dpi: int = 150
     title: str = None
     xlabel: str = "Predictor"
-    ylabel: str = "Effect size"
-    legend_loc: str = "best"
+    # ylabel: str = "Effect size"
+    ylabel: str = "Relative calcification rate"
+    legend_loc: str = "lower center"
     point_size: str = "seinv"
     point_border_colours: str | list[str] = "black"
     point_fill_colours: str | list[str] = "white"
-    colorby: list = None
+    colorby: str = (
+        "core_grouping"  # Set to "core_grouping" for categorical core_grouping colors
+    )
+    cmap: str = "viridis"
     line_color: str = "blue"
     ci_color: str = "lightblue"
     ci_line_color: str = "blue"
@@ -62,7 +66,7 @@ class MetaRegressionConfig:
 class MetaRegressionPlotter:
     def __init__(
         self,
-        model: ro.vectors.ListVector,
+        model_object: meta_regression.MetaforModel,
         x_axis_moderator: str,
         fig: plt.Figure = None,
         ax: plt.Axes = None,
@@ -71,12 +75,17 @@ class MetaRegressionPlotter:
         prediction_limits: tuple[float, float] = None,
         config: Optional[MetaRegressionConfig] = None,
         future_global_anomaly_df: pd.DataFrame = None,
+        ylabel: str = None,
+        # point_fill_colours: list[float] | str = None,
+        # point_border_colours: list[str] | str = None,
     ):
         self.model_results = MetaRegressionResults(
-            model, x_axis_moderator, prediction_limits
+            model_object, x_axis_moderator, prediction_limits
         )
+
         self.config = config or MetaRegressionConfig()
         self.model_results.get_plotting_values()  # get the data for plotting
+        # self.xs = self.model_results.xs.squeeze()
         self.fig = fig
         self.ax = ax
         self.future_global_anomaly_df = future_global_anomaly_df
@@ -97,8 +106,12 @@ class MetaRegressionPlotter:
                 self.model_results.xi[i],
                 self.model_results.yi[i],
                 s=point_weights[i] ** 2,
-                edgecolor=point_border_colours[i],
-                facecolor=point_fill_colours[i],
+                edgecolor=point_border_colours[i]
+                if isinstance(point_border_colours, list)
+                else point_border_colours,
+                facecolor=point_fill_colours[i]
+                if isinstance(point_fill_colours, list)
+                else point_fill_colours,
                 zorder=3,
                 alpha=self.config.point_alpha,
             )
@@ -130,14 +143,7 @@ class MetaRegressionPlotter:
             ci_line_color=self.config.pi_line_color,
         )
         # plot dummy data for legend
-        ax.scatter(
-            [],
-            [],
-            edgecolor=self.config.point_border_colours[0],
-            facecolor=self.config.point_fill_colours[0],
-            alpha=self.config.point_alpha,
-            label="Study points",
-        )  # points
+        self._add_legend_points(ax)
         ax.plot(
             [],
             [],
@@ -217,13 +223,14 @@ class MetaRegressionPlotter:
         )
 
     def _format_fig(self, fig):
+        self._annotate_with_formula(fig.axes[0])
         fig.suptitle(self.config.title, fontsize=14)
         plt.tight_layout(rect=[0, 0, 1, 0.95])
 
     def _plot_confidence_interval(
         self, ax, xs, ci_lb, ci_ub, color, ci_line_color, label=None
     ):
-        ax.fill_between(xs, ci_lb, ci_ub, color=color, alpha=0.3)
+        ax.fill_between(xs.squeeze(), ci_lb, ci_ub, color=color, alpha=0.3)
         for bound in (ci_lb, ci_ub):
             self._plot_line(
                 ax, xs, bound, color=ci_line_color, style="--", linewidth=1, label=label
@@ -243,46 +250,140 @@ class MetaRegressionPlotter:
             self.model_results.vi, self.config.point_size
         )
 
-    def _get_point_colours(self):
-        # point border colours
-        if isinstance(self.config.point_border_colours, str):
-            point_border_colours = [self.config.point_border_colours] * len(
-                self.model_results.xi
-            )
-        elif isinstance(self.config.point_border_colours, list):
-            point_border_colours = self.config.point_border_colours
-        else:
-            raise ValueError("point_border_colours must be a string or list of strings")
+    def _annotate_with_formula(self, ax):
+        # get the formula from the model
+        formula = self.model_results.model_object.formula
+        # annotate the axis with the formula
+        ax.text(0.02, 0.98, formula, transform=ax.transAxes, fontsize=8)
 
-        # point fill colours
+    def _get_point_colours(self):
+        """Get a list of colours of the same length as the number of datapoints. For use with point fills or borders."""
+        # check if any of the colour strings are in the core_grouping list
+        if self.config.colorby == "core_grouping":
+            point_fills = self._get_core_grouping_colours()
+        else:
+            point_fills = self.config.point_fill_colours
+        # check that length of point fills is the same as the number of datapoints
+        self._check_colour_dimensions(point_fills)
+
+        if isinstance(self.config.point_border_colours, str):  # if string, fine
+            point_borders = self.config.point_border_colours
+        else:  # if
+            self._check_colour_dimensions(self.config.point_border_colours)
+            point_borders = self.config.point_border_colours
+        return point_borders, point_fills
+
+    def _process_colour_input(self):
+        # if a string (not core_grouping, since this taken care of), then fine, return it
         if isinstance(self.config.point_fill_colours, str):
-            point_fill_colours = [self.config.point_fill_colours] * len(
-                self.model_results.xi
-            )
-        elif isinstance(self.config.point_fill_colours, LinearSegmentedColormap):
-            point_fill_colours = self.config.point_fill_colours
-        elif isinstance(self.config.point_fill_colours, list):
-            # create a color map for the points
-            colorby = np.array(self.config.colorby)
-            self.unique_colors = np.unique(colorby)
-            self.color_map = {
-                color: plt.cm.viridis(i / len(self.unique_colors))
-                for i, color in enumerate(self.unique_colors)
-            }
-            point_fill_colours = [self.color_map[color] for color in colorby]
+            return self.config.point_fill_colours
+        # if it's a list of strings or floats or tuples, check that it's the same length as the number of datapoints
+        elif (
+            isinstance(self.config.point_fill_colours, list)
+            or isinstance(self.config.point_fill_colours, np.ndarray)
+            or isinstance(self.config.point_fill_colours, pd.Series)
+        ):
+            self._check_colour_dimensions(self.config.point_fill_colours)
+            if isinstance(self.config.point_fill_colours, np.ndarray) or isinstance(
+                self.config.point_fill_colours, pd.Series
+            ):
+                self.get_continuous_colours(self.config.point_fill_colours)
+            return self.config.point_fill_colours
+        # if it's a tuple (RGB), check that it has three (RGB) or four (RGBA) elements
+        elif isinstance(self.config.point_fill_colours, tuple):
+            if (
+                len(self.config.point_fill_colours) == 3
+                or len(self.config.point_fill_colours) == 4
+            ):
+                return self.config.point_fill_colours
+            else:
+                raise ValueError(
+                    "point_border_colours must be a tuple with three or four elements"
+                )
         else:
             raise ValueError(
-                "point_fill_colours must be a string, a numpy array, or LinearSegmentedColormap object"
+                "point_border_colours must be a string, list of values, or tuple"
             )
-        return point_border_colours, point_fill_colours
+
+    def _get_core_grouping_colours(self) -> list[str]:
+        """Get colors for core_grouping using standard color scheme."""
+        core_grouping_values = self.model_results.df.core_grouping
+        core_grouping_colours = plot_config.CG_COLOURS
+        # generate list of colours for the core_grouping values
+        core_grouping_colours = [
+            core_grouping_colours[val] for val in core_grouping_values
+        ]
+        return core_grouping_colours
+
+    def _check_colour_dimensions(self, colours: list[str | float]):
+        """Check that list of provided colours is the same length as number of datapoints"""
+        num_colours = len(colours)
+        num_datapoints = len(self.model_results.xi)
+        if not num_colours == num_datapoints:
+            raise ValueError(
+                f"Provided colour list not the same length as number of datapoints: colours {num_colours}, datapoints {num_datapoints}"
+            )
+
+    def _get_continuous_colours(self, color_values):
+        """Get colors for continuous values using a colormap."""
+        cmap = plt.get_cmap(self.config.cmap)
+        colors = cmap(color_values)
+        # border_colors = (
+        #     self.config.point_border_colours * len(color_values)
+        #     if isinstance(self.config.point_border_colours, str)
+        #     else self.config.point_border_colours
+        # )
+        return colors
+
+    def _add_legend_points(self, ax):
+        """Add legend points, either categorical by core_grouping or generic."""
+        if self.config.colorby == "core_grouping":
+            # Add legend entry for each core_grouping category
+            unique_groups = self.model_results.df.core_grouping.unique()
+            for group in unique_groups:
+                color = plot_config.CG_COLOURS.get(group, "gray")
+                border_color = self.config.point_border_colours
+                if isinstance(border_color, list):
+                    border_color = border_color[0]
+
+                ax.scatter(
+                    [],
+                    [],
+                    edgecolor=border_color,
+                    facecolor=color,
+                    alpha=self.config.point_alpha,
+                    label=group,
+                    s=50,  # Fixed size for legend
+                )
+        else:
+            # Generic legend for non-categorical coloring
+            border_color = self.config.point_border_colours
+            fill_color = self.config.point_fill_colours
+
+            if isinstance(border_color, list):
+                border_color = border_color[0]
+            if isinstance(fill_color, list):
+                fill_color = fill_color[0]
+
+            ax.scatter(
+                [],
+                [],
+                edgecolor=border_color,
+                facecolor=fill_color,
+                alpha=self.config.point_alpha,
+                label="Study points",
+                s=50,  # Fixed size for legend
+            )
 
     def _get_anomaly_variable_from_moderator(self):
-        if self.model_results.moderator == "delta_ph":
+        if "delta_ph" in self.model_results.moderator_names:
             return "ph"
-        elif self.model_results.moderator == "delta_t":
+        elif "delta_t" in self.model_results.moderator_names:
             return "sst"
         else:
-            raise ValueError(f"Moderator {self.model_results.moderator} not supported")
+            raise ValueError(
+                f"Moderator(s) {self.model_results.moderator_names} not supported"
+            )
 
     def _add_climatology_lines_to_plot(
         self,
@@ -340,20 +441,22 @@ class MetaRegressionPlotter:
 
 
 def plot_multiple_metaregression_axes(
-    model: ro.vectors.ListVector,
+    model_object: meta_regression.MetaforModel,
     x_axis_moderators: list[str],
     future_global_anomaly_df: pd.DataFrame = None,
     annotate_axes: bool = True,
     annotate_axes_fontsize: int = 16,
+    # colorby: list[str] = None,
 ) -> tuple[plt.Figure, plt.Axes]:
     """Wrapper for MetaRegressionPlotter to plot multiple axes on the same figure."""
     fig, ax = plt.subplots(1, len(x_axis_moderators), figsize=(12, 6), dpi=150)
     for axis_index, x_axis_moderator in enumerate(x_axis_moderators):
         MetaRegressionPlotter(
             ax=ax[axis_index],
-            model=model,
+            model_object=model_object,
             x_axis_moderator=x_axis_moderator,
             future_global_anomaly_df=future_global_anomaly_df,
+            # colorby=colorby,
         ).plot()
     if annotate_axes:
         plot_utils.annotate_axes_with_letters(ax, fontsize=annotate_axes_fontsize)
@@ -363,19 +466,22 @@ def plot_multiple_metaregression_axes(
 class MetaRegressionResults:
     def __init__(
         self,
-        model: ro.vectors.ListVector,
-        moderator: str = None,
+        model_object: meta_regression.MetaforModel,
+        moderator_names: str = None,
         prediction_limits: tuple[float, float] = None,
         confidence_level: float = 0.95,
+        round_dp: int = 2,
     ):
-        self.model = model
-        self.moderator = moderator
+        self.model_object = model_object
+        self.round_dp = round_dp
+        self.model = self.model_object.model
+        self.moderator_names = moderator_names
         self.prediction_limits = prediction_limits
         self.confidence_level_val = confidence_level
         self.get_model_summary()  # moderator-agnostic methods
         self.moderator_index = (
-            analysis_utils.get_moderator_index(self.model, self.moderator)
-            if self.moderator is not None
+            analysis_utils.get_moderator_index(self.model, self.moderator_names)
+            if self.moderator_names is not None
             else None
         )
 
@@ -383,12 +489,13 @@ class MetaRegressionResults:
 
     def get_model_summary(self) -> None:
         self.coeffs_vals = self._get_coeffs_vals()
-        self.moderator_names = analysis_utils.get_moderator_names(self.model)
+        self.all_moderator_names = analysis_utils.get_moderator_names(self.model)
         self.moderator_stats = self._get_moderator_stats()
         self.fit_method = str(self.model.rx2("method")[0])
         self.model_metadata = self._get_model_metadata()
         self.headline_stats = self._get_headline_stats()
         self.test_stats = self._get_test_stats()
+        self.df = self.model_object.df
 
     def _get_coeffs_vals(self):
         return np.array(self.model.rx2("b"))
@@ -398,8 +505,10 @@ class MetaRegressionResults:
         # table of estimate, se, zval, pval, ci.lb, ci.ub, prediction intervals?
         stats_df = pd.DataFrame()
         for stat_name in ["beta", "se", "zval", "pval", "ci.lb", "ci.ub"]:
-            stats_df[stat_name] = np.array(self.model.rx2(stat_name)).squeeze()
-        stats_df["moderator"] = self.moderator_names
+            stats_df[stat_name] = np.round(
+                np.array(self.model.rx2(stat_name)).squeeze(), self.round_dp
+            )
+        stats_df["moderator"] = self.all_moderator_names
         stats_df = stats_df.set_index("moderator")
         return stats_df
 
@@ -422,41 +531,51 @@ class MetaRegressionResults:
         headline_vars = ["logLik", "Deviance", "AIC", "BIC", "AICc"]
         headline_vars_df = pd.DataFrame(self.model.rx2("fit.stats"))
         if self.fit_method == "REML":
-            headline_vars_df = headline_vars_df.iloc[1]
+            vars_df = pd.DataFrame(headline_vars_df.iloc[1]).T
         elif self.fit_method == "ML":
-            headline_vars_df = headline_vars_df.iloc[0]
+            vars_df = pd.DataFrame(headline_vars_df.iloc[0]).T
         else:
             raise ValueError(f"Unknown fit method: {self.fit_method}")
-        headline_vars_df.columns = headline_vars
-        return headline_vars_df
+        # round values in vars_df
+        vars_df = vars_df.applymap(lambda x: np.round(x, self.round_dp))
+        vars_df.columns = headline_vars
+        return vars_df
 
     # --- Moderator specific methods ---
     def _get_regression_model_str(self):
-        # TODO: automate this better
-        return "$\\Delta$ pH" if self.moderator == "delta_ph" else "$\\Delta$ T"
+        return "$\\Delta$ pH" if "delta_ph" in self.moderator_names else "$\\Delta$T"
 
     def _get_polynomial_string(self):
+        # deal with quadratic+ terms
+        # get moderator names and their associated coefficients
+        mod_names = self.moderator_names
+        if self.model_object.intercept:
+            mod_coeffs = [self.moderator_stats.loc["intrcpt", "beta"]] + [
+                self.moderator_stats.loc[mod, "beta"] for mod in mod_names
+            ]
+        else:
+            mod_coeffs = [self.moderator_stats.loc[mod, "beta"] for mod in mod_names]
         return (
-            plot_utils.Polynomial(
-                np.concatenate(
-                    [self.coeffs_vals[self.moderator_index], self.coeffs_vals[0]]
-                )
-            )
+            plot_utils.Polynomial(mod_names, mod_coeffs[::-1])
             .__str__()
             .replace("x", self.regression_model_str)
         )
 
     def _get_basic_model_data_for_moderator(self):
         self.xi, self.yi, self.vi = meta_regression._extract_model_components(
-            self.model, self.moderator
+            self.model,
+            self.moderator_names,
+            # if isinstance(self.moderator_names, list)
+            # else self.moderator_names,
         )
         return self.xi, self.yi, self.vi
 
-    def _get_prediction_values(
+    def get_prediction_values(
         self,
         xs: np.ndarray = None,
         prediction_limits: tuple[float, float] = None,
     ):
+        self._get_basic_model_data_for_moderator()
         if xs is None:
             self.xs, self.prediction_limits = (
                 meta_regression._get_xs_and_prediction_limits(
@@ -470,7 +589,7 @@ class MetaRegressionResults:
         self.pred, self.se, self.ci_lb, self.ci_ub, self.pred_lb, self.pred_ub = (
             meta_regression.metafor_predict_from_model(
                 self.model,
-                self.moderator,
+                self.moderator_names,
                 self.xs,
                 self.confidence_level_val,
             )
@@ -481,7 +600,10 @@ class MetaRegressionResults:
         self.regression_model_str = self._get_regression_model_str()
         self.polynomial_string = self._get_polynomial_string()
         self._get_basic_model_data_for_moderator()
-        self._get_prediction_values(self.prediction_limits)
+        self.get_prediction_values(self.prediction_limits)
+        self.xi = self.xi[:, 0].squeeze() if self.xi.shape[0] > 1 else self.xi.squeeze()
+        self.xs = self.xs[:, 0].squeeze() if self.xs.shape[1] > 1 else self.xs.squeeze()
+        return self
 
 
 def plot_model_surface_2d(
