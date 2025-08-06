@@ -13,9 +13,9 @@ from calcification.utils import config, file_ops
 def preprocess_df_for_meta_model(
     df: pd.DataFrame,
     effect_type: str = "st_relative_calcification",
-    effect_type_var: bool = None,
-    treatment: list[str] = None,
-    formula: str = None,
+    treatment: list[str] | str = None,
+    # formula: str = None,
+    formula_components: dict = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     # TODO: get necessary variables more dynamically (probably via a mapping including factor)
@@ -31,20 +31,22 @@ def preprocess_df_for_meta_model(
 
     n_investigation = len(data)
     # remove nans for subset effect_type
-    required_columns = _get_required_columns(treatment, effect_type, effect_type_var)
-    data = data.dropna(
-        subset=[
-            required_col for required_col in required_columns if required_col != "1"
-        ]  # TODO: what is this doing?
-    )
+    required_columns = _get_required_columns(treatment, effect_type, formula_components)
+    data = data.dropna(subset=required_columns)
     data = data.convert_dtypes()
 
     n_nans = n_investigation - len(data)
+    # be more descriptive about where the nans are (print the number of nans for each column)
 
     # remove outliers
-    nparams = len(formula.split("+"))
-    data, n_cooks_outliers = analysis.remove_cooks_outliers(
-        data, effect_type=effect_type, nparams=nparams, verbose=verbose
+    # nparams = len(formula.split("+"))
+    nparams = (
+        len(formula_components["predictors"]) + 1
+        if formula_components["intercept"]
+        else len(formula_components["predictors"])
+    )
+    data, cooks_outliers = analysis.remove_cooks_outliers(
+        data, effect_type=effect_type, nparams=nparams, verbose=False
     )
 
     if verbose:
@@ -53,10 +55,14 @@ def preprocess_df_for_meta_model(
         print("Treatment: ", treatment)
         print("Total samples in input data: ", len(df))
         print("Total samples of relevant investigation: ", n_investigation)
-        print("Dropped due to NaN values in required columns:", n_nans)
-        print("Dropped due to Cook's distance:", len(n_cooks_outliers))
+        print("Dropped due to NaN values: ", n_nans)
+        nan_counts = df[required_columns].isna().sum()
+        for col, count in nan_counts.items():
+            if count > 0:
+                print(f"\t{col}: {count} NaNs")
+        print("Dropped due to Cook's distance: ", len(cooks_outliers))
         print(
-            f"Final sample count: {len(data)} ({n_nans + (len(df) - n_investigation)} rows dropped)"
+            f"Final sample count: {len(data)} ({len(cooks_outliers) + n_nans + (len(df) - n_investigation)} rows dropped)\n"
         )
 
     return data
@@ -82,20 +88,26 @@ def generate_metaregression_formula(
 
 
 def _get_required_columns(
-    treatment, effect_type, effect_type_var, required_columns=None
+    treatment, effect_type, formula_components, required_columns=None
 ):
-    # if required_columns is not None:
-    #     return required_columns
+    # get required columns from formula components
+    formula_requirements = formula_components["raw_predictors"]
+    # remove duplicates
 
-    treatment_vars = _get_treatment_vars(treatment)
-    effect_type_var = effect_type_var or f"{effect_type}_var"
-    base_columns = [
-        effect_type,
-        effect_type_var,
-        "original_doi",
-        "ID",
-        "core_grouping",
-    ] + treatment_vars
+    # treatment_vars = _get_treatment_vars(treatment)
+    effect_type_var = f"{effect_type}_var"
+    base_columns = (
+        [
+            "original_doi",
+            "ID",
+            "core_grouping",
+            "st_calcification_unit",
+            effect_type,
+            effect_type_var,
+        ]
+        # + treatment_vars
+        + formula_requirements
+    )
     return base_columns + required_columns if required_columns else base_columns
 
 
@@ -169,10 +181,19 @@ def get_formula_components(formula: str) -> dict:
     # remove any empty strings (could happen if formula is malformed)
     predictors = [p for p in predictors if p]
 
+    # get raw components e.g. if I(delta_t^2) -> delta_t
+    raw_predictors = [
+        p.split("^")[0].replace("I(", "") if p.startswith("I(") and "^" in p else p
+        for p in predictors
+    ]
+    # drop duplicates
+    raw_predictors = list(set(raw_predictors))
+
     return {
         "response": response,
         "predictors": predictors,
         "intercept": intercept,
+        "raw_predictors": raw_predictors,
     }
 
 
@@ -300,6 +321,12 @@ def get_moderator_names(model: ro.vectors.ListVector) -> list[str]:
     return beta_rownames
 
 
-def get_moderator_index(model: ro.vectors.ListVector, moderator_name: str) -> int:
+def get_moderator_index(
+    model: ro.vectors.ListVector, moderator_names: list[str]
+) -> int:
     """Get the index of the moderator variable in the predictors list, accounting for intercept."""
-    return get_moderator_names(model).index(moderator_name)
+    return (
+        get_moderator_names(model).index(moderator_names)
+        if isinstance(moderator_names, str)
+        else [get_moderator_names(model).index(name) for name in moderator_names]
+    )
