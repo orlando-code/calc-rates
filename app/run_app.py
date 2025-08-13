@@ -1,77 +1,72 @@
 #!/usr/bin/env python3
 """
-Launcher script for the Metafor Analysis App
+Launch script for the Metafor Streamlit App
 """
 
 import subprocess
 import sys
 from pathlib import Path
 
-# def check_requirements():
-#     """Check if required packages are installed."""
-#     try:
-#         import plotly
-#         import streamlit
 
-#         print("✅ Required packages found")
-#         return True
-#     except ImportError as e:
-#         print(f"❌ Missing required package: {e}")
-#         print("Install with: pip install -r requirements_app.txt")
-#         return False
+def check_environment():
+    """Check if we're in the right environment with required packages."""
+    required_packages = ["streamlit", "pandas", "plotly", "rpy2"]
+
+    missing_packages = []
+    for package in required_packages:
+        try:
+            __import__(package)
+        except ImportError:
+            missing_packages.append(package)
+
+    if missing_packages:
+        print(f"❌ Missing required packages: {', '.join(missing_packages)}")
+        print("💡 Make sure you're in the 'calcer' conda environment:")
+        print("   conda activate calcer")
+        print("   pip install streamlit plotly")
+        return False
+
+    print("✅ All required packages found")
+    return True
 
 
 def main():
     """Launch the Streamlit app."""
-    # Check if we're in the right environment
-    try:
-        import plotly
-        import streamlit
+    print("🔬 Launching Metafor Meta-Analysis Dashboard...")
 
-        print("✅ Required packages found")
-    except ImportError as e:
-        print(f"❌ Missing required package: {e}")
-        print("💡 Make sure you're in the 'calcer' conda environment:")
-        print("   conda activate calcer")
-        print("   pip install -r requirements_app.txt")
+    if not check_environment():
         sys.exit(1)
 
-    # Try the ultimate app first (combines best of all approaches)
-    app_paths = [
-        Path(__file__).parent / "metafor_ultimate_app.py",
-        Path(__file__).parent / "metafor_force_init_app.py",
-        Path(__file__).parent / "metafor_robust_app.py",
-        Path(__file__).parent / "metafor_simple_app.py",
-    ]
+    # Get the app file path
+    app_file = Path(__file__).parent / "metafor_streamlit_app.py"
 
-    app_path = None
-    for path in app_paths:
-        if path.exists():
-            app_path = path
-            break
-
-    if not app_path:
-        print(f"❌ No app files found. Tried: {[str(p) for p in app_paths]}")
+    if not app_file.exists():
+        print(f"❌ App file not found: {app_file}")
         sys.exit(1)
 
-    print("🚀 Launching Metafor Analysis Dashboard...")
     print("📊 App will open in your browser at http://localhost:8501")
-    print("⏹️  Press Ctrl+C to stop the app")
+    print("⏹️ Press Ctrl+C to stop the app")
 
-    # Launch Streamlit on a different port to avoid conflicts
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "streamlit",
-            "run",
-            str(app_path),
-            "--server.port",
-            "8501",
-            "--browser.gatherUsageStats",
-            "false",
-        ]
-    )
+    # Launch Streamlit
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "streamlit",
+                "run",
+                str(app_file),
+                "--server.port",
+                "8501",
+                "--server.headless",
+                "false",
+            ]
+        )
+    except KeyboardInterrupt:
+        print("\n👋 App stopped by user")
+    except Exception as e:
+        print(f"❌ Failed to launch app: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
