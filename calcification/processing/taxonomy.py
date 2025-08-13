@@ -19,6 +19,7 @@ def assign_taxonomical_info(df: pd.DataFrame) -> pd.DataFrame:
     if not mapping_path.exists():
         create_species_mapping_yaml(df.species_types.unique())
     else:
+        # TODO: confirm that there aren't any extra species
         logger.info(f"Using species mapping in {mapping_path}")
     species_mapping = file_ops.read_yaml(mapping_path)
     species_fields = ["family", "functional_group", "core_grouping"]
@@ -63,11 +64,13 @@ def get_species_info_from_worms(species_binomial: str) -> dict:
         if data and isinstance(data, list) and len(data) > 0:
             if (
                 len(data) > 1
-            ):  # if more than one record, take the most recent one which has 'accepted' status
+            ):  # if more than one record, take most recent with 'accepted' status
                 data = [
                     record for record in data if record.get("status", "") == "accepted"
                 ]
                 data = data[0] if data else data[0]
+            elif len(data) == 1:
+                data = data[0]
             else:
                 raise ValueError(f"No 'accepted' records found for {species_binomial}")
             result = {
@@ -87,6 +90,7 @@ def get_species_info_from_worms(species_binomial: str) -> dict:
             result["core_grouping"] = assign_core_groupings(result)
             return result
         else:
+            logger.warning(f"No data found for {species_binomial}")
             return {
                 "species": species_binomial,
                 "family": "Not Found",
@@ -182,7 +186,10 @@ def assign_functional_group(taxon_info: dict) -> str:
 
 def assign_core_groupings(taxon_info: dict) -> str:
     """Assign a core grouping (CCA, halimeda, coral, foraminifera, other) based on taxonomical information."""
-    if taxon_info.get("genus", "").lower() == "halimeda":
+    if "halimeda" in (
+        taxon_info.get("genus", "").lower(),
+        taxon_info.get("functional_group", "").lower(),
+    ):
         return "Halimeda"
     if (
         taxon_info["functional_group"]
@@ -194,6 +201,7 @@ def assign_core_groupings(taxon_info: dict) -> str:
         "Fleshy algae",
         "Turf algae",
         "Articulated coralline algae",
+        "Other algae",
     ]:
         return "Other algae"
     elif taxon_info["functional_group"] in ["Hard coral", "Soft coral"]:
