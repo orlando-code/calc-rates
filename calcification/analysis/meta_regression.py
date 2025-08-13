@@ -100,6 +100,8 @@ class MetaforModel:
             "formula": self.formula,
             "formula_components": self.formula_components,
             "treatment": self.treatment,
+            "factor_components": self.formula_components["factor_mods"],
+            "nonlinear_components": self.formula_components["nonlinear_mods"],
         }
 
     def get_model_summary(self) -> None:
@@ -302,14 +304,21 @@ def metafor_predict_from_model(
     # predict on everything else but with the main moderator set to zero
     # subtract from actual datapoints
     # predict
-    predict = ro.r("predict")
-    pred_res = predict(model, newmods=Xnew_r, level=(confidence_level / 100))
-    pred = np.array(pred_res.rx2("pred"))
-    se = np.array(pred_res.rx2("se"))
-    ci_lb = np.array(pred_res.rx2("ci.lb"))
-    ci_ub = np.array(pred_res.rx2("ci.ub"))
-    pred_lb = np.array(pred_res.rx2("pi.lb"))
-    pred_ub = np.array(pred_res.rx2("pi.ub"))
+    return get_metafor_prediction_from_model(model, Xnew_r, confidence_level)
+
+
+def get_metafor_prediction_from_model(
+    model: ro.vectors.ListVector,
+    Xnew: np.ndarray,
+    confidence_level: int = 95,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    predict_res = ro.r("predict")(model, newmods=Xnew, level=(confidence_level / 100))
+    pred = np.array(predict_res.rx2("pred"))
+    se = np.array(predict_res.rx2("se"))
+    ci_lb = np.array(predict_res.rx2("ci.lb"))
+    ci_ub = np.array(predict_res.rx2("ci.ub"))
+    pred_lb = np.array(predict_res.rx2("pi.lb"))
+    pred_ub = np.array(predict_res.rx2("pi.ub"))
     return pred, se, ci_lb, ci_ub, pred_lb, pred_ub
 
 
