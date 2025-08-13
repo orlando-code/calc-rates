@@ -205,3 +205,6 @@ graphics/
 figures/
 
 notebooks/deprecated/
+
+# tests aren't production-ready yet
+/tests
