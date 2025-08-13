@@ -14,11 +14,10 @@ def preprocess_df_for_meta_model(
     df: pd.DataFrame,
     effect_type: str = "st_relative_calcification",
     treatment: list[str] | str = None,
-    # formula: str = None,
     formula_components: dict = None,
+    drate_dvar_threshold: float = 100,
     verbose: bool = True,
 ) -> pd.DataFrame:
-    # TODO: get necessary variables more dynamically (probably via a mapping including factor)
     data = df.copy()
     df["original_doi"] = df["original_doi"].astype(str)
 
@@ -68,6 +67,21 @@ def preprocess_df_for_meta_model(
     return data
 
 
+def calculate_dvar(data: pd.DataFrame, treatment: str | list[str]) -> pd.DataFrame:
+    """Calculate the dvar for the data."""
+    # for each treatment, calculate the change in st_calcification wrt the control
+    # then calculate the dvar for each treatment
+    if isinstance(treatment, str):
+        treatment = [treatment]
+        for t in treatment:
+            d_calcification = (
+                data["st_treatment_calcification"] - data["st_control_calcification"]
+            )
+            data[f"dvar_{t}"] = d_calcification / data[t]
+
+    return data
+
+
 def generate_metaregression_formula(
     effect_type: str,
     treatment: str = None,
@@ -92,23 +106,26 @@ def _get_required_columns(
 ):
     # get required columns from formula components
     formula_requirements = formula_components["raw_predictors"]
-    # remove duplicates
+    if formula_requirements == ["0"]:
+        raise ValueError(
+            "Metafor formula requires at least one predictor e.g. an intercept"
+        )
 
-    # treatment_vars = _get_treatment_vars(treatment)
     effect_type_var = f"{effect_type}_var"
-    base_columns = (
-        [
-            "original_doi",
-            "ID",
-            "core_grouping",
-            "st_calcification_unit",
-            effect_type,
-            effect_type_var,
-        ]
-        # + treatment_vars
-        + formula_requirements
+    base_columns = [
+        "original_doi",
+        "ID",
+        "core_grouping",
+        "st_calcification_unit",
+        effect_type,
+        effect_type_var,
+    ]
+    use_columns = (
+        base_columns + formula_requirements
+        if formula_requirements != ["1"]
+        else base_columns
     )
-    return base_columns + required_columns if required_columns else base_columns
+    return use_columns + required_columns if required_columns else use_columns
 
 
 def _get_treatment_vars(treatment: str) -> list[str]:
@@ -146,37 +163,72 @@ def get_formula_components(formula: str) -> dict:
             "response": str,
             "predictors": list[str],
             "intercept": bool
+            "factor_mods": list[str],
+            "nonlinear_mods": list[str],
         }
     """
     # split formula into response and predictors
-    response_part, predictor_part = formula.split("~", 1)
-    response = response_part.strip()
-    predictors_str = predictor_part.strip()
+    print(formula)
+    response_part, predictor_part = [p.strip() for p in formula.split("~", 1)]
 
     # handle intercept removal: replace '-1' with a marker
-    predictors_str = predictors_str.replace(" ", "")
-    predictors_str = predictors_str.replace("-1", "+__NO_INTERCEPT__")
+    predictor_part = predictor_part.replace(" ", "")
+    predictor_part = predictor_part.replace("-1", "+__NO_INTERCEPT__")
 
     # split predictors on '+'
-    predictor_terms = predictors_str.split("+")
+    predictor_terms = predictor_part.split("+")
 
-    # flatten interaction terms (e.g., x1*x2 -> x1, x2)
     predictors = []
+    # flatten interaction terms (e.g., x1*x2 -> x1, x2)
+    interaction_terms = [p for p in predictor_terms if "*" in p]
+    for interaction_term in interaction_terms:
+        predictors.extend(interaction_term.split("*"))
+
     for term in predictor_terms:
-        if "*" in term:  # interaction term: split to get individual predictors
-            predictors.extend(term.split("*"))
-        else:
+        if term not in interaction_terms:
             predictors.append(term)
 
     # determine if intercept is included
     intercept = "__NO_INTERCEPT__" not in predictors
     predictors = [p for p in predictors if p and p != "__NO_INTERCEPT__"]
 
+    # determine factor moderators
+    factor_mods = [p for p in predictors if p.startswith("factor(")]
     # remove 'factor()' wrapper if present
-    predictors = [
-        p.replace("factor(", "").replace(")", "") if p.startswith("factor(") else p
-        for p in predictors
-    ]
+    raw_factor_mods = [p.replace("factor(", "").replace(")", "") for p in factor_mods]
+    raw_factor_mods = list(set(raw_factor_mods))
+
+    # determine non-linear moderators
+    nonlinear_mods = [p for p in predictors if "I(" in p]
+    raw_nonlinear_mods = [p.split("^")[0].replace("I(", "") for p in nonlinear_mods]
+    raw_nonlinear_mods = [p.replace(")", "") for p in raw_nonlinear_mods]
+    raw_nonlinear_mods = list(set(raw_nonlinear_mods))
+
+    # get list of the raw moderators (e.g. if I(x^2) -> x, factor(x) -> x, x1*x2 -> x1, x2)
+    raw_predictors = list(
+        set(
+            raw_nonlinear_mods
+            + raw_factor_mods
+            + interaction_terms
+            + [
+                p
+                for p in predictors
+                if p not in interaction_terms
+                and p not in factor_mods
+                and p not in nonlinear_mods
+            ]
+        )
+    )
+
+    # return list of moderators
+    return {
+        "response": response_part,
+        "predictors": predictors,
+        "raw_predictors": raw_predictors,
+        "factor_mods": raw_factor_mods,
+        "nonlinear_mods": raw_nonlinear_mods,
+        "intercept": intercept,
+    }
 
     # remove any empty strings (could happen if formula is malformed)
     predictors = [p for p in predictors if p]
@@ -190,7 +242,7 @@ def get_formula_components(formula: str) -> dict:
     raw_predictors = list(set(raw_predictors))
 
     return {
-        "response": response,
+        "response": response_part,
         "predictors": predictors,
         "intercept": intercept,
         "raw_predictors": raw_predictors,
