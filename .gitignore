@@ -207,4 +207,4 @@ figures/
 notebooks/deprecated/
 
 # tests aren't production-ready yet
-/tests
+app/tests/
