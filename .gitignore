@@ -208,3 +208,4 @@ notebooks/deprecated/
 
 # tests aren't production-ready yet
 app/tests/
+.vscode/
