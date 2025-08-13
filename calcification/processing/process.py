@@ -35,7 +35,8 @@ def process_extracted_calcification_data(
     # infer dtypes for columns that are not numeric
     effect_sizes_df = effect_sizes_df.infer_objects()
 
-    return effect_sizes_df, treatment_group_df
+    # return effect_sizes_df, treatment_group_df
+    return effect_sizes_df
 
 
 def process_raw_to_treatment_groups(
