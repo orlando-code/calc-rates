@@ -37,6 +37,7 @@ class MetaforModel:
         random: str = "~ 1 | original_doi/ID",
         required_columns: Optional[list[str]] = None,
         save_summary: bool = False,
+        dvar_threshold: float = 100,
         verbose: bool = True,
     ):
         self.df = df.copy()
@@ -44,6 +45,7 @@ class MetaforModel:
         self.effect_type_var = effect_type_var or f"{effect_type}_var"
         self.treatment = treatment
         self.random = random
+        self.dvar_threshold = dvar_threshold
         self.verbose = verbose
         self.model = None
         self.summary = None
@@ -51,7 +53,7 @@ class MetaforModel:
         self.formula = self._get_model_formula() if formula is None else formula
         self.formula_components = self._get_formula_components()
         self.required_columns = analysis_utils._get_required_columns(
-            self.treatment, self.effect_type, self.formula_components, required_columns
+            self.effect_type, self.formula_components, required_columns
         )
         self._prepare_data()
         self._get_r_df()
@@ -65,13 +67,15 @@ class MetaforModel:
 
     def _prepare_data(self):
         """Preprocess and subset the DataFrame for R model fitting."""
-        self.df = analysis_utils.preprocess_df_for_meta_model(
+        self.processed_df = analysis_utils.preprocess_df_for_meta_model(
             self.df,
             self.effect_type,
             self.treatment,
             self.formula_components,
+            self.dvar_threshold,
             self.verbose,
         )
+        return self.processed_df
 
     def _get_formula_components(self) -> dict:
         formula_components = analysis_utils.get_formula_components(self.formula)
@@ -119,7 +123,7 @@ class MetaforModel:
 
     def _get_r_df(self) -> ro.vectors.DataFrame:
         """Get the R dataframe for the model."""
-        df_subset = self.df[self.required_columns]
+        df_subset = self.processed_df[self.required_columns]
         with (ro.default_converter + pandas2ri.converter).context():
             df_r = pandas2ri.py2rpy(df_subset)
         self.df_r = df_r
@@ -283,7 +287,7 @@ def metafor_predict_from_model(
 
     Args:
         model (ro.vectors.ListVector): The fitted metafor model.
-        moderator_names (list[str]): list of moderator names (strings)
+        moderator_names (list[str]): list of moderator names (strings) e.g. ["delta_t", "delta_ph"]
         xs (np.ndarray): np.ndarray of shape (n_points, n_moderators)
         confidence_level (int): confidence level for the prediction intervals e.g. 95 for 95% CI
 
@@ -292,10 +296,14 @@ def metafor_predict_from_model(
     """
     if isinstance(moderator_names, str):
         moderator_names = [moderator_names]
-    # if len(xs.shape) != 1:
-    #     if xs.shape[0] != len(moderator_names):
-    #         raise ValueError("xs columns must match number of moderator_names")
-    xs = np.atleast_2d(xs)
+
+    xs = np.atleast_2d(xs)  # TODO: changed recently
+    if xs.shape[1] > xs.shape[0]:
+        # TODO: or could transpose at this point. Think SL and python are handling differently.
+        raise ValueError(
+            "Number of points to predict on is greater than number of samples in model. "
+            "This is not allowed."
+        )
 
     Xnew = _build_newmods_matrix(model, moderator_names, xs, npoints=npoints)
     # convert to R matrix
@@ -320,6 +328,37 @@ def get_metafor_prediction_from_model(
     pred_lb = np.array(predict_res.rx2("pi.lb"))
     pred_ub = np.array(predict_res.rx2("pi.ub"))
     return pred, se, ci_lb, ci_ub, pred_lb, pred_ub
+
+
+def detrend_model(
+    model: ro.vectors.ListVector,
+    moderator_of_interest: str,
+    moderator_names: list[str],
+    xs: np.ndarray,
+    confidence_level: int = 95,
+    npoints: int = 1000,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Separate the effect of the selected moderator from the rest of the model"""
+    # 1. run entire model
+    pred, se, ci_lb, ci_ub, pred_lb, pred_ub = metafor_predict_from_model(
+        model, moderator_names, xs, confidence_level, npoints
+    )
+    # 2. run model with moderator set to zero
+    Xnew = _build_newmods_matrix(model, moderator_names, xs, npoints=npoints)
+    # set moderator of interest to zero
+    Xnew[:, moderator_names.index(moderator_of_interest)] = 0
+    pred_zero, se_zero, ci_lb_zero, ci_ub_zero, pred_lb_zero, pred_ub_zero = (
+        get_metafor_prediction_from_model(model, Xnew, confidence_level)
+    )
+    # 3. subtract the second model from the first
+    return (
+        pred - pred_zero,
+        se - se_zero,
+        ci_lb - ci_lb_zero,
+        ci_ub - ci_ub_zero,
+        pred_lb - pred_lb_zero,
+        pred_ub - pred_ub_zero,
+    )
 
 
 def prediction_df_from_model(
@@ -441,14 +480,23 @@ class DredgeConfig:
     N.B. provide global_formula as e.g.
     """
 
-    effect_type: str = "st_relative_calcification"
-    treatment: list[str] = ["temp", "phtot", "phtot_temp_mv"]
-    x_var: str = "temp"
-    n_cores: int = 16
-    global_formula: Optional[str] = (
-        f"{effect_type} ~ phtot + temp + delta_ph + delta_t + I(delta_t^2) + factor(core_grouping) - 1"
-    )
-    random_effects: str = "~ 1 | original_doi/ID"
+    def __init__(
+        self,
+        effect_type: str,
+        treatment: list[str],
+        # x_var: str,
+        global_formula: str,
+        random_effects: str = "~ 1 | original_doi/ID",
+        n_cores: int = -1,
+        verbose: bool = True,
+    ):
+        self.effect_type = effect_type
+        self.treatment = treatment
+        # self.x_var = x_var
+        self.n_cores = n_cores
+        self.global_formula = global_formula
+        self.random_effects = random_effects
+        self.verbose = verbose
 
 
 class DredgeAnalysis:
@@ -477,6 +525,14 @@ class DredgeAnalysis:
         self.results = None
         self._validate_data()
         self.treatment = treatment or self.config.treatment
+        self.formula_components = self._get_formula_components()
+
+    def _get_formula_components(self) -> dict:
+        formula_components = analysis_utils.get_formula_components(
+            self.config.global_formula
+        )
+        self.intercept = formula_components["intercept"]
+        return formula_components
 
     def _validate_data(self) -> None:
         """Validate that required columns exist in the DataFrame."""
@@ -494,9 +550,9 @@ class DredgeAnalysis:
         self.df = analysis_utils.preprocess_df_for_meta_model(
             self.df,
             self.config.effect_type,
-            effect_type_var=None,
             treatment=self.treatment,
-            formula=self.config.global_formula,
+            formula_components=self.formula_components,
+            verbose=self.config.verbose,
         )
 
     def _setup_r_environment(self, formula: str) -> None:
