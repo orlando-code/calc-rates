@@ -58,6 +58,8 @@ class StreamlitMetaforAdapter(MetaforModel):
         random: str = "~ 1 | original_doi/ID",
         required_columns: list = None,
         save_summary: bool = False,
+        dvar_threshold: float = 100,
+        process_data: bool = True,
         verbose: bool = True,
         **kwargs,
     ):
@@ -74,6 +76,7 @@ class StreamlitMetaforAdapter(MetaforModel):
         self.random = random
         self.verbose = verbose
         self.save_summary = save_summary
+        self.dvar_threshold = dvar_threshold
         self.fitted = False
 
         # Streamlit-specific attributes
@@ -94,14 +97,16 @@ class StreamlitMetaforAdapter(MetaforModel):
             from calcification.analysis import analysis_utils
 
             self.required_columns = analysis_utils._get_required_columns(
-                self.treatment,
                 self.effect_type,
                 self.formula_components,
                 required_columns,
             )
 
             # Prepare data using parent's method
-            self._prepare_data()
+            if process_data:
+                self.processed_df = self._prepare_data()
+            else:  # assume already processed
+                self.processed_df = self.df
 
             # Set up R DataFrame using safe context
             self._safe_setup_r_df()
@@ -116,7 +121,7 @@ class StreamlitMetaforAdapter(MetaforModel):
             print("StreamlitMetaforAdapter initialized")
             print(f"   Formula: {self.formula}")
             print(f"   Treatment: {self.treatment}")
-            print(f"   Data shape: {self.df.shape}")
+            print(f"   Data shape: {self.processed_df.shape}")
 
     def _safe_setup_r_df(self):
         """Set up the R DataFrame using safe context."""
@@ -124,22 +129,22 @@ class StreamlitMetaforAdapter(MetaforModel):
             pandas2ri = r_ctx["pandas2ri"]
 
             # Use parent's logic for subsetting
-            df_subset = self.df[self.required_columns]
+            df_subset = self.processed_df[self.required_columns]
 
             # if factor moderators, check for n_levels > 2
-            for mod in self.formula_components["factor_mods"]:
-                if self.df[mod].nunique() < 2:
+            for mod in self.formula_components["factor_terms"]:
+                if self.processed_df[mod].nunique() < 2:
                     raise ValueError(
-                        f"⚠️ Factor moderator {mod} has {self.df[mod].nunique()} levels, which is less than 2. This may cause problems with the model."
+                        f"⚠️ Factor moderator {mod} has {self.processed_df[mod].nunique()} levels, which is less than 2. This may cause problems with the model."
                     )
-
+            self.df_subset = df_subset
             # Convert to R using safe context
             self.df_r = pandas2ri.py2rpy(df_subset)
 
             if self.verbose:
                 print(f"R DataFrame created with {len(df_subset)} rows")
 
-    def fit_model(self):
+    def fit_model(self, formula: str = None):
         """Fit the model using safe R context (override parent's method)."""
         try:
             with streamlit_safe_r_context() as r_ctx:
@@ -156,7 +161,9 @@ class StreamlitMetaforAdapter(MetaforModel):
                     yi=ro.FloatVector(self.df_r.rx2(self.effect_type)),
                     V=ro.FloatVector(self.df_r.rx2(self.effect_type_var)),
                     data=self.df_r,
-                    mods=ro.Formula(self.formula),
+                    mods=ro.Formula(self.formula)
+                    if formula is None
+                    else ro.Formula(formula),
                     random=ro.Formula(self.random),
                 )
 
@@ -277,7 +284,7 @@ class StreamlitMetaforAdapter(MetaforModel):
             # Method 5: Fallback to generic names
             if self.verbose:
                 print(
-                    f"⚠️  Expected {n_coef} coefficients, got {len(coef_names)} names. Using generic names."
+                    f"⚠️  Expected {n_coef} coefficients, got {len(coef_names)} names. This may be because all values of (one of) the moderators are the same. Using generic names."
                 )
             return [f"Coef {i + 1}" for i in range(n_coef)]
 
@@ -341,7 +348,9 @@ class StreamlitMetaforAdapter(MetaforModel):
                     var_name = term[7:-1]  # Remove "factor(" and ")"
                     if var_name in self.df.columns:
                         # Get unique values as they appear in the data
-                        unique_vals = sorted(self.df[var_name].dropna().unique())
+                        unique_vals = sorted(
+                            self.processed_df[var_name].dropna().unique()
+                        )
 
                         # When there's no intercept (- 1), R creates coefficients for ALL levels
                         # When there's an intercept, R creates n-1 dummy variables
@@ -489,15 +498,23 @@ class StreamlitMetaforAdapter(MetaforModel):
             # Add significance indicators
             p_vals = self.model_dict.get("pval", [np.nan] * n_coef)
             stats["Sig"] = [
-                "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
+                "***"
+                if p < 0.001
+                else "**"
+                if p < 0.01
+                else "*"
+                if p < 0.05
+                else "."
+                if p < 0.1
+                else ""
                 for p in p_vals[:n_coef]
             ]
 
             # Create the table
-            df = pd.DataFrame(stats, index=row_names)
+            display_df = pd.DataFrame(stats, index=row_names)
 
             # Format as string with proper spacing
-            table_str = df.to_string(
+            table_str = display_df.to_string(
                 float_format=lambda x: f"{x:.4f}"
                 if isinstance(x, (int, float))
                 else str(x),
@@ -505,7 +522,7 @@ class StreamlitMetaforAdapter(MetaforModel):
             )
 
             # Add significance legend
-            legend = "\nSignificance: *** p<0.001, ** p<0.01, * p<0.05"
+            legend = "\nSignificance: *** p<0.001, ** p<0.01, * p<0.05, . p<0.1"
 
             return table_str + legend
 
@@ -528,7 +545,7 @@ class StreamlitMetaforAdapter(MetaforModel):
     def get_model_summary_text(self) -> str:
         """Generate a summary text for Streamlit display."""
         stat_desc_strs = {
-            "k": "Number of studies",
+            "k": "Number of samples",
             "QE": "Residual heterogeneity",
             "QM": "Model test statistic",
             "LogLik": "Log-likelihood",
@@ -544,7 +561,7 @@ class StreamlitMetaforAdapter(MetaforModel):
             # format model summary
             lines = []
             lines.append("Metafor Model Summary")
-            lines.append("=" * 30)
+            lines.append("=" * len(self.formula))
             lines.append(f"Formula: {self.formula}")
             lines.append(f"Random Effects: {self.random}")
 

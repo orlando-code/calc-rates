@@ -23,6 +23,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 
+# TODO: investigate ratio of largest to smallest sampling variance extremely large (could just be showing that it works with Hedge's G and results look similar)
+# TODO: better outlier excluding (huge st_relative_calcification values)
+
+
 class StreamlitMetaRegressionPlotter:
     """
     Streamlit-compatible meta-regression plotter that works with the hybrid adapter.
@@ -31,11 +35,18 @@ class StreamlitMetaRegressionPlotter:
     instead of ro.vectors.ListVector objects.
     """
 
-    def __init__(self, fitted_adapter, moderator_name: str, colorby: str = None):
+    def __init__(
+        self,
+        fitted_adapter,
+        moderator_name: str,
+        colorby: str = None,
+        debug: bool = False,
+    ):
         """Initialize with a fitted StreamlitMetaforAdapter."""
         self.adapter = fitted_adapter
         self.moderator_name = moderator_name
         self.colorby = colorby
+        self.debug = debug
 
         if not self.adapter.fitted:
             raise ValueError("Adapter must be fitted before plotting")
@@ -43,11 +54,24 @@ class StreamlitMetaRegressionPlotter:
         # Extract plotting data
         self._extract_plotting_data()
 
+        # Initialize partial residuals as None (calculated on demand)
+        self.partial_residuals = None
+        self.partial_residuals_x = None
+        self.ord_residuals = None
+        self.fit_val = None  # Initialize to prevent AttributeError
+
+        if self.debug:
+            print(f"🐛 DEBUG: Initialized plotter for moderator '{moderator_name}'")
+            print(f"   Available data points: {len(self.xi)}")
+            print(f"   Effect type: {self.effect_type}")
+            print(f"   Formula: {self.adapter.formula}")
+
     def _extract_plotting_data(self):
         """Extract data needed for plotting from the adapter."""
         try:
-            # Get the original data and model components
-            self.df = getattr(self.adapter, "original_df", self.adapter.df)
+            # Get the subsetted data and model components
+            self.df = getattr(self.adapter, "df_subset", self.adapter.processed_df)
+            self.original_df = getattr(self.adapter, "df_original", self.adapter.df)
             self.model_dict = self.adapter.model_dict
 
             # Extract effect sizes and moderator values
@@ -109,14 +133,14 @@ class StreamlitMetaRegressionPlotter:
         """Generate predictions using the original metafor prediction functions."""
         try:
             with streamlit_safe_r_context() as r_ctx:
-                ro = r_ctx["ro"]
+                r_ctx["ro"]
 
                 # Convert the OrdDict r_model back to an R object temporarily
                 # This is a bit hacky but necessary for the prediction functions
 
                 # Get the required data for prediction
                 xi, yi, vi = self._extract_model_components_for_prediction()
-                # TODO: get formula for prediction regression
+                # TODO: get actual formula for prediction regression
 
                 # Generate prediction x values (similar to original)
                 xs, _ = meta_regression._get_xs_and_prediction_limits(
@@ -195,7 +219,7 @@ class StreamlitMetaRegressionPlotter:
                 return
 
             # Parse the formula to understand what terms are present
-            formula_rhs = self.adapter.formula.split("~")[1].strip()
+            # formula_rhs = self.adapter.formula.split("~")[1].strip()
 
             # Identify all variables in the model (excluding the plotting moderator)
             model_variables = set()
@@ -336,7 +360,7 @@ class StreamlitMetaRegressionPlotter:
 
             # 1) Prepare data in R using pandas converter (safe for DataFrame only)
             with lc(ro.default_converter + p2ri.converter):
-                r_df = ro.conversion.py2rpy(self.adapter.df)
+                r_df = ro.conversion.py2rpy(self.df)
             # 2) Rebuild native R model WITHOUT pandas2ri (avoid OrdDict conversion)
             ro.globalenv["d"] = r_df
             ro.globalenv["cl"] = self.adapter.r_model["call"]
@@ -392,11 +416,11 @@ class StreamlitMetaRegressionPlotter:
             # Initialize prediction array
             self.pred = np.zeros_like(self.xs)
 
-            # Parse the formula to understand what terms are present
-            formula_rhs = self.adapter.formula.split("~")[1].strip()
+            # # Parse the formula to understand what terms are present
+            # formula_rhs = self.adapter.formula.split("~")[1].strip()
 
-            # Check for intercept
-            has_intercept = "(Intercept)" in coef_names
+            # # Check for intercept
+            # has_intercept = "(Intercept)" in coef_names
 
             # Process each coefficient based on the formula
             for i, (coef_name, coef_value) in enumerate(zip(coef_names, coefficients)):
@@ -594,11 +618,336 @@ class StreamlitMetaRegressionPlotter:
 
         return colors
 
+    def _calculate_partial_residuals(self):
+        """Calculate partial residuals leveraging existing model fitting infrastructure.
+
+        Partial residuals show the relationship between a moderator and the outcome
+        after accounting for all other variables in the model.
+
+        Formula: partial_residuals = residuals(reduced_model) + β_moderator × moderator_values
+        """
+        if self.debug:
+            print(
+                f"\n🐛 DEBUG: Starting partial residuals calculation for '{self.moderator_name}'"
+            )
+
+        try:
+            # Use existing coefficient names if available
+            coef_names = getattr(self.adapter, "coefficient_names", [])
+            coefficients = self.adapter.coefficients.flatten()
+
+            if self.debug:
+                print("🐛 DEBUG: Model coefficients:")
+                for name, coef in zip(coef_names, coefficients):
+                    marker = "👉" if self.moderator_name in name else "  "
+                    print(f"   {marker} {name}: {coef:.4f}")
+
+            if len(coef_names) != len(coefficients):
+                raise ValueError("Coefficient names and values mismatch")
+
+            # Find ALL coefficients related to the moderator of interest
+            moderator_coefficients = []
+            moderator_terms = []
+
+            for i, name in enumerate(coef_names):
+                # Check if this coefficient involves the moderator
+                if self._coefficient_involves_moderator(name, self.moderator_name):
+                    moderator_coefficients.append(float(coefficients[i]))
+                    moderator_terms.append(name)
+                    if self.debug:
+                        print(
+                            f"   Found moderator term: {name} = {coefficients[i]:.4f}"
+                        )
+
+            if not moderator_coefficients:
+                raise ValueError(
+                    f"Could not find any coefficients for moderator '{self.moderator_name}'"
+                )
+
+            if self.debug:
+                print(f"   Total moderator terms found: {len(moderator_coefficients)}")
+                for term, coef in zip(moderator_terms, moderator_coefficients):
+                    print(f"     {term}: {coef:.4f}")
+
+            # Create a reduced formula by removing the moderator term
+            reduced_formula = self._create_reduced_formula()
+
+            if self.debug:
+                print("🐛 DEBUG: Formula reduction:")
+                print(f"   Original: {self.adapter.formula}")
+                print(f"   Reduced:  {reduced_formula}")
+
+            # Create a new adapter instance for the reduced model
+            reduced_adapter = self._fit_reduced_model(reduced_formula)
+
+            if reduced_adapter is None:
+                raise ValueError("Failed to fit reduced model")
+
+            # extract ordinary residuals from the REDUCED model (not the full model!)
+            ord_residuals = self._extract_residuals_from_adapter(reduced_adapter)
+            self.ord_residuals = ord_residuals
+            if ord_residuals is None:
+                raise ValueError("Failed to extract residuals from reduced model")
+
+            # Calculate partial residuals with multiple moderator terms
+            # For complex formulas like delta_t + I(delta_t^2), we need to sum the contributions
+            moderator_contribution = self._calculate_moderator_contribution(
+                moderator_terms, moderator_coefficients, self.xi
+            )
+            # calculate the partial residuals using the CORRECT formula:
+            # partial_residuals = residuals_from_reduced_model + beta_moderator * moderator_values
+            # This shows what the relationship would look like if ONLY the moderator of interest affected the outcome
+            self.partial_residuals = ord_residuals + moderator_contribution
+            self.partial_residuals_x = self.xi
+
+            if self.debug:
+                print("🐛 DEBUG: Partial residuals calculation:")
+                print(f"   Moderator terms: {moderator_terms}")
+                print(f"   Moderator coefficients: {moderator_coefficients}")
+                print(
+                    f"   Moderator contribution range: {np.min(moderator_contribution):.3f} to {np.max(moderator_contribution):.3f}"
+                )
+                print(
+                    f"   Reduced residuals range: {np.min(ord_residuals):.3f} to {np.max(ord_residuals):.3f}"
+                )
+                print(
+                    f"   Moderator values range: {np.min(self.xi):.3f} to {np.max(self.xi):.3f}"
+                )
+                print(
+                    f"   Partial residuals range: {np.min(self.partial_residuals):.3f} to {np.max(self.partial_residuals):.3f}"
+                )
+                print(
+                    f"   Original data range: {np.min(self.yi):.3f} to {np.max(self.yi):.3f}"
+                )
+
+            if self.adapter.verbose:
+                print(f"✅ Calculated partial residuals for {self.moderator_name}")
+                print(f"   Moderator terms: {len(moderator_terms)} terms found")
+                for term, coef in zip(moderator_terms, moderator_coefficients):
+                    print(f"     {term}: {coef:.4f}")
+                print(
+                    f"   Partial residuals range: {np.min(self.partial_residuals):.3f} to {np.max(self.partial_residuals):.3f}"
+                )
+                print(
+                    f"   Original data range: {np.min(self.yi):.3f} to {np.max(self.yi):.3f}"
+                )
+
+        except Exception as e:
+            print(f"⚠️ Failed to calculate partial residuals: {e}")
+            # Fallback: extract regular residuals from the current model
+            regular_residuals = self._extract_residuals_from_adapter(self.adapter)
+            if regular_residuals is not None:
+                self.partial_residuals = regular_residuals
+                self.partial_residuals_x = self.xi
+                print("⚠️ Using regular residuals instead of partial residuals")
+            else:
+                print("⚠️ Could not calculate any residuals")
+                self.partial_residuals = None
+                self.partial_residuals_x = None
+
+    def _coefficient_involves_moderator(
+        self, coef_name: str, moderator_name: str
+    ) -> bool:
+        """Check if a coefficient name involves the specified moderator."""
+        # Direct match
+        if coef_name == moderator_name:
+            return True
+
+        # Check for transformations like I(delta_t^2), I(delta_t + delta_ph), etc.
+        if coef_name.startswith("I(") and moderator_name in coef_name:
+            return True
+
+        # Check for interaction terms like delta_t:delta_ph
+        if ":" in coef_name and moderator_name in coef_name.split(":"):
+            return True
+
+        # Check for factor transformations like factor(delta_t)level
+        if coef_name.startswith(f"factor({moderator_name})"):
+            return True
+
+        # check for polynomial terms
+        if coef_name.startswith("poly(") and moderator_name in coef_name:
+            return True
+
+        # Check for spline terms like bs(delta_t)1, ns(delta_t)2
+        if any(
+            coef_name.startswith(f"{spline}({moderator_name})")
+            for spline in ["bs", "ns", "s", "rcs"]
+        ):
+            return True
+
+        return False
+
+    def _calculate_moderator_contribution(
+        self,
+        moderator_terms: list,
+        moderator_coefficients: list,
+        moderator_values: np.ndarray,
+    ) -> np.ndarray:
+        """Calculate the total contribution of all moderator terms to the predictions."""
+        total_contribution = np.zeros_like(moderator_values)
+
+        for term, coef in zip(moderator_terms, moderator_coefficients):
+            # Calculate the transformed values for this term
+            transformed_values = self._evaluate_term(term, moderator_values)
+
+            # Add this term's contribution
+            contribution = coef * transformed_values
+            total_contribution += contribution
+
+            if self.debug:
+                print(
+                    f"     Term '{term}': coef={coef:.4f}, contribution range={np.min(contribution):.3f} to {np.max(contribution):.3f}"
+                )
+
+        self.fit_val = total_contribution
+        return total_contribution
+
+    def _evaluate_term(self, term: str, moderator_values: np.ndarray) -> np.ndarray:
+        """Evaluate a formula term given moderator values."""
+        # Handle different types of transformations
+
+        # Simple linear term
+        if term == self.moderator_name:
+            return moderator_values
+
+        # Identity transformations like I(delta_t^2), I(delta_t^3), etc.
+        if term.startswith("I(") and term.endswith(")"):
+            expression = term[2:-1]  # Remove I( and )
+
+            # Handle powers: delta_t^2, delta_t^3, etc.
+            if "^" in expression:
+                base, power = expression.split("^")
+                if base.strip() == self.moderator_name:
+                    return moderator_values ** float(power.strip())
+
+        # Factor levels - return indicator variables (would need actual factor levels)
+        if term.startswith(f"factor({self.moderator_name})"):
+            # This is complex - would need to know the factor levels
+            # For now, return the original values (not ideal)
+            return moderator_values
+
+        # Default fallback
+        return moderator_values
+
+    def _create_reduced_formula(self) -> str:
+        """Create a reduced formula by removing the moderator of interest."""
+        formula_str = str(self.adapter.formula)
+        if "~" not in formula_str:
+            raise ValueError("Invalid formula format")
+
+        lhs, rhs = formula_str.split("~", 1)
+        terms = [t.strip() for t in rhs.split("+")]
+
+        # Remove terms that contain the plotting moderator
+        reduced_terms = []
+        for term in terms:
+            # Skip terms that are the moderator itself or transformations of it
+            if self.moderator_name not in term and not (
+                term.startswith("I(") and self.moderator_name in term
+            ):
+                reduced_terms.append(term)
+
+        if reduced_terms:
+            return f"{lhs.strip()} ~ {' + '.join(reduced_terms)}"
+        else:
+            return f"{lhs.strip()} ~ 1"  # Intercept only
+
+    def _fit_reduced_model(self, reduced_formula: str):
+        """Fit a reduced model using the existing adapter infrastructure."""
+        try:
+            from app.hybrid_metafor_adapter import StreamlitMetaforAdapter
+
+            # Create new adapter with the same configuration but different formula
+            reduced_adapter = StreamlitMetaforAdapter(
+                df=self.adapter.df.copy(),
+                effect_type=self.adapter.effect_type,
+                effect_type_var=self.adapter.effect_type_var,
+                treatment=self.adapter.treatment,
+                formula=reduced_formula,
+                random=self.adapter.random,
+                required_columns=self.adapter.required_columns,
+                process_data=False,  # necessary since otherwise sometimes cooks removes newfound outliers. TODO: further explore via sensitivity analysis
+                verbose=False,  # Suppress verbose output for reduced model
+            )
+
+            # Fit the reduced model
+            reduced_adapter.fit_model()
+
+            return reduced_adapter
+
+        except Exception as e:
+            print(f"⚠️ Failed to fit reduced model: {e}")
+            return None
+
+    def _extract_residuals_from_adapter(self, adapter):
+        """Extract residuals from an adapter using the existing R context handling."""
+        try:
+            from app.hybrid_metafor_adapter import streamlit_safe_r_context
+
+            with streamlit_safe_r_context() as r_ctx:
+                ro = r_ctx["ro"]
+                localconverter = r_ctx["localconverter"]
+
+                # Use the existing R model stored in the adapter
+                ro.globalenv["cl"] = adapter.r_model["call"]
+                ro.globalenv["d"] = adapter.df_r
+
+                with localconverter(ro.default_converter):
+                    # Reconstruct model and extract residuals
+                    ro.r("local({ cl$data <- d; eval(cl) })")
+                    # Use the variable name actually returned by the R code above ("r_model" is only defined in Python, not in R globalenv)
+                    # The R code above: r_model <- local({ cl$data <- d; eval(cl) })
+                    # So, assign the result to r_model in R globalenv before calling residuals
+                    ro.r("r_model <- local({ cl$data <- d; eval(cl) })")
+                    residuals = np.array(ro.r("residuals(r_model)"))
+
+                    return residuals
+
+        except Exception as e:
+            print(f"⚠️ Failed to extract residuals: {e}")
+            return None
+
+    def _get_y_limits(self):
+        """Get the y limits of the plot."""
+        min_yi, max_yi = np.min(self.yi), np.max(self.yi)
+
+        # if partial residuals available, make sure these are within the y limits
+        if self.partial_residuals is not None:
+            min_partial, max_partial = (
+                np.min(self.partial_residuals),
+                np.max(self.partial_residuals),
+            )
+            min_yi, max_yi = min(min_partial, min_yi), max(max_partial, max_yi)
+
+        # TODO: frame within prediction interval (if available)
+
+        range_y = max_yi - min_yi
+        return min_yi - range_y * 0.1, max_yi + range_y * 0.1
+
+    def _get_x_limits(self):
+        """Get the x limits of the plot."""
+        min_xi, max_xi = np.min(self.xi), np.max(self.xi)
+        range_x = max_xi - min_xi
+        return min_xi - range_x * 0.1, max_xi + range_x * 0.1
+
+    def _get_colorscale_for_continuous_color_values(self):
+        """Get the color values for continuous variables, dependent on the moderator of interest."""
+        if self.colorby == "delta_t":
+            return "Reds"
+        elif self.colorby == "delta_ph":
+            return "Reds_r"
+        else:
+            return "Viridis"
+
     def create_plotly_figure(
         self,
         title: str = None,
         width: int = 800,
         height: int = 600,
+        show_partial_residuals: bool = False,
+        custom_y_limits: tuple = None,
+        custom_x_limits: tuple = None,
     ) -> go.Figure:
         """Create an interactive Plotly figure with prediction and confidence intervals."""
 
@@ -610,26 +959,43 @@ class StreamlitMetaRegressionPlotter:
             # Categorical variable - create discrete legend
             scatter_points_colours = self._get_core_grouping_colours()
             self._add_discrete_color_legend(fig, scatter_points_colours)
-        elif self.colorby and self.colorby in self.df.columns:
-            # Continuous variable - create colorbar
-            color_values = self.df[self.colorby]
-            if pd.api.types.is_numeric_dtype(color_values):
-                scatter_points_colours = color_values
-                is_numeric_color = True
+        elif self.colorby:
+            # Try to find the color variable in processed df first, then original df
+            color_values = None
+            if self.colorby in self.df.columns:
+                color_values = self.df[self.colorby]
+            elif (
+                hasattr(self, "original_df")
+                and self.colorby in self.original_df.columns
+            ):
+                # Get values from original df but only for the rows that exist in processed df
+                # Match by index to ensure alignment
+                color_values = self.original_df.loc[self.df.index, self.colorby]
+
+            if color_values is not None:
+                if pd.api.types.is_numeric_dtype(color_values):
+                    scatter_points_colours = color_values
+                    is_numeric_color = True
+                else:
+                    # Non-numeric, treat as categorical
+                    labels = color_values.astype(str)
+                    uniq = list(pd.unique(labels))
+                    palette = px.colors.qualitative.Set3
+                    n = len(palette)
+                    label_to_color = {val: palette[i % n] for i, val in enumerate(uniq)}
+                    scatter_points_colours = [label_to_color[val] for val in labels]
+                    self._add_discrete_color_legend(fig, labels)
             else:
-                # Non-numeric, treat as categorical
-                labels = color_values.astype(str)
-                uniq = list(pd.unique(labels))
-                palette = px.colors.qualitative.Set3
-                n = len(palette)
-                label_to_color = {val: palette[i % n] for i, val in enumerate(uniq)}
-                scatter_points_colours = [label_to_color[val] for val in labels]
-                self._add_discrete_color_legend(fig, labels)
+                scatter_points_colours = "white"
         else:
             scatter_points_colours = "white"
 
         # Add prediction interval (wider, lighter)
-        if hasattr(self, "pred_lb") and hasattr(self, "pred_ub"):
+        if (
+            hasattr(self, "pred_lb")
+            and hasattr(self, "pred_ub")
+            and not show_partial_residuals
+        ):
             fig.add_trace(
                 go.Scatter(
                     x=np.concatenate([self.xs, self.xs[::-1]]),
@@ -655,7 +1021,7 @@ class StreamlitMetaRegressionPlotter:
                 showlegend=True,
                 hoverinfo="skip",
             )
-        )
+        ) if not show_partial_residuals else None
 
         # Add regression line
         fig.add_trace(
@@ -667,63 +1033,142 @@ class StreamlitMetaRegressionPlotter:
                 name=f"Meta-regression: {self.effect_type} ~ {self.moderator_name}",
                 showlegend=True,
             )
-        )
+        ) if not show_partial_residuals else None
 
-        # Add data points (weighted by precision)
-        # Scale point sizes based on inverse standard error (like original)
-        max_seinv = np.max(self.seinv) if np.max(self.seinv) > 0 else 1
-        point_sizes = (
-            self.seinv / max_seinv
-        ) * 40 + 8  # Scale to 8-48 pixels (larger range)
+        # Calculate partial residuals if requested
+        if show_partial_residuals and self.partial_residuals is None:
+            self._calculate_partial_residuals()
 
-        hover_text = [
-            f"<b>DOI:</b> {doi}<br><b>{self.moderator_name}:</b> {x:.3f}<br><b>{self.effect_type}:</b> {y:.3f}<br><b>Control Calcification:</b> {cc:.3f}<br><b>Treatment Calcification:</b> {tc:.3f}<br><b>Core Grouping:</b> {cg}"
-            for doi, x, y, cc, tc, cg in zip(
-                self.dois,
-                self.xi,
-                self.yi,
-                self.df["st_control_calcification"],
-                self.df["st_treatment_calcification"],
-                self.df["core_grouping"],
+        # Use custom limits if provided, otherwise use automatic calculation
+
+        if custom_y_limits is not None:
+            y_min, y_max = custom_y_limits
+        else:
+            y_min, y_max = self._get_y_limits()
+
+        # Add data points or partial residuals
+        if show_partial_residuals and self.partial_residuals is not None:
+            # Show partial residuals
+            max_seinv = np.max(self.seinv) if np.max(self.seinv) > 0 else 1
+            point_sizes = (self.seinv / max_seinv) * 40 + 8
+
+            # TODO: have both delta_t and delta_ph in the hover text (replacing self.moderator_name call)
+            # Ensure fit_val is available for hover text
+            fit_vals = (
+                self.fit_val if self.fit_val is not None else [0.0] * len(self.yi)
             )
-        ]
-
-        fig.add_trace(
-            go.Scatter(
-                x=self.xi,
-                y=self.yi,
-                mode="markers",
-                marker=dict(
-                    size=point_sizes,
-                    color=scatter_points_colours,
-                    line=dict(color="navy", width=2),
-                    opacity=0.8,
-                    colorscale="Viridis" if is_numeric_color else None,
-                    showscale=is_numeric_color,
-                    colorbar=dict(
-                        title=self._format_axis_label(self.colorby),
-                        x=1.15,
-                        len=0.8,
-                        thickness=20,
-                        outlinewidth=1,
-                        outlinecolor="black",
-                    )
-                    if is_numeric_color
-                    else None,
-                ),
-                name="Samples (size ∝ precision)",
-                text=hover_text,
-                hovertemplate="%{text}<extra></extra>",
-                showlegend=True,
+            ord_residuals = (
+                self.ord_residuals
+                if self.ord_residuals is not None
+                else [0.0] * len(self.yi)
             )
-        )
+
+            hover_text = [
+                f"<b>DOI:</b> {doi}<br><b>{self.moderator_name}:</b> {x:.3f}</br><b>Fit value:</b> {fit_val:.3f}</br><b>Ord Residual:</b> {ordr:.3f}<br><b>Partial Residual:</b> {pr:.3f}<br><b>Original {self.effect_type}:</b> {y:.3f}<br><b>Core Grouping:</b> {cg}<br>"
+                for doi, x, fit_val, ordr, pr, y, cg in zip(
+                    self.dois,
+                    self.partial_residuals_x,
+                    fit_vals,
+                    ord_residuals,
+                    self.partial_residuals,
+                    self.yi,
+                    self.df["core_grouping"],
+                )
+            ]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=self.partial_residuals_x,
+                    y=self.partial_residuals,
+                    mode="markers",
+                    marker=dict(
+                        size=point_sizes,
+                        color=scatter_points_colours,
+                        line=dict(color="navy", width=2),
+                        opacity=0.8,
+                        colorscale=self._get_colorscale_for_continuous_color_values()
+                        if is_numeric_color
+                        else None,
+                        showscale=is_numeric_color,
+                        colorbar=dict(
+                            title=self._format_axis_label(self.colorby),
+                            x=1.15,
+                            len=0.8,
+                            thickness=20,
+                            outlinewidth=1,
+                            outlinecolor="black",
+                        )
+                        if is_numeric_color
+                        else None,
+                    ),
+                    name="Partial Residuals (size ∝ precision)",
+                    text=hover_text,
+                    hovertemplate="%{text}<extra></extra>",
+                    showlegend=True,
+                )
+            )
+        else:
+            # Show regular data points
+            max_seinv = np.max(self.seinv) if np.max(self.seinv) > 0 else 1
+            point_sizes = (
+                self.seinv / max_seinv
+            ) * 40 + 8  # Scale to 8-48 pixels (larger range)
+
+            # TODO: find out why core_Grouping is unavailable for hover_Text but not coloring; why DOI, temp, phtot, delta_ph fail in colouring
+            merged_data = self.df.merge(self.original_df, how="left")
+
+            hover_text = [
+                f"<b>DOI:</b> {doi}<br><b>{self.moderator_name}:</b> {xs:.3f}<br><b>{self.effect_type}:</b> {ys:.3f}<br><b>Control Calcification:</b> {st_control_calc:.3f}<br><b>Treatment Calcification:</b> {st_treatment_calc:.3f}<br><b>Core Grouping:</b> {cg}"
+                for doi, xs, ys, st_control_calc, st_treatment_calc, cg in zip(
+                    self.dois,
+                    self.xi,
+                    self.yi,
+                    merged_data["st_control_calcification"],
+                    merged_data["st_treatment_calcification"],
+                    merged_data["core_grouping"],
+                )
+            ]
+
+            fig.add_trace(
+                go.Scatter(
+                    x=self.xi,
+                    y=self.yi,
+                    mode="markers",
+                    marker=dict(
+                        size=point_sizes,
+                        color=scatter_points_colours,
+                        line=dict(color="navy", width=2),
+                        opacity=0.8,
+                        colorscale=self._get_colorscale_for_continuous_color_values()
+                        if is_numeric_color
+                        else None,
+                        showscale=is_numeric_color,
+                        colorbar=dict(
+                            title=self._format_axis_label(self.colorby),
+                            x=1.15,
+                            len=0.8,
+                            thickness=20,
+                            outlinewidth=1,
+                            outlinecolor="black",
+                        )
+                        if is_numeric_color
+                        else None,
+                    ),
+                    name="Samples (size ∝ precision)",
+                    text=hover_text,
+                    hovertemplate="%{text}<extra></extra>",
+                    showlegend=True,
+                )
+            )
         # Add reference line at y=0 (zero effect level)
         fig.add_hline(
             y=0,
             line_dash="dash",
             line_color="gray",
             opacity=0.7,
-            annotation_text="Zero effect level",
+            annotation_text="Zero effect level"
+            if not show_partial_residuals
+            else "Zero partial residual",
             annotation_position="top right",
         )
 
@@ -731,7 +1176,9 @@ class StreamlitMetaRegressionPlotter:
         fig.update_layout(
             title=title or f"Meta-regression: {self.adapter.formula}",
             xaxis_title=self._format_axis_label(self.moderator_name),
-            yaxis_title=self._format_axis_label(self.effect_type),
+            yaxis_title=self._format_axis_label(self.effect_type)
+            if not show_partial_residuals
+            else "Partial Residuals",
             width=width,
             height=height,
             template="plotly_white",
@@ -746,6 +1193,7 @@ class StreamlitMetaRegressionPlotter:
             ),
             font=dict(size=12),
             title_font=dict(size=16),
+            yaxis_range=[y_min, y_max],
         )
 
         return fig
@@ -843,8 +1291,8 @@ class StreamlitMetaRegressionPlotter:
                 else None
             )
 
-            # Calculate R-squared equivalent (tau-squared reduction)
-            tau2_reduction = "Not available"  # Would need more complex calculation
+            # # Calculate R-squared equivalent (tau-squared reduction)
+            # tau2_reduction = "Not available"  # Would need more complex calculation
 
             stats = {
                 "Number of samples": n_samples,
@@ -916,22 +1364,141 @@ def create_plotting_interface(fitted_adapter):
             index=default_index,
             help="Choose a numeric variable to plot against the effect size. Common options: delta_t (temperature), delta_ph (pH)",
         )
+        # Get available color variables from both processed and original dataframes
+        color_options = ["core_grouping"]  # Always available
+
+        # Add variables from processed dataframe
+        processed_columns = set(fitted_adapter.processed_df.columns)
+
+        # Add variables from original dataframe if available
+        original_columns = set()
+        if hasattr(fitted_adapter, "original_df"):
+            original_columns = set(fitted_adapter.original_df.columns)
+
+        # Combine all available columns
+        all_columns = processed_columns.union(original_columns)
+        # exclude columns from colour options
+        excluded_cols = {
+            fitted_adapter.effect_type,
+            fitted_adapter.effect_type_var,
+            "ID",
+            "cooks_d",
+            "leverage",
+            "residuals",
+            "fitted",
+            "calcification_unit",
+            "doi",
+            "treatment",
+            "dvar_phtot",
+            "dvar_temp",
+            "st_control_calcification",
+            "st_treatment_calcification",
+        }
+
+        # Add interesting variables in priority order
+        priority_vars = [
+            "delta_ph",
+            "delta_t",
+            "temp",
+            "phtot",
+            "DOI",
+            "treatment",
+            "family",
+            "original_doi",
+        ]
+        for var in priority_vars:
+            if var in all_columns and var not in excluded_cols:
+                color_options.append(var)
+
+        # Add remaining numeric and categorical variables
+        for col in sorted(all_columns):
+            if col not in color_options and col not in excluded_cols:
+                # Check if it's a reasonable variable to color by
+                if not col.startswith("_") and not col.endswith("_var"):
+                    color_options.append(col)
+
         colorby_value = st.selectbox(
             "Colour by:",
-            ["core_grouping", "delta_ph", "delta_t", "temp", "phtot", "DOI"],
+            color_options,
             index=0,
             help="Choose a variable to color the points by.",
+        )
+
+        show_partial_residuals = st.checkbox(
+            "Show partial residuals",
+            value=False,
+            help="Display partial residuals instead of raw data points. Partial residuals show the relationship between the moderator and outcome while controlling for other variables in the model.",
         )
 
     with col2:
         plot_width = st.slider("Plot width", 600, 1200, 800, step=50)
         plot_height = st.slider("Plot height", 400, 800, 600, step=50)
 
+        # # Axis limit controls
+        # use_custom_limits = st.checkbox(
+        #     "🎯 Custom axis limits",
+        #     value=False,
+        #     help="Enable manual control of plot axis limits",
+        # )
+
+        # Calculate y-limits efficiently without creating full plotter instance
+        def _calculate_auto_y_limits():
+            # Extract effect sizes directly from adapter
+            effect_data = fitted_adapter.processed_df[
+                fitted_adapter.effect_type
+            ].dropna()
+            min_yi, max_yi = effect_data.min(), effect_data.max()
+            range_y = max_yi - min_yi
+            return min_yi - range_y * 0.1, max_yi + range_y * 0.1
+
+        auto_y_min, auto_y_max = _calculate_auto_y_limits()
+        # if use_custom_limits:
+        y_range = auto_y_max - auto_y_min
+        y_buffer = y_range * 0.2  # 20% buffer for slider limits
+
+        st.markdown("**Axis limits:**")
+
+        # Y-axis limits
+        col2a, col2b = st.columns(2)
+        with col2a:
+            y_min_slider = st.slider(
+                "Y min",
+                float(auto_y_min - y_buffer),
+                float(auto_y_max + y_buffer),
+                float(auto_y_min),
+                step=float(y_range / 100),
+                format="%.2f",
+            )
+        with col2b:
+            y_max_slider = st.slider(
+                "Y max",
+                float(auto_y_min - y_buffer),
+                float(auto_y_max + y_buffer),
+                float(auto_y_max),
+                step=float(y_range / 100),
+                format="%.2f",
+            )
+
+        # # Reset button for axis limits
+        # if st.button("🔄 Auto Limits", help="Reset to automatic axis limits"):
+        #     st.rerun()
+
+        # Validation warnings
+        if y_min_slider >= y_max_slider:
+            st.warning("⚠️ Y min should be less than Y max")
+
+        # else:
+        #     # Use automatic limits
+        #     y_min_slider, y_max_slider = auto_y_min, auto_y_max
+
     if selected_moderator:
         try:
             # Create plotter
             plotter = StreamlitMetaRegressionPlotter(
-                fitted_adapter, selected_moderator, colorby=colorby_value.lower()
+                fitted_adapter,
+                selected_moderator,
+                colorby=colorby_value.lower(),
+                # debug=debug_mode,
             )
 
             # Create plot
@@ -939,6 +1506,8 @@ def create_plotting_interface(fitted_adapter):
                 title=f"Meta-regression: {fitted_adapter.effect_type} vs {selected_moderator}",
                 width=plot_width,
                 height=plot_height,
+                show_partial_residuals=show_partial_residuals,
+                custom_y_limits=(y_min_slider, y_max_slider),
             )
 
             # Display plot

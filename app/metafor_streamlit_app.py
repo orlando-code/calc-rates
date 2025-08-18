@@ -226,6 +226,17 @@ def main():
 
     # Load data
     df = load_data()
+
+    st.subheader("Debug mode")
+    debug_mode = st.checkbox(
+        "Enable debug mode",
+        value=False,
+        help="Limit data to first 50 samples for rapid testing",
+    )
+
+    if debug_mode:
+        df = df.head(50)
+
     if df is None:
         st.stop()
 
@@ -324,7 +335,7 @@ def main():
 
     if before_filter != after_filter:
         st.sidebar.info(
-            f"ℹ️ Removed {before_filter - after_filter} rows with missing values"
+            f"ℹ️ Will remove {before_filter - after_filter} rows with missing values"
         )
 
     st.sidebar.metric("Filtered Dataset", f"{len(filtered_df)} observations")
@@ -428,6 +439,31 @@ def main():
             - Add: delta_ph (linear)
             - Add: delta_ph (quadratic)
             - Uncheck "Include Intercept"
+            
+            **Interaction model:** `effect ~ delta_t + delta_ph + delta_t:delta_ph`
+            - Add: delta_t (linear)
+            - Add: delta_ph (linear)
+            - Add: delta_t:delta_ph (interaction)
+            
+            **Full factorial:** `effect ~ delta_t * delta_ph` (equivalent to: delta_t + delta_ph + delta_t:delta_ph)
+            - Add: delta_t (linear)
+            - Add: delta_ph (linear) 
+            - Add: delta_t:delta_ph (interaction)
+            - Or use: delta_t*delta_ph (full factorial)
+            
+            **Three-way interaction:** `effect ~ delta_t:delta_ph:temp`
+            - Add: delta_t (linear)
+            - Add: delta_ph (linear)
+            - Add: temp (linear)
+            - Add: delta_t:delta_ph:temp (three-way interaction)
+            
+            **Quadratic interactions:** `effect ~ I(delta_t^2):I(delta_ph^2)`
+            - Add: delta_t:delta_ph (interaction)
+            - Set both variables to "second" order
+            
+            **Mixed-order interactions:** `effect ~ delta_t:I(delta_ph^2)`
+            - Add: delta_t:delta_ph (interaction)
+            - Set delta_t to "first" order, delta_ph to "second" order
             """)
 
         # Initialize session state for moderator terms if not exists
@@ -435,63 +471,318 @@ def main():
             st.session_state.moderator_terms = []
 
         # Add new moderator term
-        col1, col2, col3 = st.columns([2, 2, 1])
+        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
 
         with col1:
-            new_moderator = st.selectbox(
-                "Select moderator variable:",
-                options=[""] + candidate_cols,
-                key="new_moderator_select",
+            new_term_type = st.selectbox(
+                "Term type:",
+                options=[
+                    "linear",
+                    "quadratic",
+                    "factor",
+                    "interaction",
+                    "full_factorial",
+                    "three_way",
+                ],
+                format_func=lambda x: {
+                    "linear": "Linear (x)",
+                    "quadratic": "Quadratic (x²)",
+                    "factor": "Factor (categorical)",
+                    "interaction": "Interaction (x:y)",
+                    "full_factorial": "Full Factorial (x*y)",
+                    "three_way": "Three-way (x:y:z)",
+                }[x],
+                key="new_term_type_select",
+                help="Choose the type of term to add to the model",
             )
 
-        with col2:
-            if new_moderator:
-                col_dtype = filtered_df[new_moderator].dtype
-                # Guess default: factor for object/categorical, linear for numeric
-                if col_dtype == "O" or str(col_dtype).startswith("category"):
-                    default_type = "factor"
-                else:
-                    default_type = "linear"
+            # Add helpful descriptions
+            descriptions = {
+                "linear": "Simple linear relationship: effect ~ x",
+                "quadratic": "Quadratic relationship: effect ~ I(x²)",
+                "factor": "Categorical variable: effect ~ factor(x)",
+                "interaction": "Interaction only: effect ~ x:y",
+                "full_factorial": "Full factorial: effect ~ x*y (= x + y + x:y)",
+                "three_way": "Three-way interaction: effect ~ x:y:z",
+            }
+            st.caption(descriptions[new_term_type])
 
-                new_term_type = st.selectbox(
-                    "Term type:",
-                    options=["linear", "quadratic", "factor"],
-                    index=["linear", "quadratic", "factor"].index(default_type),
-                    key="new_term_type_select",
-                )
+        with col2:
+            if new_term_type in ["interaction", "full_factorial", "three_way"]:
+                if new_term_type == "three_way":
+                    # For three-way interactions, allow selection of three variables
+                    st.markdown(
+                        "**Select variables for three-way interaction (A:B:C):**"
+                    )
+                    interaction_var1 = st.selectbox(
+                        "First variable:",
+                        options=[""] + candidate_cols,
+                        key="interaction_var1_select",
+                    )
+                    interaction_var2 = st.selectbox(
+                        "Second variable:",
+                        options=[""]
+                        + [col for col in candidate_cols if col != interaction_var1],
+                        key="interaction_var2_select",
+                    )
+                    interaction_var3 = st.selectbox(
+                        "Third variable:",
+                        options=[""]
+                        + [
+                            col
+                            for col in candidate_cols
+                            if col not in [interaction_var1, interaction_var2]
+                        ],
+                        key="interaction_var3_select",
+                    )
+                    new_moderator = (
+                        f"{interaction_var1}:{interaction_var2}:{interaction_var3}"
+                        if all([interaction_var1, interaction_var2, interaction_var3])
+                        else ""
+                    )
+                else:
+                    # For interactions and full factorial, allow selection of two variables
+                    interaction_label = (
+                        "full factorial (A*B)"
+                        if new_term_type == "full_factorial"
+                        else "interaction (A:B)"
+                    )
+                    st.markdown(f"**Select variables for {interaction_label}:**")
+                    interaction_var1 = st.selectbox(
+                        "First variable:",
+                        options=[""] + candidate_cols,
+                        key="interaction_var1_select",
+                    )
+                    interaction_var2 = st.selectbox(
+                        "Second variable:",
+                        options=[""]
+                        + [col for col in candidate_cols if col != interaction_var1],
+                        key="interaction_var2_select",
+                    )
+
+                    if new_term_type == "full_factorial":
+                        new_moderator = (
+                            f"{interaction_var1}*{interaction_var2}"
+                            if interaction_var1 and interaction_var2
+                            else ""
+                        )
+                        if interaction_var1 and interaction_var2:
+                            st.info(
+                                f"💡 This will add: {interaction_var1} + {interaction_var2} + {interaction_var1}:{interaction_var2}"
+                            )
+                    else:
+                        new_moderator = (
+                            f"{interaction_var1}:{interaction_var2}"
+                            if interaction_var1 and interaction_var2
+                            else ""
+                        )
             else:
-                new_term_type = "linear"
+                # For non-interaction terms, single variable selection
+                new_moderator = st.selectbox(
+                    "Select moderator variable:",
+                    options=[""] + candidate_cols,
+                    key="new_moderator_select",
+                )
+
+                # Auto-detect appropriate default type for the variable
+                if new_moderator and new_term_type == "linear":
+                    col_dtype = filtered_df[new_moderator].dtype
+                    if col_dtype == "O" or str(col_dtype).startswith("category"):
+                        st.info(
+                            "💡 Consider using 'factor' type for categorical variables"
+                        )
 
         with col3:
-            if st.button("➕ Add Term", disabled=not new_moderator):
-                # Create the term string
-                if new_term_type == "linear":
-                    term = new_moderator
-                elif new_term_type == "quadratic":
-                    term = f"I({new_moderator}^2)"
-                elif new_term_type == "factor":
-                    term = f"factor({new_moderator})"
+            # Initialize default orders
+            var1_order = var2_order = var3_order = term_order = "first"
 
-                # Add to session state
-                st.session_state.moderator_terms.append(
-                    {"variable": new_moderator, "type": new_term_type, "term": term}
+            # Term order specification for interactions
+            if new_term_type in ["interaction", "full_factorial", "three_way"]:
+                st.markdown("**Term orders:**")
+                if new_term_type == "three_way":
+                    if interaction_var1:
+                        var1_order = st.selectbox(
+                            f"{interaction_var1[:8]}... order:",
+                            options=["first", "second"],
+                            format_func=lambda x: f"{x} (x)"
+                            if x == "first"
+                            else f"{x} (x²)",
+                            key="var1_order_select",
+                        )
+                    if interaction_var2:
+                        var2_order = st.selectbox(
+                            f"{interaction_var2[:8]}... order:",
+                            options=["first", "second"],
+                            format_func=lambda x: f"{x} (x)"
+                            if x == "first"
+                            else f"{x} (x²)",
+                            key="var2_order_select",
+                        )
+                    if interaction_var3:
+                        var3_order = st.selectbox(
+                            f"{interaction_var3[:8]}... order:",
+                            options=["first", "second"],
+                            format_func=lambda x: f"{x} (x)"
+                            if x == "first"
+                            else f"{x} (x²)",
+                            key="var3_order_select",
+                        )
+                else:
+                    # Two-way interactions
+                    if interaction_var1:
+                        var1_order = st.selectbox(
+                            f"{interaction_var1[:8]}... order:",
+                            options=["first", "second"],
+                            format_func=lambda x: f"{x} (x)"
+                            if x == "first"
+                            else f"{x} (x²)",
+                            key="var1_order_select",
+                        )
+                    if interaction_var2:
+                        var2_order = st.selectbox(
+                            f"{interaction_var2[:8]}... order:",
+                            options=["first", "second"],
+                            format_func=lambda x: f"{x} (x)"
+                            if x == "first"
+                            else f"{x} (x²)",
+                            key="var2_order_select",
+                        )
+            else:
+                # Single term order
+                if new_moderator and new_term_type != "factor":
+                    term_order = st.selectbox(
+                        "Term order:",
+                        options=["first", "second"],
+                        format_func=lambda x: f"{x} (x)"
+                        if x == "first"
+                        else f"{x} (x²)",
+                        key="term_order_select",
+                        help="Specify the polynomial order for this term",
+                    )
+
+        with col4:
+            # Enable button based on term type requirements
+            if new_term_type == "three_way":
+                button_disabled = not all(
+                    [interaction_var1, interaction_var2, interaction_var3]
                 )
-                st.rerun()
+            elif new_term_type in ["interaction", "full_factorial"]:
+                button_disabled = not (interaction_var1 and interaction_var2)
+            else:
+                button_disabled = not new_moderator
+
+            if st.button("➕ Add", disabled=button_disabled):
+                terms = []
+
+                def _format_term_with_order(variable, order):
+                    """Format a variable term with the specified order."""
+                    if order == "first":
+                        return variable
+                    elif order == "second":
+                        return f"I({variable}^2)"
+                    return variable
+
+                # Create the term string based on type and orders
+                if new_term_type == "linear":
+                    formatted_term = _format_term_with_order(new_moderator, term_order)
+                    terms.append(formatted_term)
+                    display_var = f"{new_moderator} ({term_order} order)"
+
+                elif new_term_type == "quadratic":
+                    # Quadratic always uses second order by definition
+                    terms.append(f"I({new_moderator}^2)")
+                    display_var = f"{new_moderator} (quadratic)"
+
+                elif new_term_type == "factor":
+                    terms.append(f"factor({new_moderator})")
+                    display_var = f"factor({new_moderator})"
+
+                elif new_term_type == "interaction":
+                    # Create interaction with specified orders
+                    var1_formatted = _format_term_with_order(
+                        interaction_var1, var1_order
+                    )
+                    var2_formatted = _format_term_with_order(
+                        interaction_var2, var2_order
+                    )
+                    interaction_term = f"{var1_formatted}:{var2_formatted}"
+                    terms.append(interaction_term)
+                    display_var = f"{interaction_var1}({var1_order}):{interaction_var2}({var2_order})"
+
+                elif new_term_type == "full_factorial":
+                    # Full factorial with specified orders
+                    var1_formatted = _format_term_with_order(
+                        interaction_var1, var1_order
+                    )
+                    var2_formatted = _format_term_with_order(
+                        interaction_var2, var2_order
+                    )
+
+                    # Add main effects with orders
+                    terms.extend([var1_formatted, var2_formatted])
+                    # Add interaction
+                    interaction_term = f"{var1_formatted}:{var2_formatted}"
+                    terms.append(interaction_term)
+                    display_var = f"{interaction_var1}({var1_order})*{interaction_var2}({var2_order})"
+
+                elif new_term_type == "three_way":
+                    # Three-way interaction with specified orders
+                    var1_formatted = _format_term_with_order(
+                        interaction_var1, var1_order
+                    )
+                    var2_formatted = _format_term_with_order(
+                        interaction_var2, var2_order
+                    )
+                    var3_formatted = _format_term_with_order(
+                        interaction_var3, var3_order
+                    )
+
+                    # Add main effects
+                    terms.extend([var1_formatted, var2_formatted, var3_formatted])
+                    # Add three-way interaction
+                    three_way_term = (
+                        f"{var1_formatted}:{var2_formatted}:{var3_formatted}"
+                    )
+                    terms.append(three_way_term)
+                    display_var = f"{interaction_var1}({var1_order}):{interaction_var2}({var2_order}):{interaction_var3}({var3_order})"
+
+                # Check for duplicates
+                existing_terms = []
+                for existing_entry in st.session_state.moderator_terms:
+                    existing_terms.extend(existing_entry["term"])
+
+                duplicate_found = False
+                for term in terms:
+                    if term in existing_terms:
+                        st.warning(f"⚠️ Term '{term}' already exists in the model!")
+                        duplicate_found = True
+
+                if not duplicate_found:
+                    # Add to session state
+                    st.session_state.moderator_terms.append(
+                        {
+                            "variable": display_var,
+                            "type": new_term_type,
+                            "term": terms,
+                        }
+                    )
+                    st.rerun()
 
         # Display current moderator terms
         if st.session_state.moderator_terms:
-            st.markdown("**Current model terms:**")
-
             # Clear all button
             if st.button("🗑️ Clear All Terms", type="secondary"):
                 st.session_state.moderator_terms = []
                 st.rerun()
 
+            st.markdown("**Current model terms:**")
+
             for i, term_info in enumerate(st.session_state.moderator_terms):
                 col1, col2, col3 = st.columns([3, 1, 1])
                 with col1:
                     st.write(
-                        f"• {term_info['variable']} ({term_info['type']}) → `{term_info['term']}`"
+                        f"{term_info['variable']} ({term_info['type']}) → "
+                        + " + ".join([f"`{term}`" for term in term_info["term"]])
                     )
                 with col2:
                     if st.button("🗑️", key=f"remove_{i}"):
@@ -501,9 +792,14 @@ def main():
                     st.write("")  # Spacer
 
         # Build moderator terms list, dropping duplicates
+        # Flatten all terms (which may be lists), then deduplicate
+        all_terms = []
+        for term_info in st.session_state.moderator_terms:
+            # term_info["term"] is always a list of terms
+            all_terms.extend(term_info["term"])
         moderator_terms = list(
-            set([term_info["term"] for term_info in st.session_state.moderator_terms])
-        )
+            dict.fromkeys(all_terms)
+        )  # preserves order, removes duplicates
 
         # Build formula string with intercept option
         if moderator_terms:
@@ -521,7 +817,9 @@ def main():
 
         # Debug info
         with st.expander("🔧 Debug Info"):
-            st.write(f"**Filtered data shape:** {filtered_df.shape}")
+            st.write(
+                f"**Filtered data:** {len(filtered_df)} samples, {len(filtered_df.columns)} columns"
+            )
             st.write(f"**Effect type:** {effect_type}")
             st.write(f"**Formula:** {formula}")
             st.write(f"**Random structure:** {random_structure}")
@@ -529,7 +827,7 @@ def main():
                 f"**Required columns:** {[effect_type, var_col] + ([moderator] if moderator else [])}"
             )
             st.write(
-                f"**Dropped due to NaN values or Cook's distance:** {len(filtered_df) - len(df)}"
+                f"**Dropped due to irrelevant treatment or units / NaN values / Cook's distance:** {abs(len(filtered_df) - len(df))}"
             )
 
         # Fit model button
