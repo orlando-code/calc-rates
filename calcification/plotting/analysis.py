@@ -40,7 +40,6 @@ class MetaRegressionConfig:
     dpi: int = 150
     title: str = None
     xlabel: str = "Predictor"
-    # ylabel: str = "Effect size"
     ylabel: str = "Relative calcification rate"
     legend_loc: str = "lower center"
     point_size: str = "seinv"
@@ -185,10 +184,8 @@ class MetaRegressionPlotter:
         ) if self.config.refline is not None else None
         ax.set_xlim(
             self.model_results.prediction_limits
-        ) if self.model_results.prediction_limits else None
-        ax.set_ylim(
-            self.model_results.prediction_limits
-        ) if self.config.ylimits else None
+        ) if self.model_results.prediction_limits is not None else None
+        ax.set_ylim(self.config.ylimits) if self.config.ylimits is not None else None
 
     def _plot_legend(self, ax, regression_line):
         ax.legend(loc=self.config.legend_loc, fontsize=self.config.legend_fontsize)
@@ -307,7 +304,7 @@ class MetaRegressionPlotter:
 
     def _get_core_grouping_colours(self) -> list[str]:
         """Get colors for core_grouping using standard color scheme."""
-        core_grouping_values = self.model_results.df.core_grouping
+        core_grouping_values = self.model_results.processed_df.core_grouping
         core_grouping_colours = plot_config.CG_COLOURS
         # generate list of colours for the core_grouping values
         core_grouping_colours = [
@@ -496,6 +493,7 @@ class MetaRegressionResults:
         self.headline_stats = self._get_headline_stats()
         self.test_stats = self._get_test_stats()
         self.df = self.model_object.df
+        self.processed_df = self.model_object.processed_df
 
     def _get_coeffs_vals(self):
         return np.array(self.model.rx2("b"))
@@ -537,7 +535,7 @@ class MetaRegressionResults:
         else:
             raise ValueError(f"Unknown fit method: {self.fit_method}")
         # round values in vars_df
-        vars_df = vars_df.applymap(lambda x: np.round(x, self.round_dp))
+        vars_df = vars_df.map(lambda x: np.round(x, self.round_dp))
         vars_df.columns = headline_vars
         return vars_df
 
@@ -549,6 +547,8 @@ class MetaRegressionResults:
         # deal with quadratic+ terms
         # get moderator names and their associated coefficients
         mod_names = self.moderator_names
+        if isinstance(mod_names, str):
+            mod_names = [mod_names]
         if self.model_object.intercept:
             mod_coeffs = [self.moderator_stats.loc["intrcpt", "beta"]] + [
                 self.moderator_stats.loc[mod, "beta"] for mod in mod_names
