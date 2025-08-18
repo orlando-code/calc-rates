@@ -46,7 +46,7 @@ def main():
     print("Loading calcification data...")
 
     # --- process data from extracted file ---
-    effects_df, _ = process.process_extracted_calcification_data(
+    effects_df = process.process_extracted_calcification_data(
         fp=config.data_dir / "Orlando_data.xlsx",
     )
 
@@ -64,10 +64,10 @@ def main():
         "phtot",
         "delta_t",
         "delta_ph",
+        "dvar_temp",
+        "dvar_phtot",
         "core_grouping",
         "st_calcification_unit",
-        "st_relative_calcification",
-        "st_relative_calcification_var",
         "st_control_calcification",
         "st_treatment_calcification",
         "calcification",
