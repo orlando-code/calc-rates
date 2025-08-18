@@ -8,6 +8,7 @@ from calcification.processing import (
     carbonate_processing,
     climatology,
     groups_processing,
+    processing,
 )
 from calcification.utils import config
 
@@ -34,6 +35,8 @@ def process_extracted_calcification_data(
 
     # infer dtypes for columns that are not numeric
     effect_sizes_df = effect_sizes_df.infer_objects()
+    # calculate the dcalcification_dvariable values
+    effect_sizes_df = processing.calculate_dvar(effect_sizes_df)
 
     # return effect_sizes_df, treatment_group_df
     return effect_sizes_df
