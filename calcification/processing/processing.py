@@ -501,6 +501,51 @@ def assign_treatment_groups_multilevel(
     return result_df
 
 
+def calculate_dvar(
+    data: pd.DataFrame, treatment: str | list[str] = ["temp", "phtot"]
+) -> pd.DataFrame:
+    """Calculate the dvar for the data.
+    N.B. this isn't useful for determining the outliers, which have small dCdV
+    """
+    # for each treatment, calculate the change in st_calcification wrt the control
+    # then calculate the dvar for each treatment
+    if isinstance(treatment, str):
+        treatment = [treatment]
+    if "temp_phtot" in treatment:
+        treatment = ["temp", "phtot"]
+    for t in treatment:
+        if t == "temp":
+            t_value = "delta_t"
+        elif t == "phtot":
+            t_value = "delta_ph"
+        else:
+            t_value = t
+        d_calcification = (
+            data["st_treatment_calcification"] - data["st_control_calcification"]
+        )
+        # replace any data[t_value] values that are less than 0.01 with 0 (machine precision failing us)
+        # replace any values less than 0.01 with 0 (in absolute value)
+        data.loc[abs(data[t_value]) < 0.1, t_value] = 0
+
+        out = d_calcification / data[t_value]
+        out = out.replace([np.inf, -np.inf], 0)
+        out = out.replace(np.nan, 0)
+        # Avoid repeated insertions to prevent DataFrame fragmentation
+        # Collect all dvar columns in a dict, then assign at once if multiple treatments
+        if "dvar_columns" not in locals():
+            dvar_columns = {}
+        dvar_columns[f"dvar_{t}"] = out
+
+        # If this is the last treatment, assign all at once
+        if t == treatment[-1]:
+            dvar_df = pd.DataFrame(dvar_columns)
+            # Align index to data
+            dvar_df.index = data.index
+            data = pd.concat([data, dvar_df], axis=1)
+
+    return data
+
+
 ### climatology
 def process_climatology_csv(fp: str, index_col: str = "doi") -> pd.DataFrame:
     df = pd.read_csv(fp).drop(columns=["data_ID", "Unnamed: 0"])
