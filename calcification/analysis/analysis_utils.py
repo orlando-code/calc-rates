@@ -15,7 +15,7 @@ def preprocess_df_for_meta_model(
     effect_type: str = "st_relative_calcification",
     treatment: list[str] | str = None,
     formula_components: dict = None,
-    drate_dvar_threshold: float = 100,
+    dvar_threshold: float = 100,
     verbose: bool = True,
 ) -> pd.DataFrame:
     data = df.copy()
@@ -30,19 +30,26 @@ def preprocess_df_for_meta_model(
 
     n_investigation = len(data)
     # remove nans for subset effect_type
-    required_columns = _get_required_columns(treatment, effect_type, formula_components)
+    required_columns = _get_required_columns(effect_type, formula_components)
+    print(required_columns)
     data = data.dropna(subset=required_columns)
     data = data.convert_dtypes()
-
     n_nans = n_investigation - len(data)
+
+    # filter out extreme values of dcalcification_dvariable
+    n_pre_dvar_filter = len(data)
+    data = filter_extreme_dvars(data, treatment, dvar_threshold)
+    n_post_dvar_filter = len(data)
+    n_filtered = n_pre_dvar_filter - n_post_dvar_filter
+
     # be more descriptive about where the nans are (print the number of nans for each column)
 
     # remove outliers
     # nparams = len(formula.split("+"))
     nparams = (
-        len(formula_components["predictors"]) + 1
+        len(formula_components["raw_predictors"]) + 1
         if formula_components["intercept"]
-        else len(formula_components["predictors"])
+        else len(formula_components["raw_predictors"])
     )
     data, cooks_outliers = analysis.remove_cooks_outliers(
         data, effect_type=effect_type, nparams=nparams, verbose=False
@@ -54,6 +61,10 @@ def preprocess_df_for_meta_model(
         print("Treatment: ", treatment)
         print("Total samples in input data: ", len(df))
         print("Total samples of relevant investigation: ", n_investigation)
+        print(
+            "Total samples dropped due to dcalcification/dtreatment filter: ",
+            n_pre_dvar_filter - n_post_dvar_filter,
+        )
         print("Dropped due to NaN values: ", n_nans)
         nan_counts = df[required_columns].isna().sum()
         for col, count in nan_counts.items():
@@ -61,24 +72,26 @@ def preprocess_df_for_meta_model(
                 print(f"\t{col}: {count} NaNs")
         print("Dropped due to Cook's distance: ", len(cooks_outliers))
         print(
-            f"Final sample count: {len(data)} ({len(cooks_outliers) + n_nans + (len(df) - n_investigation)} rows dropped)\n"
+            f"Final sample count: {len(data)} ({len(cooks_outliers) + n_nans + (len(df) - n_investigation + n_filtered)} rows dropped)\n"
         )
 
     return data
 
 
-def calculate_dvar(data: pd.DataFrame, treatment: str | list[str]) -> pd.DataFrame:
-    """Calculate the dvar for the data."""
-    # for each treatment, calculate the change in st_calcification wrt the control
-    # then calculate the dvar for each treatment
+def filter_extreme_dvars(
+    data: pd.DataFrame, treatment: str | list[str], threshold: float = 100
+) -> pd.DataFrame:
+    """Filter out extreme dvars."""
     if isinstance(treatment, str):
         treatment = [treatment]
-        for t in treatment:
-            d_calcification = (
-                data["st_treatment_calcification"] - data["st_control_calcification"]
-            )
-            data[f"dvar_{t}"] = d_calcification / data[t]
-
+    for t in treatment:
+        if t == "temp_phtot":
+            data = data[
+                (abs(data["dvar_temp"]) < threshold**2)
+                & (abs(data["dvar_phtot"]) < threshold**2)
+            ]
+        else:
+            data = data[abs(data[f"dvar_{t}"]) < threshold]
     return data
 
 
@@ -102,14 +115,19 @@ def generate_metaregression_formula(
 
 
 def _get_required_columns(
-    treatment, effect_type, formula_components, required_columns=None
+    # treatment: list[str] | str,
+    effect_type: str,
+    formula_components: dict,
+    required_columns: list[str] | None = None,
 ):
-    # get required columns from formula components
-    formula_requirements = formula_components["raw_predictors"]
-    if formula_requirements == ["0"]:
+    if not formula_components:
+        raise ValueError("Formula components are required")
+    if formula_components["raw_predictors"] == ["0"]:
         raise ValueError(
             "Metafor formula requires at least one predictor e.g. an intercept"
         )
+    # get required columns from formula components
+    formula_requirements = formula_components["raw_predictors"]
 
     effect_type_var = f"{effect_type}_var"
     base_columns = [
@@ -151,102 +169,161 @@ def _get_treatment_vars(treatment: str) -> list[str]:
     return list(set(treatment_vars))
 
 
+def process_factorial_terms(predictor_terms: list[str]) -> list[str]:
+    """Process factorial terms into discrete and interaction terms.
+
+    e.g. from x*y to x+y+x:y or from x*y*z to x+y+z+x:y+x:z+y:z+x:y:z"""
+    discrete_terms = []
+    interaction_terms = []
+    for term in predictor_terms:
+        if "*" in term:
+            discrete_terms.extend(term.split("*"))
+            interaction_terms.append(term.replace("*", ":"))
+    return discrete_terms, interaction_terms
+
+
+def process_interaction_terms(predictor_terms: list[str]) -> list[str]:
+    """Process interaction terms into discrete and interaction terms.
+
+    e.g. from x*y to x+y+x:y or from x*y*z to x+y+z+x:y+x:z+y:z+x:y:z"""
+    discrete_terms = []
+    interaction_terms = []
+    for term in predictor_terms:
+        if ":" in term:
+            discrete_terms.extend(term.split(":"))
+            interaction_terms.append(term)
+    return discrete_terms, interaction_terms
+
+
 def get_formula_components(formula: str) -> dict:
     """
     Extracts the response variable, predictors, and intercept flag from a formula string.
+    Handles complex interactions like I(temp^2):I(phtot^2) and mixed term types.
 
     Args:
-        formula (str): A formula string, e.g. "y ~ x1 + x2 - 1" or "y ~ factor(x1) + x2*x3".
+        formula (str): A formula string, e.g. "y ~ delta_t:delta_ph + factor(core_grouping) + I(temp^2):I(phtot^2)"
 
     Returns:
         dict: {
             "response": str,
-            "predictors": list[str],
+            "raw_predictors": list[str],  # All unique variables used
+            "linear_terms": list[str],    # Simple linear terms
+            "factor_terms": list[str],    # factor() terms
+            "nonlinear_terms": list[str], # I() terms
+            "interaction_terms": list[str], # interaction terms (a:b)
+            "factorial_terms": list[str],   # full factorial terms (a*b)
             "intercept": bool
-            "factor_mods": list[str],
-            "nonlinear_mods": list[str],
         }
     """
-    # split formula into response and predictors
-    print(formula)
+    import re
+
+    print(f"Parsing formula: {formula}")
+
+    # Split formula into response and predictors
     response_part, predictor_part = [p.strip() for p in formula.split("~", 1)]
 
-    # handle intercept removal: replace '-1' with a marker
+    # Handle intercept removal
     predictor_part = predictor_part.replace(" ", "")
-    predictor_part = predictor_part.replace("-1", "+__NO_INTERCEPT__")
+    has_intercept = "-1" not in predictor_part
+    predictor_part = predictor_part.replace("-1", "")
 
-    # split predictors on '+'
-    predictor_terms = predictor_part.split("+")
+    # Split on '+' to get individual terms
+    raw_terms = [term.strip() for term in predictor_part.split("+") if term.strip()]
 
-    predictors = []
-    # flatten interaction terms (e.g., x1*x2 -> x1, x2)
-    interaction_terms = [p for p in predictor_terms if "*" in p]
-    for interaction_term in interaction_terms:
-        predictors.extend(interaction_term.split("*"))
+    # Initialize collections for different term types
+    linear_terms = []
+    factor_terms = []
+    nonlinear_terms = []
+    interaction_terms = []
+    factorial_terms = []
+    raw_predictors = set()
 
-    for term in predictor_terms:
-        if term not in interaction_terms:
-            predictors.append(term)
+    for term in raw_terms:
+        if not term:
+            continue
 
-    # determine if intercept is included
-    intercept = "__NO_INTERCEPT__" not in predictors
-    predictors = [p for p in predictors if p and p != "__NO_INTERCEPT__"]
+        # Check for factorial terms (a*b expands to a + b + a:b)
+        if "*" in term:
+            factorial_terms.append(term)
+            # Extract variables from factorial term
+            factors = term.split("*")
+            for factor in factors:
+                var = _extract_variable_name(factor.strip())
+                if var:
+                    raw_predictors.add(var)
 
-    # determine factor moderators
-    factor_mods = [p for p in predictors if p.startswith("factor(")]
-    # remove 'factor()' wrapper if present
-    raw_factor_mods = [p.replace("factor(", "").replace(")", "") for p in factor_mods]
-    raw_factor_mods = list(set(raw_factor_mods))
+        # Check for interaction terms (a:b)
+        elif ":" in term:
+            interaction_terms.append(term)
+            # Extract variables from interaction
+            interactors = term.split(":")
+            for interactor in interactors:
+                var = _extract_variable_name(interactor.strip())
+                if var:
+                    raw_predictors.add(var)
 
-    # determine non-linear moderators
-    nonlinear_mods = [p for p in predictors if "I(" in p]
-    raw_nonlinear_mods = [p.split("^")[0].replace("I(", "") for p in nonlinear_mods]
-    raw_nonlinear_mods = [p.replace(")", "") for p in raw_nonlinear_mods]
-    raw_nonlinear_mods = list(set(raw_nonlinear_mods))
+        # Check for factor terms
+        elif term.startswith("factor("):
+            # Extract variable name from factor(variable)
+            match = re.search(r"factor\(([^)]+)\)", term)
+            if match:
+                raw_predictors.add(match.group(1))
+                factor_terms.append(match.group(1))
 
-    # get list of the raw moderators (e.g. if I(x^2) -> x, factor(x) -> x, x1*x2 -> x1, x2)
-    raw_predictors = list(
-        set(
-            raw_nonlinear_mods
-            + raw_factor_mods
-            + interaction_terms
-            + [
-                p
-                for p in predictors
-                if p not in interaction_terms
-                and p not in factor_mods
-                and p not in nonlinear_mods
-            ]
-        )
-    )
+        # Check for nonlinear terms I(...)
+        elif term.startswith("I("):
+            nonlinear_terms.append(term)
+            # Extract variable name from I(variable^power)
+            var = _extract_variable_name(term)
+            if var:
+                raw_predictors.add(var)
 
-    # return list of moderators
-    return {
-        "response": response_part,
-        "predictors": predictors,
-        "raw_predictors": raw_predictors,
-        "factor_mods": raw_factor_mods,
-        "nonlinear_mods": raw_nonlinear_mods,
-        "intercept": intercept,
-    }
-
-    # remove any empty strings (could happen if formula is malformed)
-    predictors = [p for p in predictors if p]
-
-    # get raw components e.g. if I(delta_t^2) -> delta_t
-    raw_predictors = [
-        p.split("^")[0].replace("I(", "") if p.startswith("I(") and "^" in p else p
-        for p in predictors
-    ]
-    # drop duplicates
-    raw_predictors = list(set(raw_predictors))
+        # Simple linear term
+        else:
+            linear_terms.append(term)
+            raw_predictors.add(term)
 
     return {
         "response": response_part,
-        "predictors": predictors,
-        "intercept": intercept,
-        "raw_predictors": raw_predictors,
+        "raw_predictors": sorted(list(raw_predictors)),
+        "factor_terms": factor_terms,
+        "linear_terms": linear_terms,
+        "nonlinear_terms": nonlinear_terms,
+        "interaction_terms": interaction_terms,
+        "factorial_terms": factorial_terms,
+        "intercept": has_intercept,
     }
+
+
+def _extract_variable_name(term: str) -> str:
+    """
+    Extract the core variable name from various term formats.
+
+    Examples:
+        delta_t -> delta_t
+        I(delta_t^2) -> delta_t
+        factor(core_grouping) -> core_grouping
+    """
+    import re
+
+    # Handle I(...) terms
+    if term.startswith("I("):
+        # Extract variable from I(variable^power) or I(variable)
+        match = re.search(r"I\(([^)^]+)", term)
+        if match:
+            return match.group(1)
+
+    # Handle factor(...) terms
+    elif term.startswith("factor("):
+        match = re.search(r"factor\(([^)]+)\)", term)
+        if match:
+            return match.group(1)
+
+    # Simple variable name
+    else:
+        return term.strip()
+
+    return ""
 
 
 def p_score(prediction: float, se: float, null_value: float = 0) -> float:
