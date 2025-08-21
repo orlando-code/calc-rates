@@ -11,6 +11,7 @@ from rpy2.robjects import pandas2ri
 from rpy2.robjects.packages import importr
 from tqdm.auto import tqdm
 
+from app import metafor as metafor_app
 from calcification.analysis import analysis_utils
 from calcification.utils import config
 
@@ -219,14 +220,21 @@ def _compute_point_weights(
     return norm_weights
 
 
-def _get_xs_and_prediction_limits(
+def get_xs_and_prediction_limits(
     xi: np.ndarray,
-    prediction_limits: tuple[float, float] = None,
     num_prediction_points: int = 1000,
 ) -> tuple[np.ndarray, tuple[float, float]]:
-    """Compute xs (x values for regression line) and prediction_limits (min and max x values) if not provided."""
-    xs = np.zeros((num_prediction_points, xi.shape[1]))
-    if np.shape(xi)[0] > 1:  # for polynomials
+    """Compute xs (x values for regression line) and prediction_limits (min and max x values) if not provided.
+    xi: np.ndarray of shape (n_points, n_moderators)
+    prediction_limits: tuple of (min, max) x values for prediction
+    num_prediction_points: number of points to predict on
+
+    Returns:
+        xs: np.ndarray of shape (n_points, n_moderators)
+        prediction_limits: tuple of (min, max) x values for prediction
+    """
+    xs = np.zeros((num_prediction_points, 1))
+    if np.shape(xi)[0] > 1:  # for polynomials/interactions
         for i in range(xi.shape[1]):
             if i == 0:
                 xs[:, i] = np.linspace(
@@ -238,12 +246,12 @@ def _get_xs_and_prediction_limits(
     else:
         xs = np.linspace(np.min(xi), np.max(xi), num_prediction_points)
 
-    return xs, prediction_limits
+    return xs, (np.min(xi), np.max(xi))
 
 
 def _build_newmods_matrix(
     model: ro.vectors.ListVector,
-    moderator_names: list[str],
+    mods_to_change: list[str],
     xs: np.ndarray,
     npoints: int = 1000,
 ) -> np.ndarray:
@@ -252,24 +260,24 @@ def _build_newmods_matrix(
 
     Args:
         model (ro.vectors.ListVector): The fitted metafor model.
-        moderator_names (list[str]): list of moderator names (strings) to change
+        mods_to_change (list[str]): list of moderator names (strings) to change
         xs (np.ndarray): np.ndarray of shape (n_points, n_moderators to change)
         npoints (int): number of points to predict on
 
     Returns:
     """
 
-    all_mods = analysis_utils.get_moderator_names(model)
+    all_mods = metafor_app.extract_coefficient_names_from_model(model)
     X_means = np.array(ro.r("colMeans")(model.rx2("X.f")))
     Xnew = np.tile(X_means, (npoints, 1))
-    for i, mod in enumerate(moderator_names):
+    for i, mod in enumerate(mods_to_change):
         mod_idx = all_mods.index(mod)
         Xnew[:, mod_idx] = xs[:, i]
     # handle interaction effects (e.g., "delta_ph:delta_t")
     interaction_mods = [mod for mod in all_mods if ":" in mod]
     for interaction_mod in interaction_mods:
         idx = all_mods.index(interaction_mod)
-        Xnew[:, idx] = _generate_interactive_moderator_value(
+        Xnew[:, idx] = generate_interactive_moderator_value(
             all_mods, Xnew, interaction_mod
         )
     return Xnew
@@ -401,7 +409,7 @@ def predict_nd_surface_from_model(
         meshgrids (list[np.ndarray]): list of meshgrid arrays for each moderator (for plotting).
     """
     # get all moderator names and indices for those to vary
-    all_mods = analysis_utils.get_moderator_names(model)
+    all_mods = metafor_app.extract_coefficient_names_from_model(model)
     coefs = np.array(model.rx2("beta"))
     moderator_indices = [all_mods.index(mod) for mod in moderator_names]
 
@@ -427,7 +435,7 @@ def predict_nd_surface_from_model(
     interaction_mods = [mod for mod in all_mods if ":" in mod]
     for interaction_mod in interaction_mods:
         idx = all_mods.index(interaction_mod)
-        X[:, idx] = _generate_interactive_moderator_value(all_mods, X, interaction_mod)
+        X[:, idx] = generate_interactive_moderator_value(all_mods, X, interaction_mod)
 
     # compute predictions and reshape to n-dimensional grid
     pred = X @ coefs
@@ -435,7 +443,7 @@ def predict_nd_surface_from_model(
     return pred_surface, meshgrids
 
 
-def _generate_interactive_moderator_value(
+def generate_interactive_moderator_value(
     all_mods: list[str], mod_matrix: np.ndarray, moderator_name: str
 ) -> np.ndarray:
     """
