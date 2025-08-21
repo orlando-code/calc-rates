@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pandas as pd
 import rpy2.robjects as ro
@@ -45,12 +47,7 @@ def preprocess_df_for_meta_model(
     # be more descriptive about where the nans are (print the number of nans for each column)
 
     # remove outliers
-    # nparams = len(formula.split("+"))
-    nparams = (
-        len(formula_components["raw_predictors"]) + 1
-        if formula_components["intercept"]
-        else len(formula_components["raw_predictors"])
-    )
+    nparams = get_number_of_params(formula_components)
     data, cooks_outliers = analysis.remove_cooks_outliers(
         data, effect_type=effect_type, nparams=nparams, verbose=False
     )
@@ -76,6 +73,12 @@ def preprocess_df_for_meta_model(
         )
 
     return data
+
+
+def get_number_of_params(formula_components: dict) -> int:
+    """Get the number of parameters in a formula."""
+    split_terms = re.split(r"\s*[\+\-]\s*", formula_components["formula"])
+    return len(split_terms) + 1 if formula_components["intercept"] else len(split_terms)
 
 
 def filter_extreme_dvars(
@@ -292,6 +295,7 @@ def get_formula_components(formula: str) -> dict:
         "interaction_terms": interaction_terms,
         "factorial_terms": factorial_terms,
         "intercept": has_intercept,
+        "formula": formula,
     }
 
 
