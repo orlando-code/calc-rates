@@ -187,3 +187,11 @@ def calc_sd_from_se(se: float, n: int) -> float:
 def round_down_to_nearest(x: float, step: float) -> float:
     """Round down to the nearest multiple of step."""
     return step * np.floor(x / step)
+
+
+def get_unique_values(df: pd.DataFrame, column: str) -> list[str]:
+    """Get unique values from a column."""
+    if column in df.columns:
+        unique_vals = df[column].dropna().unique().tolist()
+        return sorted([str(v) for v in unique_vals])
+    return []
