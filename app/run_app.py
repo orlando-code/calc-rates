@@ -38,7 +38,8 @@ def main():
         sys.exit(1)
 
     # Get the app file path
-    app_file = Path(__file__).parent / "metafor_streamlit_app.py"
+    # app_file = Path(__file__).parent / "metafor_streamlit_app.py"
+    app_file = Path(__file__).parent / "ui.py"
 
     if not app_file.exists():
         print(f"❌ App file not found: {app_file}")

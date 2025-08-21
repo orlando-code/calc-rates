@@ -1,0 +1,22 @@
+# Variable display name mapping
+VAR_NAME_MAP = {
+    "irr_group": "irradiance group",
+    "temp": "temperature",
+    "temp_phtot": "temperature/total pH",
+    "delta_t": "temperature change",
+    "delta_ph": "pH change",
+    "phtot": "total pH",
+    "salinity": "salinity",
+    "dicm": "DIC",
+    "ta": "total alkalinity",
+    "core_grouping": "core grouping",
+    "family": "taxonomic family",
+    "genus": "genus",
+    "species": "species",
+    "st_calcification_unit": "standardised calcification unit",
+    "treatment": "experimental treatment",
+    "depth": "sampling depth",
+    "latitude": "latitude",
+    "longitude": "longitude",
+    "(Intercept)": "intercept",
+}
