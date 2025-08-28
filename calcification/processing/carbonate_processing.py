@@ -71,11 +71,15 @@ def populate_carbonate_chemistry(
 
 def _convert_ph_scales(df: pd.DataFrame) -> pd.DataFrame:
     """Convert pHnbs to pHtot where needed."""
-    mask = df["phtot"].isna() & df["phnbs"].notna() & df["temp"].notna()
+    mask = (
+        df["phtot"].isna()
+        & (df["phnbs"].notna() | df["phsws"].notna())
+        & df["temp"].notna()
+    )
     df.loc[mask, "phtot"] = df.loc[mask].apply(
         lambda row: cbh.pH_scale_converter(
-            pH=row["phnbs"],
-            scale="NBS",
+            pH=row["phnbs"] if pd.notna(row["phnbs"]) else row["phsws"],
+            scale="NBS" if pd.notna(row["phnbs"]) else "SWS",
             Temp=row["temp"],
             Sal=row["sal"] if pd.notna(row["sal"]) else 35,
         ).get("pHtot", None),
