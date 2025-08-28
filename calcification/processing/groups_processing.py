@@ -201,6 +201,58 @@ def assign_treatment_groups(
     return df
 
 
+def _make_cluster_mapping(values: list, atol: float) -> dict:
+    """Helper to cluster values and return a mapping from value to cluster index."""
+    clusters = cluster_array_values_within_tolerance(values, atol)
+    return {val: idx for idx, cluster in enumerate(clusters) for val in cluster}
+
+
+def automatic_group_assignment(
+    group_df: pd.DataFrame, irr_group: float, t_atol: float = 0.5, pH_atol: float = 0.08
+) -> pd.DataFrame:
+    """Assign treatment groups based on temperature and pH values."""
+
+    control_T = group_df["temp"].min() if not group_df["temp"].isna().all() else None
+    control_pH = group_df["phtot"].max() if not group_df["phtot"].isna().all() else None
+
+    # map each value to its cluster index
+    t_mapping = _make_cluster_mapping(group_df["temp"].dropna().unique(), t_atol)
+    ph_mapping = _make_cluster_mapping(group_df["phtot"].dropna().unique(), pH_atol)
+
+    # process group
+    treatments_df = assign_treatment_groups(
+        group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group
+    )
+    return treatments_df
+
+
+def manual_group_assignment(
+    group_df: pd.DataFrame, t_atol: float = 0.5, pH_atol: float = 0.08
+) -> pd.DataFrame:
+    """Some studies don't fit naturally into the expected control/treatment group format e.g. when the value of irradiance doesn't differ greatly, but the results are reported as 'winter' and 'summer'. In order to reflect the results of the study, these control/treatment pairs can be manually assigned.
+
+    In the 'control' column, cn denotes the control row(s) for the nth treatment, whose rows are denoted tn.
+    """
+    # group by number of control column value (e.g. 1, 2, 3)
+    control_ns = group_df.apply(
+        lambda x: x["control"].replace("c", "").replace("t", ""), axis=1
+    )
+    processed_dfs = []
+    treatment_group_dfs = group_df.groupby(control_ns)
+    for _, df in treatment_group_dfs:
+        # for each group, assign control_T and control_pH to the mean of the control column values
+        control_T = df[df["control"].str.contains("c")].temp.mean()
+        control_pH = df[df["control"].str.contains("c")].phtot.mean()
+        t_mapping = _make_cluster_mapping(df["temp"].dropna().unique(), 0.5)
+        ph_mapping = _make_cluster_mapping(df["phtot"].dropna().unique(), 0.08)
+        out = assign_treatment_groups(
+            df, control_T, control_pH, t_mapping, ph_mapping, 0
+        )
+        processed_dfs.append(out)
+
+    return processed_dfs
+
+
 def assign_treatment_groups_multilevel(
     df: pd.DataFrame, t_atol: float = 0.5, pH_atol: float = 0.08, irr_atol: float = 30
 ) -> pd.DataFrame:
@@ -242,26 +294,41 @@ def assign_treatment_groups_multilevel(
         total=result_df.groupby(groupby_cols, dropna=False).ngroups,
     ):
         if len(group_df) <= 1:  # skip if too few samples
-            # print(f"Skipping {study_doi} because it has only one treatment")
+            print(
+                f"Skipping {study_doi} because it has only one treatment (no control)"
+            )
             continue
 
-        # find control values (min T, max pH)
-        control_T = (
-            group_df["temp"].min() if not group_df["temp"].isna().all() else None
-        )
-        control_pH = (
-            group_df["phtot"].max() if not group_df["phtot"].isna().all() else None
-        )
+        # if manual (any rows in control column have a value)
+        if not group_df["control"].isna().all():  # manual group assignment
+            processed_dfs.extend(manual_group_assignment(group_df, t_atol, pH_atol))
+        else:  # assume control is min temp, max pH
+            processed_dfs.append(
+                automatic_group_assignment(group_df, irr_group, t_atol, pH_atol)
+            )
 
-        # map each value to its cluster index
-        t_mapping = _make_cluster_mapping(group_df["temp"].dropna().unique(), t_atol)
-        ph_mapping = _make_cluster_mapping(group_df["phtot"].dropna().unique(), pH_atol)
+    #     # if any rows in control column have a value, treat separately
 
-        # process group
-        treatments_df = assign_treatment_groups(
-            group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group
-        )
-        processed_dfs.append(treatments_df)
+    #     # if rows not marked as control ('y' in control column)...
+    #     if not group_df["control"].isna().all():
+    #         control_T, control_pH = manual_group_assignment(group_df)
+    #     else:  # assume control is min temp, max pH
+    #         control_T = (
+    #             group_df["temp"].min() if not group_df["temp"].isna().all() else None
+    #         )
+    #         control_pH = (
+    #             group_df["phtot"].max() if not group_df["phtot"].isna().all() else None
+    #         )
+
+    #     # map each value to its cluster index
+    #     t_mapping = _make_cluster_mapping(group_df["temp"].dropna().unique(), t_atol)
+    #     ph_mapping = _make_cluster_mapping(group_df["phtot"].dropna().unique(), pH_atol)
+
+    #     # process group
+    #     treatments_df = assign_treatment_groups(
+    #         group_df, control_T, control_pH, t_mapping, ph_mapping, irr_group
+    #     )
+    #     processed_dfs.append(treatments_df)
 
     if processed_dfs:
         combined_df = pd.concat(processed_dfs)  # concatenating on index
@@ -289,12 +356,6 @@ def assign_treatment_groups_multilevel(
     # drop any rows with nans in treatment_group columns (single-treatment studies)
     result_df = result_df.dropna(subset=treatment_group_cols)
     return result_df
-
-
-def _make_cluster_mapping(values: list, atol: float) -> dict:
-    """Helper to cluster values and return a mapping from value to cluster index."""
-    clusters = cluster_array_values_within_tolerance(values, atol)
-    return {val: idx for idx, cluster in enumerate(clusters) for val in cluster}
 
 
 def assign_delta_t_category(delta_t: float | int) -> str:
