@@ -18,6 +18,7 @@ def preprocess_df_for_meta_model(
     treatment: list[str] | str = None,
     formula_components: dict = None,
     dvar_threshold: float = 100,
+    var_threshold: float = 1000,
     verbose: bool = True,
 ) -> pd.DataFrame:
     data = df.copy()
@@ -33,7 +34,6 @@ def preprocess_df_for_meta_model(
     n_investigation = len(data)
     # remove nans for subset effect_type
     required_columns = _get_required_columns(effect_type, formula_components)
-    print(required_columns)
     data = data.dropna(subset=required_columns)
     data = data.convert_dtypes()
     n_nans = n_investigation - len(data)
@@ -44,7 +44,9 @@ def preprocess_df_for_meta_model(
     n_post_dvar_filter = len(data)
     n_filtered = n_pre_dvar_filter - n_post_dvar_filter
 
-    # be more descriptive about where the nans are (print the number of nans for each column)
+    # remove extreme variances
+    data = data[data[f"{effect_type}_var"] < var_threshold]
+    n_post_var_filter = len(data)
 
     # remove outliers
     nparams = get_number_of_params(formula_components)
@@ -62,17 +64,21 @@ def preprocess_df_for_meta_model(
             "Total samples dropped due to dcalcification/dtreatment filter: ",
             n_pre_dvar_filter - n_post_dvar_filter,
         )
+        print(
+            "Total samples dropped due to variance filter: ",
+            n_post_dvar_filter - n_post_var_filter,
+        )
         print("Dropped due to NaN values: ", n_nans)
         nan_counts = df[required_columns].isna().sum()
         for col, count in nan_counts.items():
             if count > 0:
-                print(f"\t{col}: {count} NaNs")
+                print(f"\t{col}: {count} NaN(s)")
         print("Dropped due to Cook's distance: ", len(cooks_outliers))
         print(
             f"Final sample count: {len(data)} ({len(cooks_outliers) + n_nans + (len(df) - n_investigation + n_filtered)} rows dropped)\n"
         )
 
-    return data
+    return data.infer_objects()
 
 
 def get_number_of_params(formula_components: dict) -> int:
@@ -138,6 +144,8 @@ def _get_required_columns(
         "ID",
         "core_grouping",
         "st_calcification_unit",
+        "st_control_calcification",
+        "st_treatment_calcification",
         effect_type,
         effect_type_var,
     ]
