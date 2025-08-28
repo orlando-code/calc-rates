@@ -12,6 +12,10 @@ import rpy2.robjects.packages as rpackages
 import yaml
 from openpyxl import load_workbook
 
+# custom
+from calcification.processing import carbonate_processing
+from calcification.utils import config
+
 
 def _convert_numpy(obj) -> dict | list | np.ndarray | float | int | str:
     """Convert numpy types to native Python types for safe YAML serialization.
@@ -163,3 +167,33 @@ def get_highlighted_mask(
             mask[col] = True
 
     return mask
+
+
+def create_clean_data_sheet() -> None:
+    """Create the zotero-ready csv of clean data"""
+
+    df = carbonate_processing.populate_carbonate_chemistry(
+        config.data_dir / "Orlando_data.xlsx",
+        sheet_name="all_data",
+        selection_dict={"include": "yes"},
+    )
+
+    # cast year to int
+    df["year"] = df["year"].dt.year
+
+    # select relevant columns
+    save_cols = read_yaml(config.resources_dir / "mapping.yaml")[
+        "publication_data_columns"
+    ]
+    df = df[save_cols]
+
+    # rename column names using inverse of sheet_column_map
+    sheet_column_map = read_yaml(config.resources_dir / "mapping.yaml")[
+        "sheet_column_map"
+    ]
+    inverse_sheet_column_map = {v.lower(): k for k, v in sheet_column_map.items()}
+    df.rename(columns=inverse_sheet_column_map, inplace=True)
+
+    # save
+    df.to_csv(config.clean_data_dir / "data_cleaned.csv", index=False)
+    return df
