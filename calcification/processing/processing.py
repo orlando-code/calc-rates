@@ -595,7 +595,11 @@ def convert_climatology_csv_to_multiindex(
         how="left",
         suffixes=("", "_right"),
     )
-    df = df.loc[:, ~df.columns.str.endswith("_right")]
+    # Remove any columns ending with '_right' or the 'index_right' column specifically
+    columns_to_drop = [
+        col for col in df.columns if col.endswith("_right") or col == "index_right"
+    ]
+    df = df.drop(columns=columns_to_drop)
     df.reset_index(inplace=True, names="doi")
 
     return df

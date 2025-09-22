@@ -74,6 +74,7 @@ def assign_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     df["loc"] = df.apply(lambda row: _resolve_coordinates(row, gmaps_coords), axis=1)
     df["latitude"] = df["loc"].apply(lambda x: x[0] if isinstance(x, tuple) else None)
     df["longitude"] = df["loc"].apply(lambda x: x[1] if isinstance(x, tuple) else None)
+    df = df.drop(columns=["loc"])  # remove helper column
     # drop rows for which latitude or longitude is NaN
     df = df.dropna(subset=["latitude", "longitude"])
     return df

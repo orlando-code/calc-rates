@@ -15,14 +15,16 @@ from calcification.utils import config, file_ops
 def preprocess_df_for_meta_model(
     df: pd.DataFrame,
     effect_type: str = "st_relative_calcification",
+    effect_type_var: str = None,
     treatment: list[str] | str = None,
     formula_components: dict = None,
-    dvar_threshold: float = 100,
-    var_threshold: float = 1000,
+    dvar_threshold: float = None,
+    var_threshold: float = None,
     verbose: bool = True,
+    apply_cooks_threshold: bool = False,
 ) -> pd.DataFrame:
     data = df.copy()
-    df["original_doi"] = df["original_doi"].astype(str)
+    df["doi"] = df["doi"].astype(str)
 
     # select only rows relevant to treatment
     if treatment:
@@ -33,25 +35,35 @@ def preprocess_df_for_meta_model(
 
     n_investigation = len(data)
     # remove nans for subset effect_type
-    required_columns = _get_required_columns(effect_type, formula_components)
+    required_columns = _get_required_columns(
+        effect_type, formula_components, effect_type_var
+    )
     data = data.dropna(subset=required_columns)
     data = data.convert_dtypes()
     n_nans = n_investigation - len(data)
 
     # filter out extreme values of dcalcification_dvariable
     n_pre_dvar_filter = len(data)
-    data = filter_extreme_dvars(data, treatment, dvar_threshold)
+    data = (
+        filter_extreme_dvars(data, treatment, dvar_threshold)
+        if dvar_threshold
+        else data
+    )
     n_post_dvar_filter = len(data)
     n_filtered = n_pre_dvar_filter - n_post_dvar_filter
 
     # remove extreme variances
-    data = data[data[f"{effect_type}_var"] < var_threshold]
+    data = data[data[f"{effect_type}_var"] < var_threshold] if var_threshold else data
     n_post_var_filter = len(data)
 
     # remove outliers
     nparams = get_number_of_params(formula_components)
-    data, cooks_outliers = analysis.remove_cooks_outliers(
-        data, effect_type=effect_type, nparams=nparams, verbose=False
+    data, cooks_outliers = (
+        analysis.remove_cooks_outliers(
+            data, effect_type=effect_type, nparams=nparams, verbose=False
+        )
+        if apply_cooks_threshold
+        else (data, [])
     )
 
     if verbose:
@@ -127,6 +139,7 @@ def _get_required_columns(
     # treatment: list[str] | str,
     effect_type: str,
     formula_components: dict,
+    effect_type_var: str = None,
     required_columns: list[str] | None = None,
 ):
     if not formula_components:
@@ -138,9 +151,11 @@ def _get_required_columns(
     # get required columns from formula components
     formula_requirements = formula_components["raw_predictors"]
 
-    effect_type_var = f"{effect_type}_var"
+    effect_type_var = (
+        f"{effect_type}_var" if effect_type_var is None else effect_type_var
+    )
     base_columns = [
-        "original_doi",
+        "doi",
         "ID",
         "core_grouping",
         "st_calcification_unit",
@@ -228,7 +243,7 @@ def get_formula_components(formula: str) -> dict:
     """
     import re
 
-    print(f"Parsing formula: {formula}")
+    # print(f"Parsing formula: {formula}")
 
     # Split formula into response and predictors
     response_part, predictor_part = [p.strip() for p in formula.split("~", 1)]
@@ -342,9 +357,45 @@ def p_score(prediction: float, se: float, null_value: float = 0) -> float:
     """
     Calculate the p-value for a given prediction and standard error.
     """
+    if se == 0:
+        return 0
     z = (prediction - null_value) / se
     p = 2 * (1 - scipy_norm.cdf(abs(z)))  # two-tailed p-value
     return p
+
+
+def pi_certainty(
+    pred: pd.Series, se: pd.Series, pi_lb: pd.Series, pi_up: pd.Series, tau2: float
+) -> pd.Series:
+    """
+    Calculate a confidence/certainty level based on the width of the prediction interval (PI)
+    relative to the magnitude of the prediction. Narrower intervals (relative to the effect size)
+    indicate higher certainty.
+
+    Args:
+        pred (pd.Series): Predicted values.
+        se (pd.Series): Standard errors of predictions.
+        pi_lb (pd.Series): Lower bounds of prediction intervals.
+        pi_up (pd.Series): Upper bounds of prediction intervals.
+        tau2 (float): Additional variance (e.g., between-group variance).
+
+    Returns:
+        pd.Series: Certainty/confidence levels (1=low, 4=very high).
+    """
+    # Calculate the width of the prediction interval
+    pi_width = pi_up - pi_lb
+    # Relative width: how wide is the interval compared to the effect size
+    rel_pi = pi_width / (np.abs(pred) + 1e-6)
+
+    # Assign certainty levels: narrower relative PI = higher certainty
+    # (Thresholds can be adjusted as needed)
+    certainty = pd.Series(index=pred.index, dtype=int)
+    certainty[rel_pi < 0.5] = 4  # very high certainty
+    certainty[(rel_pi >= 0.5) & (rel_pi < 1.0)] = 3  # high certainty
+    certainty[(rel_pi >= 1.0) & (rel_pi < 2.0)] = 2  # medium certainty
+    certainty[rel_pi >= 2.0] = 1  # low certainty
+
+    return certainty
 
 
 ### assign certainty levels
@@ -471,3 +522,33 @@ def get_moderator_index(
         if isinstance(moderator_names, str)
         else [get_moderator_names(model).index(name) for name in moderator_names]
     )
+
+
+def get_values_from_surface(model_surface, meshgrids, dt, dp):
+    """Wrapper for get_value_from_surface to extract all the relevant model results: pred, se, ci_lb, ci_ub, pi_lb, pi_up"""
+    for k in model_surface.keys():
+        model_surface[k] = get_value_from_surface(model_surface, meshgrids, dt, dp)
+    return model_surface
+
+
+def get_value_from_surface(model_surface, meshgrids, dt, dp):
+    """Find the indices of the closest values to dt and dp in the sorted arrays"""
+    i = np.abs(meshgrids[0][:, 0] - dt).argmin()
+    j = np.abs(meshgrids[1][0, :] - dp).argmin()
+    return model_surface[i, j]
+
+
+def populate_anomaly_df_with_surface_values(
+    anomaly_df, model_surface, meshgrids
+) -> pd.DataFrame:
+    for k in model_surface.keys():
+        anomaly_df.loc[:, k] = anomaly_df.apply(
+            lambda row: get_value_from_surface(
+                model_surface[k],
+                meshgrids,
+                row["anomaly_value_sst"],
+                row["anomaly_value_ph"],
+            ),
+            axis=1,
+        )
+    return anomaly_df

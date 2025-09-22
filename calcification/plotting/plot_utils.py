@@ -35,11 +35,15 @@ def annotate_axes_with_letters(
 ) -> plt.Axes:
     """Annotate successive axes with letters for publication-ready plots."""
     for i, ax in enumerate(axes.flatten()):
+        # get top left corner of axis
+        top_left = ax.get_position().x0, ax.get_position().y1
         # annotate with letter
         ax.annotate(
             chr(65 + i),  # from A to Z
-            xy=xy,
-            xycoords="axes fraction",
+            xy=np.subtract(xy, top_left),
+            # xycoords="axes fraction",
+            # use axis transform to convert to axes points
+            xycoords="axes points",
             fontsize=fontsize,
             ha="right",
             va="center",
@@ -212,7 +216,7 @@ def format_geo_axes(
 ) -> plt.Axes:
     ax.set_extent(extent, crs=ccrs.PlateCarree())
     ax.add_feature(cfeature.LAND, facecolor="white")
-    ax.add_feature(cfeature.OCEAN, alpha=0.3)
+    ax.add_feature(cfeature.OCEAN, alpha=0.3, zorder=-10)
     ax.add_feature(cfeature.COASTLINE, edgecolor="lightgray", zorder=-1)
     ax.add_feature(
         cfeature.BORDERS, linestyle=":", edgecolor="gray", alpha=0.1, zorder=-1

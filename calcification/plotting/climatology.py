@@ -236,9 +236,7 @@ def plot_climate_anomalies(
             [],
             linestyle="--",
             color=scenario_colours[i],
-            label=scenario
-            if "SCENARIO_MAP" not in globals()
-            else plot_config.SCENARIO_MAP.get(scenario.lower(), scenario),
+            label=plot_config.SCENARIO_MAP.get(scenario.lower(), scenario),
         )
         for i, scenario in enumerate(scenarios)
     ]
@@ -517,8 +515,8 @@ def plot_global_timeseries(
 
         means_df = scenario_df[scenario_df["percentile"] == "mean"]
         x_fine, mean_spline = plot_utils.interpolate_spline(x_points, means_df["pred"])
-        x_fine, up_spline = plot_utils.interpolate_spline(x_points, means_df["ci.lb"])
-        x_fine, low_spline = plot_utils.interpolate_spline(x_points, means_df["ci.ub"])
+        x_fine, up_spline = plot_utils.interpolate_spline(x_points, means_df["ci_lb"])
+        x_fine, low_spline = plot_utils.interpolate_spline(x_points, means_df["ci_ub"])
 
         # Masks and formatting
         historic_mask = x_fine < time_discontinuity

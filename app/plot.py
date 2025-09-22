@@ -19,6 +19,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from app import helpers, metafor
+from calcification.analysis import analysis
 from calcification.plotting import plot_config
 
 # Add project root to path
@@ -196,47 +197,48 @@ class MetaRegressionPlotter:
     def get_plotting_data(self):
         """Extract data needed for plotting from the adapter."""
 
-        # self.seinv = 1 / np.sqrt(
-        #     self.model.vi
-        # )  # Inverse standard error for point sizing
-
         # Get values for hover text
-        dois = self.model.df_processed.get(
-            "original_doi", ["Unknown"] * len(self.model.xi)
+        self.dois = self.model.df_processed.get(
+            "doi", ["Unknown"] * len(self.model.df_processed)
         )
-        st_control_calcification = self.model.df_processed.get(
-            "st_control_calcification", ["Unknown"] * len(self.model.xi)
+        self.st_control_calcification = self.model.df_processed.get(
+            "st_control_calcification", ["Unknown"] * len(self.model.df_processed)
         )
-        st_treatment_calcification = self.model.df_processed.get(
-            "st_treatment_calcification", ["Unknown"] * len(self.model.xi)
-        )
-
-        # Generate predictions
-        self.pred, self.se, self.ci_lb, self.ci_ub, self.pred_lb, self.pred_ub = (
-            self.model.predict_on_moderator(self.moderator_name)
+        self.st_treatment_calcification = self.model.df_processed.get(
+            "st_treatment_calcification", ["Unknown"] * len(self.model.df_processed)
         )
 
-        self.dois = dois
-        self.st_control_calcification = st_control_calcification
-        self.st_treatment_calcification = st_treatment_calcification
+        # if predictions possible (if x axis is a moderator in the model)
+        if self.moderator_name in self.model.coefficient_names:
+            # Generate predictions
+            self.pred, self.se, self.ci_lb, self.ci_ub, self.pred_lb, self.pred_ub = (
+                self.model.predict_on_moderator(self.moderator_name)
+            )
 
-        #  get prediction range
-        x_min, x_max = np.min(self.model.xi), np.max(self.model.xi)
-        x_range = x_max - x_min
-        self.xs = np.linspace(
-            x_min - 0.1 * x_range,
-            x_max + 0.1 * x_range,
-            100,
-        )
+            #  get prediction range
+            x_min, x_max = np.min(self.model.xi), np.max(self.model.xi)
+            x_range = x_max - x_min
+            self.xs = np.linspace(
+                x_min - 0.1 * x_range,
+                x_max + 0.1 * x_range,
+                100,
+            )
 
-        # get predictions
-        predictions = self.model.predict_on_moderator(self.moderator_name)
-        self.pred = predictions["pred"]
-        self.se = predictions["se"]
-        self.ci_lb = predictions["ci_lb"]
-        self.ci_ub = predictions["ci_ub"]
-        self.pred_lb = predictions["pred_lb"]
-        self.pred_ub = predictions["pred_ub"]
+            # get predictions
+            predictions = self.model.predict_on_moderator(self.moderator_name)
+            self.pred = predictions["pred"]
+            self.se = predictions["se"]
+            self.ci_lb = predictions["ci_lb"]
+            self.ci_ub = predictions["ci_ub"]
+            self.pred_lb = predictions["pred_lb"]
+            self.pred_ub = predictions["pred_ub"]
+        else:
+            self.pred = None
+            self.se = None
+            self.ci_lb = None
+            self.ci_ub = None
+            self.pred_lb = None
+            self.pred_ub = None
 
     def _calculate_point_sizes(self, variances: list[float]):
         max_vi = np.max(variances) if np.max(variances) > 0 else 1
@@ -394,7 +396,7 @@ class MetaRegressionPlotter:
         return [
             f"<b>DOI:</b> {doi}<br><b>Ordinary Residual:</b> {ordr:.3f}<br><b>Partial Residual:</b> {pr:.3f}<br><b>Original {self.model.effect_type}:</b> {y:.3f}<br><b>Core Grouping:</b> {cg}<br>"
             for doi, ordr, pr, y, cg in zip(
-                self.model.df_processed["original_doi"],
+                self.model.df_processed["doi"],
                 self.model.ord_residuals,
                 self.partial_residuals_y,
                 self.model.yi,
@@ -411,7 +413,7 @@ class MetaRegressionPlotter:
         return [
             f"<b>DOI:</b> {doi}<br><b>Effect Size:</b> {ys:.3f}<br><b>Control Calcification:</b> {st_control_calc:.3f}<br><b>Treatment Calcification:</b> {st_treatment_calc:.3f}<br><b>Core Grouping:</b> {cg}"
             for doi, ys, st_control_calc, st_treatment_calc, cg in zip(
-                self.model.df_processed["original_doi"],
+                self.model.df_processed["doi"],
                 self.model.yi,
                 merged_data["st_control_calcification"],
                 merged_data["st_treatment_calcification"],
@@ -519,6 +521,10 @@ class MetaRegressionPlotter:
         except Exception as e:
             return {"Error": f"Could not generate statistics: {e}"}
 
+    def determine_whether_regression_possible(self):
+        """Determine whether the model has sufficient information to plot a regression line (ie. x axis moderator is in the model)"""
+        return self.moderator_name in self.model.coefficient_names
+
     def plot_plotly_meta_regression(
         self,
         title: str = None,
@@ -526,6 +532,7 @@ class MetaRegressionPlotter:
         width: int = 800,
         height: int = 600,
         show_partial_residuals: bool = False,
+        show_regression: bool = True,
     ) -> go.Figure:
         """Plot a meta-regression plot using Plotly."""
         fig = go.Figure()
@@ -589,10 +596,12 @@ class MetaRegressionPlotter:
                 showlegend=False,  # Don't show legend for partial residuals to avoid duplication
             )
         else:
-            # plot regression line
-            self._plot_regression_line(
-                fig, show_partial_residuals=show_partial_residuals
-            )
+            # if regression line selected, plot regression line
+            if show_regression:
+                self._plot_regression_line(
+                    fig, show_partial_residuals=show_partial_residuals
+                )
+
             # plot data points
             self._plot_scatter_points(
                 fig,
@@ -644,6 +653,120 @@ class MetaRegressionPlotter:
         )
 
         return fig
+
+    def plot_matplotlib_meta_regression(self):
+        """Plot a meta-regression plot using Matplotlib."""
+        fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
+        point_colours, is_numeric_color = self._determine_point_colours(fig)
+        point_sizes = self._calculate_point_sizes(self.model.vi)
+        ax.scatter(
+            self.model.xi,
+            self.model.yi,
+            color=point_colours,
+            linewidth=1,
+            edgecolor="black",
+            alpha=0.5,
+            s=point_sizes,
+        )
+        # horizontal line at zero
+        ax.axhline(y=0, color="gray", linestyle="--", linewidth=1)
+        # regression line
+        ax.plot(self.xs, self.pred, color="blue", linewidth=2)
+        # confidence interval
+        ax.fill_between(
+            self.xs,
+            self.ci_lb,
+            self.ci_ub,
+            color="blue",
+            alpha=0.2,
+            label="95% Confidence Interval",
+        )
+        # prediction interval
+        ax.fill_between(
+            self.xs,
+            self.pred_lb,
+            self.pred_ub,
+            color="lightblue",
+            alpha=0.2,
+            label="95% Prediction Interval",
+        )
+
+        ax.set_xlabel(self._format_axis_label(self.moderator_name))
+        ax.set_ylabel(self._format_axis_label(self.model.effect_type))
+        # formatting
+        ax.set_xlim(min(self.xs), max(self.xs))
+        ax.legend()
+
+
+def plot_interactive_influence(
+    data_df: pd.DataFrame,
+    effect_type: str,
+    nparams: int,
+) -> go.Figure:
+    """Plot influence of points relative to Cook's distance threshold
+    Args:
+        data_df: pd.DataFrame
+        effect_type: str
+        nparams: int (number of parameters in the model)
+    Returns:
+        go.Figure
+    """
+    distances = analysis.calc_cooks_distance(data_df[effect_type])
+    threshold = analysis.calc_cooks_threshold(data_df[effect_type], nparams=nparams)
+    above_threshold = distances > threshold
+    below_threshold = distances < threshold
+    indices = np.arange(len(distances))
+
+    # create plot
+    fig = go.Figure()
+    hover_text = [
+        f"Index: {i}<br>DOI: {data_df.iloc[i]['doi'] if 'doi' in data_df.columns else 'N/A'}<br>Cook's D: {dist:.4g}"
+        for i, dist in enumerate(distances)
+    ]
+    # add points below threshold
+    fig.add_trace(
+        go.Scatter(
+            x=indices[below_threshold],
+            y=distances[below_threshold],
+            mode="markers",
+            marker=dict(symbol="x", color="blue", opacity=0.5),
+            text=hover_text,
+            hoverinfo="text",
+            showlegend=False,
+        )
+    )
+    # add points above threshold
+    fig.add_trace(
+        go.Scatter(
+            x=indices[above_threshold],
+            y=distances[above_threshold],
+            mode="markers",
+            marker=dict(symbol="x", color="red", size=10, opacity=1),
+            text=[hover_text[i] for i in indices[above_threshold]],
+            hoverinfo="text",
+            showlegend=False,
+        )
+    )
+    # add threshold line
+    fig.add_hline(
+        y=threshold,
+        line_dash="dash",
+        line_color="red",
+        opacity=0.7,
+        annotation_text=f"Threshold ({threshold:.2g})",
+        annotation_font_color="red",
+        annotation_position="top right",
+    )
+
+    fig.update_layout(
+        xaxis=dict(title="Sample"),
+        yaxis=dict(title="Cook's Distance", type="log"),
+        showlegend=True,
+        height=500,
+        width=1000,
+    )
+
+    return fig
 
 
 # Helper functions for Plotly plots
@@ -836,6 +959,7 @@ def plot_contour(
     modx_range: tuple[float, float] = (0, 10),
     mody_range: tuple[float, float] = (0, -1),
     title: str = None,
+    effect_label: str = "Effect Size",
     # n_points: int = 50,
 ) -> Union[go.Figure, Tuple[plt.Figure, plt.Axes]]:
     """
@@ -874,6 +998,7 @@ def plot_contour(
             moderatorx,
             moderatory,
             title,
+            effect_label,
         )
 
     except ImportError:
@@ -886,7 +1011,7 @@ def plot_contour(
         raise RuntimeError(f"Could not create contour plot: {e}")
 
 
-def _create_contour_plot_plotly(X1, X2, surface, modx, mody, title):
+def _create_contour_plot_plotly(X1, X2, surface, modx, mody, title, effect_label):
     """Create interactive contour plot using Plotly."""
     # Extract the 1D arrays from the meshgrid edges for Plotly
     # Plotly expects 1D arrays for x and y coordinates
@@ -919,6 +1044,7 @@ def _create_contour_plot_plotly(X1, X2, surface, modx, mody, title):
                 f"<b>{map_name_to_display_name(mody)}:</b> %{{customdata[1]:.3f}}<br>"
                 f"<b>Effect Size:</b> %{{customdata[2]:.3f}}<extra></extra>"
             ),
+            colorbar=dict(title=effect_label),
         )
     )
 
@@ -1005,7 +1131,11 @@ def plot_meta_analysis_suite(
                 )
             try:
                 fig = plot_contour(
-                    model, moderators[0], moderators[1], interactive=True
+                    model,
+                    moderators[0],
+                    moderators[1],
+                    interactive=True,
+                    effect_label=model.effect_type.replace("_", " ").title(),
                 )
                 st.plotly_chart(fig, use_container_width=True)
             except Exception as e:

@@ -1,5 +1,7 @@
 import logging
 import os
+import sys
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -11,9 +13,13 @@ from rpy2.robjects import pandas2ri
 from rpy2.robjects.packages import importr
 from tqdm.auto import tqdm
 
-from app import metafor as metafor_app
 from calcification.analysis import analysis_utils
 from calcification.utils import config
+
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from app import metafor as metafor_app  # noqa
 
 metafor = importr("metafor")
 base = importr("base")
@@ -494,6 +500,8 @@ class DredgeConfig:
         treatment: list[str],
         # x_var: str,
         global_formula: str,
+        dvar_threshold: float = 1000,
+        var_threshold: float = 1000,
         random_effects: str = "~ 1 | original_doi/ID",
         n_cores: int = -1,
         verbose: bool = True,
@@ -501,6 +509,8 @@ class DredgeConfig:
         self.effect_type = effect_type
         self.treatment = treatment
         # self.x_var = x_var
+        self.dvar_threshold = dvar_threshold
+        self.var_threshold = var_threshold
         self.n_cores = n_cores
         self.global_formula = global_formula
         self.random_effects = random_effects
@@ -560,6 +570,8 @@ class DredgeAnalysis:
             self.config.effect_type,
             treatment=self.treatment,
             formula_components=self.formula_components,
+            dvar_threshold=self.config.dvar_threshold,
+            var_threshold=self.config.var_threshold,
             verbose=self.config.verbose,
         )
 
@@ -748,6 +760,11 @@ class DredgeAnalysis:
             if "AICc" in self.results.columns
             else self.results.head(n_models)
         )
+
+    def get_model_formula(self, row_index: int) -> str:
+        """
+        Get the formula for a given model from the dredge results.
+        """
 
     def summarize_results(self) -> dict:
         """

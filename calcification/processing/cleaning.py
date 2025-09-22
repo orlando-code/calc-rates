@@ -83,7 +83,7 @@ def convert_types(df: pd.DataFrame) -> pd.DataFrame:
 
 def replace_empty_cells_with_nan(df: pd.DataFrame) -> pd.DataFrame:
     """Replace empty cells with NaN."""
-    return df.replace(" ", np.nan)
+    return df.replace(" ", np.nan).infer_objects(copy=False)
 
 
 def remove_unnamed_columns(df: pd.DataFrame) -> pd.DataFrame:

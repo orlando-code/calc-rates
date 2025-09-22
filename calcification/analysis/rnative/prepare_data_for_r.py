@@ -57,6 +57,7 @@ def main():
     key_columns = [
         "doi",
         "original_doi",
+        "species_types",
         "latitude",
         "longitude",
         "irr_group",

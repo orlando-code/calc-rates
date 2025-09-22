@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 import rpy2.robjects as ro
+from scipy.stats import norm as scipy_norm
 
 # Add the project root to the path
 project_root = Path(__file__).parent.parent
@@ -51,13 +52,14 @@ class MetaforModel:
         effect_type_var: Optional[str] = None,
         treatment: Optional[str] = None,
         formula: Optional[str] = None,
-        random: str = "~ 1 | original_doi/ID",
+        random: str = "~ 1 | doi/ID",
         required_columns: Optional[List[str]] = None,
         save_summary: bool = False,
-        dvar_threshold: float = 100,
+        dvar_threshold: float = None,
+        var_threshold: float = None,
         process_data: bool = True,
         verbose: bool = True,
-        **kwargs,
+        metafor_model_kwargs: Optional[dict] = None,
     ):
         """
         Initialize the unified metafor model.
@@ -84,7 +86,9 @@ class MetaforModel:
         self.verbose = verbose
         self.save_summary = save_summary
         self.dvar_threshold = dvar_threshold
+        self.var_threshold = var_threshold
         self.fitted = False
+        self.metafor_model_kwargs = metafor_model_kwargs
 
         # Model storage
         self.r_model = None  # R model object
@@ -95,11 +99,13 @@ class MetaforModel:
         try:
             self.formula = self._get_model_formula() if formula is None else formula
             self.formula_components = self._get_formula_components()
+            self.n_params = analysis_utils.get_number_of_params(self.formula_components)
 
             # Get required columns
             self.required_columns = analysis_utils._get_required_columns(
                 self.effect_type,
                 self.formula_components,
+                self.effect_type_var,
                 required_columns,
             )
 
@@ -139,9 +145,11 @@ class MetaforModel:
         return analysis_utils.preprocess_df_for_meta_model(
             self.df,
             self.effect_type,
+            self.effect_type_var,
             self.treatment,
             self.formula_components,
             self.dvar_threshold,
+            self.var_threshold,
             self.verbose,
         )
 
@@ -198,6 +206,8 @@ class MetaforModel:
                     data=self.df_r,
                     mods=ro.Formula(fit_formula),
                     random=ro.Formula(self.random),
+                    method="REML",
+                    # **self.metafor_model_kwargs,
                 )
                 with lc(ro.default_converter + p2ri.converter):
                     r_df = ro.conversion.py2rpy(self.df_processed)
@@ -242,6 +252,7 @@ class MetaforModel:
                 "QM",
                 "QMp",
                 "pval",
+                "beta",
                 "se",
                 "zval",
                 "ci.lb",
@@ -294,6 +305,7 @@ class MetaforModel:
                         coeff_idx += 1
 
             self.coefficients = result_coeffs
+            self.dropped_coefficients = list(zero_cols)
             self.coefficient_names = coeff_names
 
         except Exception as e:
@@ -421,14 +433,19 @@ class MetaforModel:
                 and len(self.coefficient_names) == n_coef
             ):
                 row_names = self.coefficient_names
+                # drop any coefficient names that are in the dropped_coefficients list
+                row_names = [
+                    name for name in row_names if name not in self.dropped_coefficients
+                ]
             else:
                 row_names = [f"Coef {i + 1}" for i in range(n_coef)]
 
             # Extract all statistics
             stats = {}
-            stats["Estimate"] = [f"{float(coef):.4f}" for coef in coef_values]
+            # stats["Estimate"] = [f"{float(coef):.4f}" for coef in coef_values]
 
             for key, label in [
+                ("beta", "Estimate"),
                 ("se", "SE"),
                 ("zval", "Z-val"),
                 ("pval", "P-value"),
@@ -477,6 +494,12 @@ class MetaforModel:
 
             # Add significance legend
             legend = "\nSignificance: *** p<0.001, ** p<0.01, * p<0.05, . p<0.1"
+            # specify any dropped coefficients (value zero)
+            if self.dropped_coefficients:
+                legend += (
+                    "\n\nThe following coefficients since all values were zero: "
+                    + ", ".join(self.dropped_coefficients)
+                )
 
             return table_str + legend
 
@@ -655,18 +678,26 @@ class MetaforModel:
         self,
         moderator_names: list[str],
         moderator_values: list[np.ndarray],
-    ) -> tuple[np.ndarray, list[np.ndarray]]:
+        confidence_level: float = 0.95,
+    ) -> dict[str, np.ndarray]:
         """
-        Generate an n-dimensional prediction surface from a model and moderator values.
+        Generate n-dimensional prediction surfaces with uncertainty estimates.
 
         Args:
-            model (ro.vectors.ListVector): R model object with .rx2("beta") for coefficients.
             moderator_names (list[str]): list of names (str) for the moderators to vary.
             moderator_values (list[np.ndarray]): list of 1D arrays, each for a moderator.
+            include_se (bool): Whether to calculate standard error surface.
+            include_ci (bool): Whether to calculate confidence interval surfaces.
+            include_pi (bool): Whether to calculate prediction interval surfaces.
+            confidence_level (float): Confidence level for intervals (default 0.95).
 
         Returns:
-            pred_surface (np.ndarray): n-dimensional numpy array of predictions.
-            meshgrids (list[np.ndarray]): list of meshgrid arrays for each moderator (for plotting).
+            dict: Dictionary containing:
+                - 'pred': prediction surface
+                - 'se': standard error surface (if include_se=True)
+                - 'ci_lb', 'ci_ub': confidence interval surfaces (if include_ci=True)
+                - 'pi_lb', 'pi_ub': prediction interval surfaces (if include_pi=True)
+                - 'meshgrids': list of meshgrid arrays for plotting
         """
         # get all moderator names and indices for those to vary
         all_mods = self.coefficient_names
@@ -699,17 +730,106 @@ class MetaforModel:
                 all_mods, X, interaction_mod
             )
 
-        # compute predictions and reshape to n-dimensional grid
+        # compute predictions
         pred = X @ coefs
         pred_surface = pred.reshape(meshgrids[0].shape)
-        return pred_surface, meshgrids
+
+        # Initialize results dictionary
+        results = {"pred": pred_surface}
+        # Calculate standard errors
+        se = self._calculate_prediction_se(X)
+        se_surface = se.reshape(meshgrids[0].shape)
+
+        results["se"] = se_surface
+
+        # Calculate confidence intervals
+        alpha = 1 - confidence_level
+        z_score = scipy_norm.ppf(1 - alpha / 2)  # two-tailed
+
+        ci_lb = pred - z_score * se
+        ci_ub = pred + z_score * se
+
+        results["ci_lb"] = ci_lb.reshape(meshgrids[0].shape)
+        results["ci_ub"] = ci_ub.reshape(meshgrids[0].shape)
+
+        # # Calculate prediction intervals
+        pi_se = self._calculate_prediction_interval_se(X)
+        alpha = 1 - confidence_level
+        z_score = scipy_norm.ppf(1 - alpha / 2)
+
+        pi_lb = pred - z_score * pi_se
+        pi_ub = pred + z_score * pi_se
+
+        results["pi_lb"] = pi_lb.reshape(meshgrids[0].shape)
+        results["pi_ub"] = pi_ub.reshape(meshgrids[0].shape)
+
+        return results, meshgrids
+
+    def _calculate_prediction_se(self, X: np.ndarray) -> np.ndarray:
+        """
+        Calculate standard errors for predictions using the variance-covariance matrix.
+
+        Standard error for prediction: SE = sqrt(X * V * X^T)
+        where V is the variance-covariance matrix of coefficients.
+        """
+        try:
+            # Get variance-covariance matrix from the model
+            vb = np.array(self.r_model["vb"])  # metafor stores this as "vb"
+
+            # Calculate standard errors: SE = sqrt(diag(X * V * X^T))
+            # For vectorized computation: se_i = sqrt(sum_jk(X_ij * V_jk * X_ik))
+            se_squared = np.sum(X * (X @ vb), axis=1)
+            se = np.sqrt(se_squared)
+
+            return se
+
+        except Exception as e:
+            logger.warning(f"Could not calculate standard errors: {e}")
+            # Fallback: use coefficient standard errors as rough approximation
+            coef_se = np.array(self.model_dict.get("se", [0] * len(self.coefficients)))
+            # Simple approximation: SE ≈ sqrt(sum((X * coef_se)^2))
+            se_approx = np.sqrt(np.sum((X * coef_se) ** 2, axis=1))
+            return se_approx
+
+    def _calculate_prediction_interval_se(self, X: np.ndarray) -> np.ndarray:
+        """
+        Calculate standard errors for prediction intervals.
+
+        Prediction intervals account for both coefficient uncertainty AND residual variance.
+        PI_SE = sqrt(SE_pred^2 + sigma^2)
+        """
+        # Get prediction standard error
+        pred_se = self._calculate_prediction_se(X)
+
+        try:
+            # Get residual variance from the model
+            # In metafor, this might be stored as sigma2 or similar
+            if "sigma2" in self.r_model:
+                sigma2 = float(self.r_model["sigma2"][0])
+            else:
+                # Fallback: estimate from QE (residual heterogeneity)
+                QE = self.model_dict.get("QE", [1.0])[0]
+                df_resid = self.model_dict.get("k", [100])[0] - len(self.coefficients)
+                sigma2 = QE / max(df_resid, 1)
+
+            # Prediction interval SE includes both sources of uncertainty
+            pi_se = np.sqrt(pred_se**2 + sigma2)
+
+            return pi_se
+
+        except Exception as e:
+            logger.warning(f"Could not calculate prediction interval SE: {e}")
+            # Fallback: inflate prediction SE by factor of 1.5
+            return pred_se * 1.5
 
     def get_model_data_for_plotting(self, moderator_name: str) -> None:
         """Extract data needed for plotting against 'moderator_name' from the model."""
-        if moderator_name in self.df_processed.columns:
-            self.xi = self.df_processed[moderator_name].values
-            self.yi = self.df_processed[self.effect_type].values
-            self.vi = self.df_processed[self.effect_type_var].values
+        # merge dataframes by index to necessary columns are present
+        combined_df = self.df_processed.merge(self.df)
+        if moderator_name in combined_df.columns:
+            self.xi = combined_df[moderator_name].values
+            self.yi = combined_df[self.effect_type].values
+            self.vi = combined_df[self.effect_type_var].values
 
 
 # --- Helpers ---

@@ -840,32 +840,6 @@ def meta_analysis(
                 st.session_state.fitted_model = model
                 st.session_state.model_fitted = True
 
-                # Display results
-                st.subheader("📋 Model Results")
-
-                # Model summary
-                with st.expander("📊 Model Summary", expanded=True):
-                    summary_text = model.get_model_summary_text()
-                    st.code(summary_text, language="r")
-
-                # Coefficients table
-                with st.expander("📈 Coefficients"):
-                    coef_df = model.get_coefficients_dataframe()
-                    if coef_df is not None:
-                        st.dataframe(coef_df)
-                    else:
-                        st.info("Could not extract coefficients table")
-
-                # Model info
-                with st.expander("ℹ️ Model Information"):
-                    st.write(f"**Effect Type:** {effect_type}")
-                    st.write(
-                        f"**Number of Studies:** {len(df['original_doi'].unique()) if 'original_doi' in df.columns else 'N/A'}"
-                    )
-                    st.write(f"**Number of Observations:** {len(df)}")
-                    st.write(f"**Formula:** {formula}")
-                    if random_structure:
-                        st.write(f"**Random Effects:** {random_structure}")
                 return model
 
             except Exception as e:
@@ -1011,25 +985,40 @@ def create_metaregression_interface(fitted_model: metafor.MetaforModel):
             st.warning("⚠️ Y min should be less than Y max")
 
     if selected_xaxis_moderator:
-        # Meta-regression plot controls
-        show_partial_residuals = st.checkbox(
-            "Show partial residuals",
-            value=False,
-            help="Display partial residuals instead of raw data points. Partial residuals show the relationship between the moderator and outcome while controlling for other variables in the model.",
-            key="partial_residuals_checkbox",
-        )
+        col_regression, col_residuals = st.columns(2)
 
         plotter = plot.MetaRegressionPlotter(
             fitted_model,
             selected_xaxis_moderator,
             colorby=colorby_value,
         )
+        with col_regression:
+            if plotter.determine_whether_regression_possible():
+                show_regression = st.checkbox(
+                    "Show regression line",
+                    value=True,
+                    help="Show the regression line on the plot.",
+                    key="regression_checkbox",
+                )
+            else:
+                show_regression = False
+        with col_residuals:
+            # Meta-regression plot controls
+            show_partial_residuals = st.checkbox(
+                "Show partial residuals",
+                value=False,
+                help="Display partial residuals instead of raw data points. Partial residuals show the relationship between the moderator and outcome while controlling for other variables in the model.",
+                key="partial_residuals_checkbox",
+            )
+
+        # check whether regression line should be plotted
 
         fig = plotter.plot_plotly_meta_regression(
             custom_y_limits=(y_min_slider, y_max_slider),
             width=plot_width,
             height=plot_height,
             show_partial_residuals=show_partial_residuals,
+            show_regression=show_regression,
         )
 
         st.plotly_chart(fig, use_container_width=True)
@@ -1140,6 +1129,17 @@ def create_contour_interface(fitted_model: metafor.MetaforModel):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def create_influence_interface(fitted_model: metafor.MetaforModel):
+    """Create the Streamlit influence plot interface."""
+    st.subheader("🔍 Influence Plot")
+    fig = plot.plot_interactive_influence(
+        fitted_model.original_df,
+        fitted_model.effect_type,
+        fitted_model.n_params,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def main():
     """
     Main function to run streamlit app.
@@ -1174,9 +1174,11 @@ def main():
     data_overview(filtered_df, title="📊 Filtered Data Overview")
 
     # --- main body ---
-    tab1, tab2 = st.tabs(["🔬 Meta-Analysis", "🔍 Metadata Explorer"])
+    meta_analysis_tab, data_tab, metadata_tab = st.tabs(
+        ["🔬 Meta-Analysis", "🔍 Data Explorer", "🌏 Metadata Explorer"]
+    )
 
-    with tab1:
+    with meta_analysis_tab:
         # get formula
         formula, random_structure, use_random_effects = initialise_model_formula(
             st, filtered_df, effect_type
@@ -1193,11 +1195,44 @@ def main():
 
         # Use session state model for plotting - this persists across UI interactions
         if "fitted_model" in st.session_state and st.session_state.fitted_model.fitted:
+            # Display Model Results section - now persistent across interactions
+            st.subheader("📋 Model Results")
+
+            # Model summary
+            with st.expander("📊 Model Summary", expanded=True):
+                summary_text = st.session_state.fitted_model.get_model_summary_text()
+                st.code(summary_text, language="r")
+
+            # Coefficients table
+            with st.expander("📈 Coefficients"):
+                coef_df = st.session_state.fitted_model.get_coefficients_dataframe()
+                if coef_df is not None:
+                    st.dataframe(coef_df)
+                else:
+                    st.info("Could not extract coefficients table")
+
+            # Model info
+            with st.expander("ℹ️ Model Information"):
+                model = st.session_state.fitted_model
+                st.write(f"**Effect Type:** {model.effect_type}")
+                st.write(
+                    f"**Number of Studies:** {len(model.df['original_doi'].unique()) if 'original_doi' in model.df.columns else 'N/A'}"
+                )
+                st.write(f"**Number of Observations:** {len(model.df)}")
+                st.write(f"**Formula:** {model.formula}")
+                if model.random:
+                    st.write(f"**Random Effects:** {model.random}")
+
             create_metaregression_interface(st.session_state.fitted_model)
             create_contour_interface(st.session_state.fitted_model)
+            create_influence_interface(st.session_state.fitted_model)
 
-    with tab2:
-        st.subheader("🔍 Metadata Explorer")
+    with data_tab:
+        st.subheader("📊 Data Explorer")
+        # data_explorer(df, effect_type, selected_treatments, selected_units)  # TODO
+
+    with metadata_tab:
+        st.subheader("🌏 Metadata Explorer")
         # data_explorer(df, effect_type, selected_treatments, selected_units)  # TODO
 
 

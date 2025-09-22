@@ -64,7 +64,11 @@ def convert_climatology_csv_to_multiindex(
         how="left",
         suffixes=("", "_right"),
     )
-    df = df.loc[:, ~df.columns.str.endswith("_right")]
+    # Remove any columns ending with '_right' or the 'index_right' column specifically
+    columns_to_drop = [
+        col for col in df.columns if col.endswith("_right") or col == "index_right"
+    ]
+    df = df.drop(columns=columns_to_drop)
     df.reset_index(inplace=True, names="doi")
     return df
 
@@ -322,3 +326,106 @@ def get_emissions_data_from_file(fp: str, scenario_names: list[str]) -> pd.DataF
     return combine_historic_and_scenario_emissions(
         historic_emissions, scenario_emissions
     )
+
+
+def extrapolate_df(
+    df: pd.DataFrame,
+    groupby_cols=("scenario", "percentile"),
+    time_col="time_frame",
+    extrapolate_cols=["anomaly_value_ph", "anomaly_value_sst"],
+    target_years=None,
+):
+    """
+    Extrapolate anomaly values (ph and sst) for each group in the dataframe to specified target years.
+
+    Args:
+        df (pd.DataFrame): Input dataframe containing anomaly data.
+        groupby_cols (tuple): Columns to group by (default: ("scenario", "percentile")).
+        time_col (str): Name of the column containing years (default: "time_frame").
+        ph_col (str): Name of the column containing pH anomaly values (default: "anomaly_value_ph").
+        sst_col (str): Name of the column containing SST anomaly values (default: "anomaly_value_sst").
+        target_years (array-like): Years to extrapolate to (default: np.arange(2020, 2101, 1)).
+
+    Returns:
+        pd.DataFrame: DataFrame with original and extrapolated rows, sorted and deduplicated.
+    """
+    if target_years is None:
+        target_years = np.arange(2020, 2101, 1)
+
+    def extrapolate_value_to_year(
+        historic_years: pd.Series, historic_vals: pd.Series, target_years
+    ) -> np.ndarray:
+        """
+        Extrapolate values to one or more target years using a spline fit.
+        Handles duplicate years by averaging values for each year.
+        """
+        if len(historic_years) < 2:
+            return None
+
+        # Remove duplicates in historic_years by averaging values for each year
+        years = np.array(historic_years)
+        vals = np.array(historic_vals)
+        # Use pandas groupby to average values for duplicate years
+        df_tmp = pd.DataFrame({"year": years, "val": vals})
+        df_unique = df_tmp.groupby("year", as_index=False).mean()
+        unique_years = df_unique["year"].values
+        unique_vals = df_unique["val"].values
+
+        if len(unique_years) < 2:
+            return None
+
+        try:
+            spline = interpolate.make_interp_spline(
+                unique_years, unique_vals, k=min(2, len(unique_vals) - 1)
+            )
+            return spline(target_years)
+        except ValueError as e:
+            # If still fails, fallback to linear interpolation with extrapolation
+            if "Expect x to not have duplicates" in str(
+                e
+            ) or "Expect x to be strictly increasing" in str(e):
+                try:
+                    f = interpolate.interp1d(
+                        unique_years,
+                        unique_vals,
+                        kind="linear",
+                        fill_value="extrapolate",
+                        assume_sorted=True,
+                    )
+                    return f(target_years)
+                except Exception:
+                    return np.full(len(target_years), np.nan)
+            else:
+                return np.full(len(target_years), np.nan)
+
+    extrapolated_rows = []
+
+    for group_keys, group in df.groupby(list(groupby_cols)):
+        group_sorted = group.sort_values(time_col)
+        years = group_sorted[time_col]
+        extrapolated_data = {col: None for col in extrapolate_cols}
+        for col in extrapolate_cols:
+            vals = group_sorted[col]
+            extrap = extrapolate_value_to_year(years, vals, target_years=target_years)
+            if extrap is not None:
+                extrap = np.atleast_1d(extrap)
+                extrapolated_data[col] = extrap
+            else:
+                extrapolated_data[col] = np.full(len(target_years), np.nan)
+        # Build one row per year, with all columns populated
+        for i, year in enumerate(target_years):
+            row = dict(zip(groupby_cols, group_keys))
+            row[time_col] = year
+            for col in extrapolate_cols:
+                row[col] = float(extrapolated_data[col][i])
+            extrapolated_rows.append(row)
+
+    extrapolated_df = pd.DataFrame(extrapolated_rows)
+    # Combine and sort/deduplicate
+    combined_df = (
+        pd.concat([df, extrapolated_df], ignore_index=True)
+        .sort_values(list(groupby_cols) + [time_col])
+        .reset_index(drop=True)
+    )
+    combined_df = combined_df.drop_duplicates(subset=[time_col] + list(groupby_cols))
+    return combined_df

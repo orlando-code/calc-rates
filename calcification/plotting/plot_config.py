@@ -27,3 +27,22 @@ CG_COLOURS = {
     "Other algae": vlag_palette[0],  # Amber-ish color
     "Foraminifera": vlag_palette[3],  # Gold/red end of the spectrum
 }
+
+TREATMENT_MAPPING = {
+    "phtot": "pH",
+    "temp": "Temperature",
+    "temp_phtot": "pH & Temperature",
+}
+
+TREATMENT_COLOURS = {
+    "phtot": "#81baf0",
+    "temp": "#F15B4E",
+    "temp_phtot": "#9D61C2",
+}
+
+SIGNIFICANCE_MAPPING = {
+    "ns": "Not significant",
+    "*": "< 0.05",
+    "**": "< 0.01",
+    "***": "< 0.001",
+}

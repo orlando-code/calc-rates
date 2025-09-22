@@ -63,6 +63,7 @@ def calc_relative_rate(
         return pc
 
     if mu1 == 0:  # special case: baseline is zero
+        raise ValueError("Baseline is zero")
         pc = np.sign(mu2) * 100  # signed 100% change
 
         if (
@@ -289,25 +290,13 @@ def calculate_effect_for_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # group by relevant factors and apply processing
     grouped_data = []
-    nan_dois = result_df[
-        result_df[
-            [
-                "calcification",
-                "calcification_sd",
-                "st_calcification",
-                "st_calcification_sd",
-                "n",
-            ]
-        ]
-        .isna()
-        .any(axis=1)
-    ].doi.unique()
+
     doi_bar = tqdm(result_df.doi.unique())
     for doi in doi_bar:
-        if doi in nan_dois:
-            print("problem", doi)
         doi_bar.set_description(f"Calculating effect sizes for {doi}")
         study_df = result_df[result_df["doi"] == doi]
+        # if doi == "10.1073/pnas.0804478105":
+        #     print(study_df)
         for _, irr_df in study_df.groupby("irr_group"):
             for _, species_df in irr_df.groupby("species_types"):
                 # df = process_group_multivar(
@@ -364,9 +353,10 @@ def calculate_control_values(control_df: pd.DataFrame) -> pd.Series:
         # create a Series with first values for non-numeric, means for numeric
         control_series = control_df.iloc[0].copy()
         for col in numeric_cols:
-            control_series[col] = control_df[col].mean(
-                skipna=True
-            )  # Use mean for numeric
+            if col == "n":
+                control_series[col] = control_df[col].sum(skipna=True)
+            else:
+                control_series[col] = control_df[col].mean(skipna=True)
     else:
         control_series = control_df.iloc[0].copy()
     return control_series
@@ -386,7 +376,9 @@ def calculate_row_effect(df: pd.DataFrame) -> pd.DataFrame:
     # identify control
     control_df = df[df["treatment"] == "control"]
     if control_df.empty:
-        print("control_df is empty for doi", df.doi.iloc[0])
+        print(
+            f"Control dataframe is empty for doi {df.doi.iloc[0]}. Consider assigning manually"
+        )
         print("losing", df.shape[0], "rows")
         return None
     control_series = calculate_control_values(control_df)
@@ -412,7 +404,7 @@ def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     Returns:
         pandas.Series: Series containing aggregated data
     """
-    aggregation = df.agg({"calcification": ["mean", "std"], "n": "count"})
+    aggregation = df.agg({"calcification": ["mean", "std"], "n": "sum"})
     control_row = df.iloc[0].copy()
     control_row["calcification"] = aggregation["calcification"]["mean"]
     control_row["calcification_sd"] = aggregation["calcification"]["std"]
@@ -469,11 +461,10 @@ def calc_treatment_effect_for_row(
     ):
         print(
             f"Missing data for effect size calculation. "
+            f"n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]"
             f"Raw: mu_t: {mu_t:.3f}, mu_c: {mu_c:.3f}, sd_t: {sd_t:.3f}, sd_c: {sd_c:.3f}, "
             f"Std: s_mu_t: {s_mu_t:.3f}, s_mu_c: {s_mu_c:.3f}, s_sd_t: {s_sd_t:.3f}, s_sd_c: {s_sd_c:.3f}, "
-            f"n_t: {n_t:.3f}, n_c: {n_c:.3f} at \n[index {treatment_row.name} DOI {treatment_row['doi']}]"
         )
-        print(treatment_row.doi)
 
     row_copy = treatment_row.copy()  # create a copy to avoid SettingWithCopyWarning
 
@@ -481,12 +472,13 @@ def calc_treatment_effect_for_row(
     hg_effect, hg_var = calc_hedges_g(mu_c, mu_t, sd_c, sd_t, n_c, n_t)  # Hedges' g
 
     # handle relative calcification (use raw value if already stated relative to baseline)
-    rc_effect, rc_var = (
-        (mu_t, sd_t)
-        if isinstance(treatment_row["calcification_unit"], str)
-        and "delta" in treatment_row["calcification_unit"]
-        else calc_relative_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
-    )
+    # rc_effect, rc_var = (
+    #     (mu_t, sd_t)
+    #     if isinstance(treatment_row["calcification_unit"], str)
+    #     and "delta" in treatment_row["calcification_unit"]
+    #     else calc_relative_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
+    # )
+    rc_effect, rc_var = calc_relative_rate(mu_c, mu_t, sd_c, sd_t, n_c, n_t)
 
     abs_effect, abs_var = calc_absolute_rate(
         mu_c, mu_t, sd_c, sd_t, n_c, n_t
@@ -500,12 +492,15 @@ def calc_treatment_effect_for_row(
     )  # standardised hedges' g
 
     # relative differences between standardised calcification rates
-    st_rc_effect, st_rc_var = (
-        (s_mu_t, s_sd_t)
-        if isinstance(treatment_row["st_calcification_unit"], str)
-        and "delta" in treatment_row["st_calcification_unit"]
-        else calc_relative_rate(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t)
+    st_rc_effect, st_rc_var = calc_relative_rate(
+        s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t
     )
+    # st_rc_effect, st_rc_var = (
+    #     (s_mu_t, s_sd_t)
+    #     if isinstance(treatment_row["st_calcification_unit"], str)
+    #     and "delta" in treatment_row["st_calcification_unit"]
+    #     else calc_relative_rate(s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t)
+    # )
     # absolute differences between standardised calcification rates
     st_abs_effect, st_abs_var = calc_absolute_rate(
         s_mu_c, s_mu_t, s_sd_c, s_sd_t, n_c, n_t
@@ -555,6 +550,145 @@ def calc_treatment_effect_for_row(
     row_copy["control_n"] = n_c
 
     return row_copy
+
+
+import pandas as pd
+from matplotlib.legend_handler import HandlerBase
+from scipy.stats import norm
+
+from calcification.plotting import plot_config
+
+# ----------------------
+# helper function
+# ----------------------
+# def mean_ci(data, confidence=0.95):
+#     """Calculate the mean, confidence interval, and significance."""
+#     data = np.array(data, dtype=float)
+#     n = len(data)
+#     mean = np.mean(data)
+#     se = st.sem(data)  # standard error of the mean
+#     h = se * st.t.ppf((1 + confidence) / 2.0, n - 1)
+#     return mean, mean - h, mean + h
+
+
+def weighted_mean_ci(x, meas_se, mu0=0.0, alpha=0.05):
+    """Calculate the weighted mean, confidence interval, and significance level from data using inverse of variance as weights.
+
+    Args:
+        x: array-like of data
+        meas_se: array-like of measurement standard errors
+        mu0: null hypothesis value
+        alpha: significance level
+
+    Returns:
+        tuple: weighted mean, lower confidence interval, upper confidence interval, p-value
+    """
+    # calculate mean weighted by inverse of variance
+    x = np.asarray(x, float)
+    meas_se = np.asarray(meas_se, float)
+    var = meas_se**2
+    w = 1.0 / var
+    mu_hat = (w * x).sum() / w.sum()
+    var_mu = 1.0 / w.sum()
+    se_mu = np.sqrt(var_mu)
+    # calculate critical z-value for significance
+    z_crit = norm.ppf(1 - alpha / 2)
+    z = (mu_hat - mu0) / se_mu
+    # calculate p-value
+    p = 2 * (1 - norm.cdf(abs(z)))
+    return mu_hat, mu_hat - z_crit * se_mu, mu_hat + z_crit * se_mu, p
+
+
+# ----------------------
+# aggregate function with annotation and significance
+# ----------------------
+
+
+def summarise_group(
+    df, group_col, n_col="n", doi_col="doi", effect_type="st_relative_calcification"
+):
+    """Summarise a group of data by calculating the mean, confidence interval, and significance."""
+    rows = []
+    for group, subset in df.groupby(group_col):
+        data = subset[effect_type].values.astype(float)
+        meas_se = subset[effect_type + "_var"].values.astype(float)
+        mean, low, high, p = weighted_mean_ci(data, meas_se)
+
+        # t-test against null hypothesis of 0
+        # _, p_val = ttest_1samp(data, popmean=0)
+
+        n_trials = subset[n_col].sum() if n_col in subset.columns else len(subset)
+        n_studies = (
+            subset["original_doi"].nunique()
+            if "original_doi" in subset.columns
+            else subset[doi_col].nunique()
+            if doi_col in subset.columns
+            else np.nan
+        )
+
+        rows.append(
+            {
+                "group": group,
+                "mean": mean,
+                "low": low,
+                "high": high,
+                "n": len(subset),
+                "n_trials": n_trials,
+                "n_studies": n_studies,
+                "p_val": p,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def assign_significance(row):
+    if row["p_val"] < 0.001:
+        return "***"
+    elif row["p_val"] < 0.01:
+        return "**"
+    elif row["p_val"] < 0.05:
+        return "*"
+    else:
+        return "ns"
+
+
+def label_study_data(axis, row, x_value=-200) -> None:
+    axis.text(
+        x_value,
+        row["group"],
+        f"Trials: {int(row['n_trials'])}\nStudies: {int(row['n_studies'])}",
+        va="center",
+        ha="left",
+        fontsize=8,
+        color="black",
+        bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
+    )
+
+
+class HandlerStars(HandlerBase):
+    def create_artists(
+        self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans
+    ):
+        import matplotlib.text as mtext
+
+        label = orig_handle.get_label()
+        # cast to float if safe
+        try:
+            label = float(label)
+        except:
+            pass
+        # invert mapping
+        label = {v: k for k, v in plot_config.SIGNIFICANCE_MAPPING.items()}[label]
+        # Center the text in the legend box
+        t = mtext.Text(
+            xdescent + width / 2,
+            ydescent + height / 2,
+            label,
+            ha="center",
+            va="center_baseline",
+            fontsize=fontsize + 2,
+        )
+        return [t]
 
 
 # def calculate_effect_sizes_end_to_end(

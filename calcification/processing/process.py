@@ -68,6 +68,7 @@ def process_climatology_data(
     ph_clim_path: Optional[str] = None,
     sst_clim_path: Optional[str] = None,
     locations_path: Optional[str] = None,
+    experiment_type: Optional[str] = "calcification",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Merge processed data with climatology and compute global average anomalies.
@@ -88,9 +89,12 @@ def process_climatology_data(
     sst_clim_path = sst_clim_path or (
         config.climatology_data_dir / "sst_scenarios_output_table_site_locations.csv"
     )
-    locations_path = locations_path or (config.resources_dir / "locations.yaml")
+    locations_path = (
+        locations_path or (config.resources_dir / "locations.yaml")
+    )  # N.B. locations.yaml has far fewer locs than all_locations.yaml. Need to check what's happened here.
 
     logging.info("Loading climatology data...")
+    # if experiment_type == "calcification":
     ph_climatology = climatology.convert_climatology_csv_to_multiindex(
         ph_clim_path, locations_path
     )
@@ -99,6 +103,10 @@ def process_climatology_data(
     )
 
     sst_ph_climatology_df = pd.merge(sst_climatology, ph_climatology)
+    # elif experiment_type == "bioerosion":
+    #     sst_ph_climatology_df = pd.read_csv(
+    #         config.climatology_data_dir / "site_locations_with_MMM_and_pH.csv"
+    #     )
 
     sst_ph_climatology_df_mi = sst_ph_climatology_df.set_index(
         ["doi", "location", "longitude", "latitude"]

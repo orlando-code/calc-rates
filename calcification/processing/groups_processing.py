@@ -299,6 +299,8 @@ def assign_treatment_groups_multilevel(
             )
             continue
 
+        if study_doi == "10.1016/j.jembe.2010.11.009":
+            print("here")
         # if manual (any rows in control column have a value)
         if not group_df["control"].isna().all():  # manual group assignment
             processed_dfs.extend(manual_group_assignment(group_df, t_atol, pH_atol))
