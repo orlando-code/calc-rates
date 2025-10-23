@@ -15,11 +15,12 @@ source("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambrid
 # ----------------------------
 ### load data
 dat <- read.csv("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/data/clean/analysis_ready_data.csv")
+# ignore foraminifera
+# dat <- subset(dat, tolower(core_grouping) != "foraminifera")
+
+
 # remove rows with NA in yi or vi
 dat <- dat[!is.na(dat$st_relative_calcification) & !is.na(dat$st_relative_calcification_var), ]
-# remove extreme climatology
-dat <- dat[dat$delta_t < 4.7, ]
-dat <- dat[dat$delta_ph > -0.445, ]
 
 # rename effect sizes and their variance for convenience
 colnames(dat)[which(colnames(dat) == "st_relative_calcification")] <- "yi"
@@ -28,25 +29,89 @@ colnames(dat)[which(colnames(dat) == "st_relative_calcification_var")] <- "vi"
 dat$dt <- dat$delta_t
 dat$dph <- dat$delta_ph
 
-### transform moderators
-# centre only
-dat$dt_c <- dat$delta_t - mean(dat$delta_t, na.rm = TRUE)
-dat$dph_c <- dat$delta_ph - mean(dat$delta_ph, na.rm = TRUE)
-# scale only
-dat$dt_s <- dat$delta_t / sd(dat$delta_t, na.rm = TRUE)
-dat$dph_s <- dat$delta_ph / sd(dat$delta_ph, na.rm = TRUE)
-# z-scale (centre and scale)
-dat$dt_z <- (dat$delta_t - mean(dat$delta_t, na.rm = TRUE)) / sd(dat$delta_t, na.rm = TRUE)
-dat$dph_z <- (dat$delta_ph - mean(dat$delta_ph, na.rm = TRUE)) / sd(dat$delta_ph, na.rm = TRUE)
-
+# remove extreme climatology
+max_dt <- 4.706249098116215
+min_ph <- -0.4454318639260011
+clim_dat <- dat[dat$delta_t < max_dt, ]
+clim_dat <- clim_dat[clim_dat$delta_t >= -0.5, ]
+clim_dat <- clim_dat[clim_dat$delta_ph > min_ph, ]
+clim_dat <- clim_dat[clim_dat$delta_ph < 0.08, ]
+final_dat <- subset(clim_dat, tolower(core_grouping) != "foraminifera")
 
 
 dat_small <- dat[1:100, ]
-# chosen random structure (due to AIC and physical sense)
+# chosen random structure for whole model (due to AIC and physical sense)
 random_structure <- ~ 1 | doi / ID + 1 | species_types
+# random structure for core_grouping-level models
+cg_random_structure <- ~ 1 | doi / ID
 # mods_formula <- ~ dt + dph + dt:dph
 mods_formula <- ~ dt + dph - 1
 
+# ### transform moderators
+# # centre only
+# dat$dt_c <- dat$delta_t - mean(dat$delta_t, na.rm = TRUE)
+# dat$dph_c <- dat$delta_ph - mean(dat$delta_ph, na.rm = TRUE)
+# # scale only
+# dat$dt_s <- dat$delta_t / sd(dat$delta_t, na.rm = TRUE)
+# dat$dph_s <- dat$delta_ph / sd(dat$delta_ph, na.rm = TRUE)
+# # z-scale (centre and scale)
+# dat$dt_z <- (dat$delta_t - mean(dat$delta_t, na.rm = TRUE)) / sd(dat$delta_t, na.rm = TRUE)
+# dat$dph_z <- (dat$delta_ph - mean(dat$delta_ph, na.rm = TRUE)) / sd(dat$delta_ph, na.rm = TRUE)
+
+# select CCA rows only
+# dat <- subset(dat, tolower(core_grouping) == "cca")
+
+
+
+
+# -------------
+# Climate filtering effect
+# -------------
+
+fit0 <- rma.mv(
+    yi = yi, V = vi, mods = ~ dt + dph,
+    random = ~ 1 | doi / ID, data = subset(final_dat, tolower(core_grouping) == "coral"), method = "REML"
+)
+summary(fit0)
+# other algae before and after
+fit1 <- rma.mv(
+    yi = yi, V = vi, mods = ~ dt + dph + dt:dph,
+    random = ~ 1 | doi / ID, data = subset(final_dat, tolower(core_grouping) == "coral"), method = "REML"
+)
+summary(fit1)
+# other algae before and after
+fit2 <- rma.mv(
+    yi = yi, V = vi, mods = ~ dt + dph + (dt + I(dt^2)):dph - 1,
+    random = ~ 1 | doi / ID, data = subset(final_dat, tolower(core_grouping) == "coral"), method = "REML"
+)
+summary(fit2)
+
+
+clim_fit <- rma.mv(
+    yi = yi, V = vi, mods = ~ dt + dph - 1,
+    random = cg_random_structure, data = subset(clim_dat, tolower(core_grouping) == "coral"), method = "REML"
+)
+summary(clim_fit)
+
+# calculate cooks distances
+cooks <- cooks.distance(clim_fit, progbar = TRUE, parallel = "multicore", ncpus = 12)
+
+
+dts <- seq(0, 5, 0.1)
+dphs <- seq(-0.5, 0.08, 0.01)
+new_dt <- data.frame(dt = dts, dph = 0)
+new_ph <- data.frame(dt = 0, dph = dphs)
+pred_dt <- predict(clim_fit, newmods = model.matrix(~ dt + dph - 1, data = new_dt))
+pred_dph <- predict(clim_fit, newmods = model.matrix(~ dt + dph - 1, data = new_ph))
+# plot regression line
+regplot(clim_fit, mod="dt", pred=pred_dt, xvals=dts, pi=TRUE, xlab="Delta Temperature (°C)", ylab="% Relative Calcification", main="Effect of Delta Temperature on Relative Calcification", ylim=c(-200,200))
+regplot(clim_fit, mod="dph", pred=pred_dph, xvals=dphs, pi=TRUE, xlab="Delta pH", ylab="% Relative Calcification", main="Effect of Delta pH on Relative Calcification", ylim=c(-200,200))
+# plot vertical line at x=0
+abline(v=0, lty=2)
+
+png("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/myplot1.png", width = 8, height = 10, units = "in", res = 300)
+print(out)
+dev.off()
 
 ### formulae bucket
 mods_formula <- ~ delta_t + delta_ph + I(delta_t^2) + I(delta_ph^2) + delta_t:delta_ph - 1
@@ -62,11 +127,11 @@ mods_formula <- ~ dt_z + dph_z - 1
 # -------------
 doi_fit <- rma.mv(
     yi = yi, V = vi, mods = mods_formula,
-    random = ~ 1 | doi, data = dat, method = "REML"
+    random = ~ 1 | doi, data = final_dat, method = "REML"
 )
 doi_id_fit <- rma.mv(
     yi = yi, V = vi, mods = mods_formula,
-    random = ~ 1 | doi / ID, data = dat, method = "REML"
+    random = ~ 1 | doi / ID, data = final_dat, method = "REML"
 )
 doi_cg_irr_fit <- rma.mv(
     yi = yi, V = vi, mods = mods_formula,
@@ -180,43 +245,92 @@ summary(borrow_model)
 # Exploring publication bias
 # -------------
 # calculate Rosenthal's fail-safe N
-fsn(dat$yi, dat$vi)
+fsn(final_dat$yi, final_dat$vi)
 # calculate Egger's regression test for funnel plot asymmetry
-egger_test <- regtest(rma(yi = dat$yi, vi = dat$vi), model = "rma")
+egger_test <- regtest(rma(yi = final_dat$yi, vi = final_dat$vi), model = "rma")
 
-# save as png N.B. update file name and yaxis selection for seinv visulisation
+ref_mod <- rma(yi = final_dat$yi, vi = final_dat$vi)
+
+mod <- rma(yi, vi, mods = ~ delta_t + delta_ph - 1, data = final_dat)
+regtest(mod, model = "rma")
+
+
+# save as png N.B. upfinal_date file name and yaxis selection for seinv visulisation
 png(
     "/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/funnel_plot.png",
-    width = 12,
-    height = 12,
+    width = 10,
+    height = 10,
     units = "in",
     res = 300
 )
 # Remove top 1% most extreme values for yi and vi
-yi_threshold <- quantile(abs(dat$yi), 0.9, na.rm = TRUE)
-vi_threshold <- quantile(abs(dat$vi), 0.9, na.rm = TRUE)
-funnel_dat <- dat[abs(dat$yi) < yi_threshold & abs(dat$vi) < vi_threshold, ]
-funnel(funnel_dat$yi, funnel_dat$vi,
+yi_threshold <- quantile(abs(final_dat$yi), 0.9, na.rm = TRUE)
+vi_threshold <- quantile(abs(final_dat$vi), 0.9, na.rm = TRUE)
+funnel_final_dat <- final_dat[abs(final_dat$yi) < yi_threshold & abs(final_dat$vi) < vi_threshold, ]
+funnel(funnel_final_dat$yi, funnel_final_dat$vi,
+# funnel(mod
     shade = c("white", "gray55", "gray75"),
     yaxs = "i", xaxs = "i",
     legend = TRUE, back = "gray90", hlines = NULL,
-    xlab = "% Relative Calcification",
+    xlab = "Percentage change in calcification rate",
+    ylab = "Standard Error",
+    level = c(.1, .05, .01),
+    las = 1, digits = list(1L, 0),
+    # ylim=c(47, 88),
+    xlim=c(-250, 250),
+    # yaxis = "seinv",
+    mgp = c(3, 1, 0),
+    # refline = 0,
+)
+dev.off()
+
+
+# save as png N.B. upfinal_date file name and yaxis selection for seinv visulisation
+png(
+    "/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/funnel_plot.png",
+    width = 10,
+    height = 10,
+    units = "in",
+    res = 300
+)
+# Remove top 1% most extreme values for yi and vi
+yi_threshold <- quantile(abs(final_dat$yi), 0.9, na.rm = TRUE)
+vi_threshold <- quantile(abs(final_dat$vi), 0.9, na.rm = TRUE)
+funnel_final_dat <- final_dat[abs(final_dat$yi) < yi_threshold & abs(final_dat$vi) < vi_threshold, ]
+funnel(funnel_final_dat$yi, funnel_final_dat$vi,
+    shade = c("white", "gray55", "gray75"),
+    yaxs = "i", xaxs = "i",
+    legend = TRUE, back = "gray90", hlines = NULL,
+    xlab = "Relative calcification rate",
     ylab = "Standard Error",
     level = c(.1, .05, .01),
     las = 1, digits = list(1L, 0),
     # yaxis = "seinv",
     mgp = c(3, 1, 0),
-    refline = 0,
+    # refline = 0,
 )
 dev.off()
+
+# make a legend with 'samples' instead of 'studies'
+legend("topright",
+    legend = c("p < 0.1", "p < 0.05", "p < 0.01"),
+    bty = "n",
+    fill = c("gray75", "gray55", "white"),
+    title = "Shading: p-value"
+)
+legend("bottomright",
+    legend = "samples",
+    pch = 1,
+    bty = "n"
+)
 
 # ------------
 # Investigating effect of extreme values of effect sizes/variance
 # ------------
 
-extreme_filter_results <- extreme_filtering(dat, mods_formula, random_structure, plot = FALSE, extreme_limits = c(-1000, 1000), rescale_coefficients = TRUE)
+extreme_filter_results <- extreme_filtering(final_dat, mods_formula, cg_random_structure, plot = FALSE, extreme_limits = c(-1000, 1000), rescale_coefficients = TRUE)
 
-png("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/myplot.png", width = 8, height = 8, units = "in", res = 300)
+png("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/myplotnew.png", width = 8, height = 8, units = "in", res = 300)
 plot_extreme_filtering(extreme_filter_results$results, rescale_coefficients = TRUE)
 dev.off()
 # this shows that removing large variances doesn't change the results much, but removing extreme effect sizes does.
@@ -237,17 +351,18 @@ loo <- read.csv("loo_study_level.csv")
 # ------------
 # Other influence metrics
 # ------------
-dat_small <- dat[1:400, ]
+dat_small <- dat[1:600, ]
 
 ### For the entire dataset and each core_grouping, fit Cook's distance and plot along with the liberal and conservative thresholds
-plot_cooks_distance_by_group(dat_small, mods_formula, random_structure, grouping_var = "core_grouping")
+plot_cooks_distance_by_group(final_dat, mods_formula, cg_random_structure, grouping_var = "core_grouping")
 # TODO: marker types in 'all data' plot determined by core_grouping
 
 # dat_small <- dat[1:200, ]
 ### Sensitivity analysis via influence filtering
-sens <- influence_filtering(dat_small, mods_formula, random_structure, grouping_var = "core_grouping", plot = TRUE)
+sens <- influence_filtering(final_dat, mods_formula, cg_random_structure, grouping_var = "core_grouping", plot = TRUE)
 # TODO: where are the liberal threshold results for halimeda and other algae?
 
+print(plot_coefficient_comparison(sens$results))
 
 # ------------
 # Check effect of extreme climate values
@@ -257,7 +372,8 @@ sens <- influence_filtering(dat_small, mods_formula, random_structure, grouping_
 mods_formula = ~ dt_s + dph_s - 1
 mods_formula = ~ dt + dph - 1
 random_structure <- ~ 1 | doi / ID
-clim_out <- clim_filtering(dat, mods_formula, random_structure, grouping_var = "core_grouping", dt_bounds = c(0, 4), dph_bounds = c(-0.4, 0), plot = TRUE, rescale_coefficients = TRUE)
+clim_out <- clim_filtering(dat, mods_formula, cg_random_structure, grouping_var = "core_grouping", dt_bounds = c(-0.5, max_dt), dph_bounds = c(min_ph, 0.08), plot = TRUE, rescale_coefficients = TRUE)
+clim_out <- clim_filtering(dat, mods_formula, cg_random_structure, grouping_var = "core_grouping", dt_bounds = c(-0.5, max_dt), dph_bounds = c(min_ph, 0.08), plot = TRUE, rescale_coefficients = TRUE)
 
 png("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/myplot.png", width = 8, height = 10, units = "in", res = 300)
 
@@ -266,15 +382,11 @@ print(p)
 png("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/myplot.png", width = 8, height = 8, units = "in", res = 300)
 print(p)
 dev.off()
-
-
-p <- plot_coefficient_comparison(out$results, return_plot=TRUE)
-
 # ------------
 # Check effect of original units
 # ------------
 
-unit_out <- unit_filtering(dat, mods_formula, random_structure, grouping_var = "st_calcification_unit", plot = TRUE, rescale_coefficients = FALSE)
+unit_out <- unit_filtering(final_dat, mods_formula, ~ 1 | doi / ID , grouping_var = "st_calcification_unit", plot = TRUE, rescale_coefficients = FALSE)
 p <- plot_coefficient_comparison(unit_out$results)
 print(p)
 png("/Users/rt582/Library/CloudStorage/OneDrive-UniversityofCambridge/cambridge/phd/Paper_Conferences/calc-rates/calcification/analysis/rnative/myplot.png", width = 8, height = 8, units = "in", res = 300)

@@ -11,13 +11,13 @@ from calcification.plotting import plot_config
 
 
 def plot_study_timeseries(
-    df: pd.DataFrame, ax=None, colorby="core_grouping"
+    df: pd.DataFrame, ax=None, colorby="core_grouping", dpi: int = 300
 ) -> plt.Axes:
     """
     Plot the temporal distribution of studies and observation counts.
     """
     if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=(9, 3), dpi=300)
+        fig, ax = plt.subplots(1, 1, figsize=(9, 3), dpi=dpi)
 
     # Drop NA from year columns
     df.dropna(subset=["year"], inplace=True)
@@ -245,6 +245,9 @@ def create_faceted_dotplot_with_percentages(
     top_n: int = 10,
     groupby: str = "taxa",
     omission_threshold: int = 10,
+    width: float = 5,
+    height: float = 10,
+    dpi: int = 300,
 ) -> plt.Figure:
     """
     Create a faceted dotplot with percentages for the top N species in each taxonomic group.
@@ -261,8 +264,14 @@ def create_faceted_dotplot_with_percentages(
         ]
     )
     n_in_group = len(unique_in_group)
+    # order by number of samples
+    unique_in_group = sorted(
+        unique_in_group, key=lambda x: group_counts[x], reverse=True
+    )
 
-    fig, axes = plt.subplots(1, n_in_group, figsize=(5 * n_in_group, 10), sharey=False)
+    fig, axes = plt.subplots(
+        1, n_in_group, figsize=(width * n_in_group, height), sharey=False, dpi=dpi
+    )
 
     if n_in_group == 1:
         axes = [axes]
@@ -349,13 +358,13 @@ def create_faceted_dotplot_with_percentages(
 
         total_species = len(group_data)
         ax.set_title(
-            f"{group.capitalize()}\n(Total: {int(total_count)} samples, {total_species} species)",
+            f"{group.capitalize() if group != 'CCA' else 'CCA'}\n(Total: {int(total_count)} samples, {total_species} species)",
             fontsize=14,
         )
         ax.legend(legend_handles, unique_genera, title="Genus", loc="lower right")
 
     plt.tight_layout()
     plt.subplots_adjust(top=0.9)
-    plt.suptitle(f"Top {int(top_n)} Species Counts by Taxonomic Group", fontsize=16)
+    # plt.suptitle(f"Top {int(top_n)} Species Counts by Taxonomic Group", fontsize=16)
 
     return fig

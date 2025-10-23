@@ -25,7 +25,7 @@ from sklearn.gaussian_process.kernels import (
 from calcification.analysis import analysis, analysis_utils, meta_regression
 from calcification.plotting import plot_config, plot_utils
 from calcification.processing import climatology as climatology_processing
-from calcification.utils import config, utils
+from calcification.utils import config
 
 # R
 metafor = importr("metafor")
@@ -942,7 +942,7 @@ def plot_contour_gp(
 
 
 def plot_global_timeseries_grid(
-    groups: dict[str, pd.DataFrame], figsize=(16, 10), dpi=300, title_org: str = None
+    groups: dict[str, pd.DataFrame], figsize=(12, 8), dpi=300, title_org: str = None
 ):
     """
     Plot global timeseries in a grid layout with SSPs vertically and group types horizontally.
@@ -1017,7 +1017,9 @@ def plot_global_timeseries_grid(
             scenario_df = df[df["scenario"] == scenario]
 
             if not scenario_df.empty:
-                means_df = scenario_df[scenario_df["percentile"] == "mean"]
+                means_df = scenario_df[scenario_df["percentile"] == "mean"].reset_index(
+                    drop=True
+                )
                 x_fine, mean_spline = plot_utils.interpolate_spline(
                     x_points, means_df["pred"]
                 )
@@ -1066,24 +1068,31 @@ def plot_global_timeseries_grid(
                     label=group_name,
                 )
 
-                first_negative_index = np.argmax(
-                    up_spline < 0
-                )  # Find the first index where the mean spline is negative
-                if first_negative_index is not None and not np.isnan(
-                    first_negative_index
-                ):
-                    ax.annotate(
-                        "",
-                        xy=(x_fine[first_negative_index], 0),
-                        xytext=(
-                            x_fine[first_negative_index],
-                            up_spline[first_negative_index] + 2,
-                        ),
-                        arrowprops=dict(arrowstyle="-|>", color="black", lw=1.5),
-                        fontsize=8,
-                        ha="center",
-                        va="center",
+                if (means_df.ci_ub < 0).any():
+                    # Find the first index in the forecast period where ci_ub < 0
+                    forecast_indices = np.where(forecast_mask)[0]
+                    forecast_ci_ub = up_spline[forecast_mask]
+                    negative_forecast = np.where(forecast_ci_ub < 0)[0]
+                    first_negative_index = (
+                        forecast_indices[negative_forecast[0]]
+                        if len(negative_forecast) > 0
+                        else None
                     )
+                    if first_negative_index is not None and not np.isnan(
+                        first_negative_index
+                    ):
+                        ax.annotate(
+                            "",
+                            xy=(x_fine[first_negative_index], 0),
+                            xytext=(
+                                x_fine[first_negative_index],
+                                2,
+                            ),
+                            arrowprops=dict(arrowstyle="-|>", color="black", lw=1.5),
+                            fontsize=8,
+                            ha="center",
+                            va="center",
+                        )
 
             # Zero effect line
             ax.axhline(
@@ -1105,19 +1114,19 @@ def plot_global_timeseries_grid(
             ax.xaxis.set_major_locator(ticker.MultipleLocator(x_tickspacing))
             ax.yaxis.set_major_locator(ticker.MultipleLocator(y_tickspacing))
 
-            fig.text(0.5, 0.0, "Year", ha="center", fontsize=10)
+            fig.text(0.5, -0.02, "Year", ha="center", fontsize=16)
             fig.text(
-                0.0,
+                -0.02,
                 0.5,
                 "Percentage change in calcification rate",
                 va="center",
                 rotation="vertical",
-                fontsize=10,
+                fontsize=16,
             )
 
             # Add group name as title only on first row
             if i == 0:
-                ax.set_title(group_name, fontsize=10, color="black")
+                ax.set_title(group_name, fontsize=16, color="black")
 
             # Hide tick labels except for edge cells
             if j > 0:  # Not first column
@@ -1126,49 +1135,69 @@ def plot_global_timeseries_grid(
                 ax.set_xticklabels([])
 
             # decrease size of axis tick labels
-            ax.tick_params(axis="both", labelsize=8)
+            ax.tick_params(axis="both", labelsize=14)
 
-    # Add a single legend at the top
-    handles = (
-        [
-            plt.Line2D(
-                [],
-                [],
-                linestyle="-",
-                color=zero_effect_colour,
-                label="Zero effect",
-                alpha=zero_effect_alpha,
-            )
-        ]
-        + [plt.Rectangle((0, 0), 1, 1, color="grey", alpha=0.3, label="95% CI")]
-        + [
-            plt.Line2D(
-                [], [], linestyle=":", color=historic_colour, label="Historical"
-            ),
-            plt.Line2D([], [], linestyle="--", color=historic_colour, label="Forecast"),
-        ]
-        + [
-            plt.Line2D(
-                [],
-                [],
-                linestyle="--",
-                color=scenario_colour_dict[scenario],
-                label=plot_config.SCENARIO_MAP[scenario],
-            )
-            for scenario in scenarios
-        ]
-    )
+    # Add a two-line legend at the top: first line for zero effect, CI, and arrow; second line for historical/forecast/scenarios
+    # First row handles
+    handles_row1 = [
+        plt.Line2D(
+            [],
+            [],
+            linestyle="-",
+            color=zero_effect_colour,
+            label="Zero effect",
+            alpha=zero_effect_alpha,
+        ),
+        plt.Rectangle((0, 0), 1, 1, color="grey", alpha=0.3, label="95% CI"),
+        plt.Line2D(
+            [],
+            [],
+            marker="v",
+            color="black",
+            linestyle="None",
+            markersize=8,
+            label="First point of projected response in which the\nconfidence interval does not include zero",
+        ),
+    ]
+    # Second row handles
+    handles_row2 = [
+        plt.Line2D([], [], linestyle=":", color=historic_colour, label="Historical"),
+        plt.Line2D([], [], linestyle="--", color=historic_colour, label="Forecast"),
+    ] + [
+        plt.Line2D(
+            [],
+            [],
+            linestyle="--",
+            color=scenario_colour_dict[scenario],
+            label=plot_config.SCENARIO_MAP[scenario],
+        )
+        for scenario in scenarios
+    ]
 
+    # First row legend (zero effect, CI, arrow)
     fig.legend(
-        handles=handles,
+        handles=handles_row1,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.98),
-        ncol=len(handles),
-        fontsize=10,
+        bbox_to_anchor=(0.5, 1.03),
+        ncol=len(handles_row1),
+        fontsize=16,
         frameon=False,
+        handletextpad=1.5,
+        columnspacing=2.0,
+    )
+    # Second row legend (historical, forecast, scenarios)
+    fig.legend(
+        handles=handles_row2,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.96),
+        ncol=len(handles_row2),
+        fontsize=16,
+        frameon=False,
+        handletextpad=1.5,
+        columnspacing=1.5,
     )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])  # Adjust layout to accommodate suptitle
+    plt.tight_layout(rect=[0, 0, 1, 0.9])  # Adjust layout to accommodate suptitle
 
     return fig, axes
 
@@ -1325,6 +1354,7 @@ def prepare_emissions_predictions(
     reshaped_preds_df,
     emissions_data,
     scenario="ssp585",
+    df=1,
 ):
     """
     Prepare emissions predictions DataFrame for plotting.
@@ -1347,13 +1377,6 @@ def prepare_emissions_predictions(
     )
     emissions_predictions.drop(columns="year", inplace=True)
     emissions_predictions.sort_values(by="core_grouping", inplace=True)
-    # calculate p-scores and certainty
-    emissions_predictions["p_score"] = emissions_predictions.apply(
-        lambda row: analysis.p_score(row["pred"], row["se"], null_value=0), axis=1
-    )
-    emissions_predictions["certainty"] = emissions_predictions["p_score"].apply(
-        analysis.assign_certainty
-    )
     return emissions_predictions
 
 
@@ -1379,10 +1402,15 @@ class BurningEmbersConfig:
     )
     se_dots: bool = False
     pi_exceedance: bool = True
+    # Options for shifting specific bars (e.g., Bioerosion)
+    shift_bioerosion: bool = False  # Whether to shift the Bioerosion bar to the right
+    bioerosion_shift_amount: float = 0.2  # Amount to shift Bioerosion bar to the right
+    add_separator_line: bool = (
+        True  # Whether to add dotted vertical line before shifted bar
+    )
 
 
 class BurningEmbersPlotter:
-    # TODO: add config, dynamically vary the left and right axis variables
     def __init__(
         self,
         predictions_df: pd.DataFrame = None,
@@ -1395,11 +1423,25 @@ class BurningEmbersPlotter:
                   should be plotted from left to right. Can include both regular category names and
                   the insufficient data category name (e.g., "Foraminifera/Molluscs etc.").
                   If not provided, categories will be plotted in their default order.
+                - shift_bioerosion: bool = False. Whether to shift the Bioerosion bar to the right
+                  to separate it from other processes.
+                - bioerosion_shift_amount: float = 0.5. Amount to shift Bioerosion bar to the right.
+                - add_separator_line: bool = True. Whether to add dotted vertical line before shifted bar.
             predictions_df: pd.DataFrame = None. Must contain scenario, time_frame, core_grouping, pred, se, p_score, and certainty columns.
 
         Example:
+            # Basic usage
             config = BurningEmbersConfig(
                 category_order=["Coral", "Foraminifera/Molluscs etc.", "CCA", "Other algae"]
+            )
+            plotter = BurningEmbersPlotter(predictions_df=df, config=config)
+
+            # With bioerosion separation
+            config = BurningEmbersConfig(
+                category_order=["Coral", "CCA", "Other algae", "Bioerosion"],
+                shift_bioerosion=True,
+                bioerosion_shift_amount=0.5,
+                add_separator_line=True
             )
             plotter = BurningEmbersPlotter(predictions_df=df, config=config)
         """
@@ -1519,12 +1561,35 @@ class BurningEmbersPlotter:
             final_categories = categories + [insufficient_data_category]
             insufficient_data_position = len(categories)
 
+        # Calculate actual positions with bioerosion shift if enabled
+        category_positions = self._calculate_category_positions(final_categories)
+
         return (
             categories,
             final_categories,
             insufficient_data_category,
             insufficient_data_position,
+            category_positions,
         )
+
+    def _calculate_category_positions(self, final_categories):
+        """Calculate actual x-positions for categories, accounting for bioerosion shift."""
+        positions = {}
+        current_position = 0
+
+        for i, category in enumerate(final_categories):
+            # Check if this is the bioerosion category and shift is enabled
+            if (
+                self.config.shift_bioerosion
+                and category.lower() == "bioerosion"
+                and i > 0
+            ):  # Only shift if not the first category
+                current_position += self.config.bioerosion_shift_amount
+
+            positions[category] = current_position
+            current_position += 1
+
+        return positions
 
     def _calculate_cg_prediction(self):
         """Calculate the limits of the predictions."""
@@ -1567,6 +1632,7 @@ class BurningEmbersPlotter:
             final_categories,
             insufficient_data_category,
             insufficient_data_position,
+            category_positions,
         ) = self._get_ordered_categories_with_positions()
 
         fig, ax = plt.subplots(figsize=self.config.figsize, dpi=self.config.dpi)
@@ -1575,8 +1641,13 @@ class BurningEmbersPlotter:
         cmap = self._get_cmap()
         cnorm = self._get_cnorm(vmin=min(pred_lims), vmax=max(pred_lims))
 
+        # Draw separator line if bioerosion shift is enabled
+        if self.config.shift_bioerosion and self.config.add_separator_line:
+            self._draw_separator_line(ax, final_categories, category_positions)
+
         # Draw bars for each category at their specified positions
-        for position, category in enumerate(final_categories):
+        for category in final_categories:
+            position = category_positions[category]
             if category == insufficient_data_category:
                 # Draw insufficient data bar at its specified position
                 self._draw_insufficient_data_bar(ax, position, self.forcing_vals)
@@ -1587,8 +1658,7 @@ class BurningEmbersPlotter:
                 self._draw_bar_border(
                     ax, position, self.forcing_vals.min(), self.forcing_vals.max()
                 )
-                if self.config.se_dots:
-                    self._draw_certainty_dots(ax, position)
+
                 if self.config.pi_exceedance:
                     self._draw_pi_exceedance(
                         ax,
@@ -1599,16 +1669,46 @@ class BurningEmbersPlotter:
                         ]["pi_ub"],
                     )
 
-        self._format_lhs_axes(ax, final_categories)  # forcing axis
-        self._format_rhs_axes(
-            ax, final_categories
-        ) if self.config.ssp_axs else None  # SSP data
+        self._format_lhs_axes(ax, final_categories, category_positions)  # forcing axis
+        ax2 = (
+            self._format_rhs_axes(ax, final_categories) if self.config.ssp_axs else None
+        )  # SSP data
+        if self.config.se_dots:
+            for category in final_categories:
+                if category != insufficient_data_category:
+                    self._draw_certainty_dots(
+                        ax2, category_positions[category], category
+                    )
         self._draw_present_day_line(ax)
         # formatting
         self._draw_colorbar(fig, cmap, cnorm)
         self._format_legend(fig)
-        self._format_fig()
+        self._format_fig(fig, (ax, ax2))
         return fig, ax
+
+    def _draw_separator_line(self, ax: plt.Axes, final_categories, category_positions):
+        """Draw a dotted vertical line before the bioerosion bar to separate it from other bars."""
+        # Find the bioerosion category and its position
+        bioerosion_category = None
+        bioerosion_position = None
+
+        for category in final_categories:
+            if category.lower() == "bioerosion":
+                bioerosion_category = category
+                bioerosion_position = category_positions[category]
+                break
+
+        if bioerosion_category is not None and bioerosion_position is not None:
+            # Draw a dotted vertical line at the midpoint between the previous bar and bioerosion
+            line_x = bioerosion_position - self.config.bioerosion_shift_amount * 3
+            ax.axvline(
+                x=line_x,
+                color="gray",
+                linestyle=":",
+                linewidth=1.5,
+                alpha=0.7,
+                zorder=5,
+            )
 
     def _draw_insufficient_data_bar(
         self, ax: plt.Axes, i: int, forcing_values: pd.Series
@@ -1716,26 +1816,34 @@ class BurningEmbersPlotter:
         self,
         ax: plt.Axes,
         i: int,
+        category: str,
     ) -> None:
         """Draw dots to indicate the certainty of the prediction at each forcing level."""
         # increase in increments of 0.5 for temperature, 0.1 for pH, otherwise 200 (CO2 concentration)
-        step = (
-            0.5
-            if self.config.forcing_col == "anomaly_value_sst"
-            else 0.1
-            if self.config.forcing_col == "anomaly_value_ph"
-            else 200
-        )
-        max_val = utils.round_down_to_nearest(self.forcing_vals.max(), step)
-        min_val = utils.round_down_to_nearest(self.forcing_vals.min(), step)
+        # step = (
+        #     0.5
+        #     if self.config.forcing_col == "anomaly_value_sst"
+        #     else 0.1
+        #     if self.config.forcing_col == "anomaly_value_ph"
+        #     else 200
+        # )
+        # set dot label for each SSP scenario (ax2 ticks)
+        dot_positions = ax.get_yticks()
 
-        dot_levels = np.arange(min_val, max_val + step, step)
+        # max_val = utils.round_down_to_nearest(self.forcing_vals.max(), step)
+        # min_val = utils.round_down_to_nearest(self.forcing_vals.min(), step)
+
+        # dot_levels = np.arange(min_val, max_val + step, step)
+        dot_levels = dot_positions
         # thin down to integer spacing if forcing_col is SST
-        if self.config.forcing_col == "anomaly_value_sst":
-            dot_levels = dot_levels[1::2]
+        # if self.config.forcing_col == "anomaly_value_sst":
+        #     dot_levels = dot_levels[1::2]
+        category_data = self.predictions_df[
+            self.predictions_df["core_grouping"] == category
+        ]
         for forcing_level in dot_levels:
-            closest_data = self.predictions_df.iloc[
-                (self.predictions_df[self.config.forcing_col] - forcing_level)
+            closest_data = category_data.iloc[
+                (category_data[self.config.forcing_col] - forcing_level)
                 .abs()
                 .argsort()[:1]
             ]
@@ -1768,20 +1876,23 @@ class BurningEmbersPlotter:
             pi_ub: float upper bound of the prediction interval
         """
         # get the first value at which pi criteria is satisfied
-        exceedance_value = np.where(pi_ub < 0)[0][0]
-        # find the value of the forcing at this index
-        forcing_value = self.forcing_vals.iloc[exceedance_value]
-        # draw a triangle at this value
-        ax.plot(
-            i + 0.15,
-            forcing_value,
-            "<",
-            color="black",
-            markersize=10,
-            alpha=1,
-        )
+        if (pi_ub < 0).any():
+            exceedance_value = np.where(pi_ub < 0)[0][0]
+            # find the value of the forcing at this index
+            forcing_value = self.forcing_vals.iloc[exceedance_value]
+            # draw a triangle at this value
+            ax.plot(
+                i + 0.15,
+                forcing_value,
+                "<",
+                color="black",
+                markersize=10,
+                alpha=1,
+            )
 
-    def _format_lhs_axes(self, ax: plt.Axes, categories: list[str]) -> None:
+    def _format_lhs_axes(
+        self, ax: plt.Axes, categories: list[str], category_positions: dict = None
+    ) -> None:
         """Format axes: remove spines, add grid, set and label x ticks, set x limits"""
         for spine in ["top", "right", "left", "bottom"]:
             ax.spines[spine].set_visible(False)
@@ -1789,23 +1900,40 @@ class BurningEmbersPlotter:
             True, linestyle="--", alpha=0.7, zorder=-20
         ) if not self.config.ssp_axs else None
 
-        ax.set_xticklabels(
-            categories,
-            rotation=0,
-            ha="center",
-            fontsize=14,
-        )
-        ax.set_xlim(-0.5, len(categories) - 0.5)
-        ax.set_xticks(range(len(categories)))
+        # Use category positions if provided, otherwise use default sequential positions
+        if category_positions is not None:
+            positions = [category_positions[cat] for cat in categories]
+            ax.set_xticks(positions)
+            ax.set_xticklabels(
+                categories,
+                rotation=0,
+                ha="center",
+                fontsize=14,
+            )
+            # Set x limits with some padding, accounting for the maximum position
+            max_position = max(positions)
+            ax.set_xlim(-0.5, max_position + 0.5)
+        else:
+            # Default behavior for backward compatibility
+            ax.set_xticklabels(
+                categories,
+                rotation=0,
+                ha="center",
+                fontsize=14,
+            )
+            ax.set_xlim(-0.5, len(categories) - 0.5)
+            ax.set_xticks(range(len(categories)))
+
         # increase size of y tick labels
         ax.tick_params(axis="y", labelsize=12)
         ax.set_ylabel(
-            "SST anomaly (°C)"
+            "Sea surface temperature anomaly (°C)"
             if "sst" in self.config.forcing_col
             else "pH anomaly (Total Scale)"
             if "ph" in self.config.forcing_col
             else "CO₂ concentration (ppm)",
             fontsize=14,
+            labelpad=20,
         )
 
     def _format_rhs_axes(self, ax: plt.Axes, categories: list[str]) -> None:
@@ -1827,8 +1955,25 @@ class BurningEmbersPlotter:
                 (ssp_df["time_frame"] == 2100) & (ssp_df["percentile"] == "mean")
             ]
 
-            if len(ssp_df) > 0:
+            if len(ssp_df) > 0:  # if there are any predictions for this scenario
                 ssp_forcing_value = ssp_df[self.config.forcing_col].mean()
+                # prepare term strings for formatting the value label
+                forcing_term = (
+                    "sst"
+                    if "sst" in self.config.forcing_col
+                    else "ph"
+                    if "ph" in self.config.forcing_col
+                    else "co2"
+                )
+                other_forcing_term = (
+                    "ph"
+                    if forcing_term == "sst"
+                    else "sst"
+                    if forcing_term == "ph"
+                    else "co2"
+                )
+                other_forcing_col = ssp_df[f"anomaly_value_{other_forcing_term}"]
+                other_forcing_value = other_forcing_col.mean()
                 ssp_values.append(ssp_forcing_value)
 
                 # Get scenario label and format value
@@ -1840,13 +1985,24 @@ class BurningEmbersPlotter:
 
                 # Format the forcing value appropriately
                 if "sst" in self.config.forcing_col:
-                    value_label = f"({ssp_forcing_value:.1f}°C)"
+                    value_label = (
+                        f"({ssp_forcing_value:.1f}°C, {other_forcing_value:.2f}"
+                        + r"$\Delta$"
+                        + r"pH$_T$"
+                        + ")"
+                    )
                 elif "ph" in self.config.forcing_col:
-                    value_label = f"({ssp_forcing_value:.2f})"
+                    value_label = (
+                        f"({ssp_forcing_value:.1f}"
+                        + r"$\Delta$"
+                        + r"pH$_T$"
+                        + f"({other_forcing_value:.2f}°C)"
+                        + ")"
+                    )
                 else:
                     value_label = f"({ssp_forcing_value:.0f} ppm)"
 
-                ssp_labels.append(f"{scenario_label}\n{value_label}")
+                ssp_labels.append(rf"$\bf{{{scenario_label}}}$" + f"\n{value_label}")
 
         # Set the secondary axis to match the primary axis limits
         ax2.set_ylim(ax.get_ylim())
@@ -1859,25 +2015,31 @@ class BurningEmbersPlotter:
         ax2.tick_params(axis="y", labelsize=12, colors="black")
 
         # Add ylabel for secondary axis
-        forcing_label = (
-            "Projected SST anomaly (°C) in 2100, by SSP"
-            if "sst" in self.config.forcing_col
-            else "Projected pH anomaly in 2100, by SSP"
-            if "ph" in self.config.forcing_col
-            else "Projected CO₂ concentration (ppm) in 2100, by SSP"
-        )
+        # forcing_label = (
+        #     "Projected SST anomaly (°C) in 2100, by SSP"
+        #     if "sst" in self.config.forcing_col
+        #     else "Projected pH anomaly in 2100, by SSP"
+        #     if "ph" in self.config.forcing_col
+        #     else "Projected CO₂ concentration (ppm) in 2100, by SSP"
+        # )
+        forcing_label = "Projected forcing in 2100, by SSP"
 
-        ax2.set_ylabel(forcing_label, fontsize=14, rotation=270, labelpad=20)
+        ax2.set_ylabel(forcing_label, fontsize=14, rotation=270, labelpad=40)
         ax2.yaxis.grid(True, linestyle="--", alpha=0.7, zorder=-20)
         # Remove spines from secondary axis (keep only right spine)
         ax2.spines["top"].set_visible(False)
         ax2.spines["bottom"].set_visible(False)
         ax2.spines["left"].set_visible(False)
         ax2.spines["right"].set_visible(False)
+        return ax2
 
-    def _format_fig(self):
+    def _format_fig(self, fig, axes):
         """Format the figure: add title, adjust layout"""
         # plt.suptitle(self.config.title, fontsize=18, y=1.05)
+        # make axis and figure transparent
+        for ax in axes:
+            ax.set_facecolor("none")
+        fig.patch.set_facecolor("none")
         plt.tight_layout(rect=[0, 0.15, 1, 0.97])
 
     def _draw_present_day_line(self, ax):
@@ -1902,7 +2064,7 @@ class BurningEmbersPlotter:
         )
         ax.text(
             0.2,
-            self.forcing_vals.iloc[present_day_index] * 1.4,
+            self.forcing_vals.iloc[present_day_index] * 0.6,
             f"Present day\n({present_day_value_label})",
             color="black",
             fontsize=14,
@@ -1916,7 +2078,7 @@ class BurningEmbersPlotter:
         """Draw a colorbar with annotation of severity."""
         cax = (
             fig.add_axes([0.25, 0.05, 0.5, 0.03])
-            if not self.config.pi_exceedance
+            if not (self.config.pi_exceedance or self.config.se_dots)
             else fig.add_axes([0.45, 0.05, 0.5, 0.03])
             # else fig.add_axes([0.1, 0.05, 0.5, 0.03])
         )
@@ -1925,7 +2087,7 @@ class BurningEmbersPlotter:
         cb.set_ticks(np.arange(cnorm.vmax, cnorm.vmin - 1e-6, -25))
         cax.tick_params(labelsize=12)
         cax.set_title(
-            "Percentage change in process rate vs. historical baseline",
+            "Percentage change in process rate vs. historical baseline (1982-2011)",
             fontsize=14,
         )
 
@@ -1954,6 +2116,88 @@ class BurningEmbersPlotter:
                 # bbox_to_anchor=(0.1, 0.8),
             )
             # lax.legend(loc="best", bbox_to_anchor=(0.6, 0.00, 0.5, 0.03), fontsize=14)
+        if self.config.se_dots:
+            # Create an invisible axis for the legend, placed alongside the colorbar
+            lax = fig.add_axes([0.0, 0.05, 0.4, 0.03])
+            lax.axis("off")  # Hide the axis completely
+
+            # Define significance levels and their dot counts
+            significance_levels = [
+                (1, "p < 0.1"),
+                (2, "p < 0.05"),
+                (3, "p < 0.01"),
+                # (4, "p < 0.001"),
+            ]
+
+            # Custom legend handler for multiple dots
+            from matplotlib.legend_handler import HandlerBase
+            from matplotlib.patches import Circle
+
+            class MultiDotHandler(HandlerBase):
+                def __init__(self, n_dots):
+                    self.n_dots = n_dots
+                    super().__init__()
+
+                def create_artists(
+                    self,
+                    legend,
+                    orig_handle,
+                    xdescent,
+                    ydescent,
+                    width,
+                    height,
+                    fontsize,
+                    trans,
+                ):
+                    # Calculate dot positions
+                    dot_spacing = width / 3
+                    start_x = xdescent + dot_spacing / 2
+                    center_y = ydescent + height / 2
+
+                    artists = []
+                    for i in range(self.n_dots):
+                        x = start_x + i * dot_spacing
+                        circle = Circle(
+                            (x, center_y),
+                            radius=height / 4,
+                            facecolor="black",
+                            edgecolor="white",
+                            linewidth=0.5,
+                            transform=trans,
+                        )
+                        artists.append(circle)
+                    return artists
+
+            # Create dummy handles and handler map
+            from matplotlib.lines import Line2D
+
+            handles = []
+            labels = []
+            handler_map = {}
+
+            for n_dots, label in significance_levels:
+                # Create a dummy handle (just needs to be unique)
+                handle = Line2D(
+                    [], [], marker="o", linestyle="None", color="black", markersize=5
+                )
+                handles.append(handle)
+                labels.append(label)
+                handler_map[handle] = MultiDotHandler(n_dots)
+
+            # Plot invisible points to keep the legend compact
+            lax.set_xlim(0, 1)
+            lax.set_ylim(0, 1)
+            lax.legend(
+                handles,
+                labels,
+                handler_map=handler_map,
+                loc="center",
+                fontsize=12,
+                frameon=False,
+                ncol=3,
+                handletextpad=1.5,
+                columnspacing=1.5,
+            )
 
     def _generate_new_year_range(self, predictions_df: pd.DataFrame):
         """Generate a dataframe containing the list of years to which predictions will be interpolated/extrapolated."""

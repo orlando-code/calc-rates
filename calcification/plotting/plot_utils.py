@@ -47,6 +47,7 @@ def annotate_axes_with_letters(
             fontsize=fontsize,
             ha="right",
             va="center",
+            bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
         )
 
 
@@ -223,6 +224,31 @@ def format_geo_axes(
     )
 
     return ax
+
+
+def save_dir_png_to_jpg(dir_path: str):
+    from pathlib import Path
+
+    from PIL import Image
+
+    dir_path = Path(dir_path)
+    jpeg_dir_path = dir_path / "jpg"
+    jpeg_dir_path.mkdir(parents=True, exist_ok=True)
+    for file_path in dir_path.glob("*.png"):
+        img = Image.open(file_path)
+        # If image has alpha channel, paste on white background
+        if img.mode in ("RGBA", "LA") or (
+            img.mode == "P" and "transparency" in img.info
+        ):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            background.paste(
+                img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None
+            )
+            img = background
+        else:
+            img = img.convert("RGB")
+        jpg_path = jpeg_dir_path / file_path.name.replace(".png", ".jpg")
+        img.save(jpg_path, "JPEG")
 
 
 # --- Deprecated ---

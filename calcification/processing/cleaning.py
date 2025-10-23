@@ -230,6 +230,12 @@ def standardise_calcification_rates(df: pd.DataFrame) -> pd.DataFrame:
     return df_copy
 
 
+def round_ns(df: pd.DataFrame) -> pd.DataFrame:
+    """Round n to the nearest integer."""
+    df["n"] = df["n"].round(0)
+    return df
+
+
 def preprocess_df(
     df: pd.DataFrame, selection_dict: Optional[dict] = None
 ) -> pd.DataFrame:
@@ -241,6 +247,7 @@ def preprocess_df(
         df = convert_types(df)
         df = remove_unnamed_columns(df)
         df = replace_empty_cells_with_nan(df)
+        df = round_ns(df)
         return df
     except Exception as e:
         logger.error(f"Error during preprocessing: {e}")

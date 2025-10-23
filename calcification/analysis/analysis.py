@@ -396,7 +396,7 @@ def calculate_row_effect(df: pd.DataFrame) -> pd.DataFrame:
 
 def aggregate_by_treatment_group(df: pd.DataFrame) -> pd.Series:
     """
-    Aggregate a DataFrame by treatment group. Useful for when samples are individual datapoints, or multiple slightly-different controls are present.
+    Aggregate a DataFrame by treatment group. Useful for when samples are individual datapoints, or multiple slightly-different controls are sent.
 
     Args:
         df: DataFrame containing data for a specific treatment group

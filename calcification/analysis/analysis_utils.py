@@ -6,9 +6,7 @@ import rpy2.robjects as ro
 import statsmodels.api as sm
 from scipy.interpolate import make_interp_spline
 from scipy.stats import median_abs_deviation
-from scipy.stats import norm as scipy_norm
 
-from calcification.analysis import analysis
 from calcification.utils import config, file_ops
 
 
@@ -21,7 +19,7 @@ def preprocess_df_for_meta_model(
     dvar_threshold: float = None,
     var_threshold: float = None,
     verbose: bool = True,
-    apply_cooks_threshold: bool = False,
+    # apply_cooks_threshold: bool = False,
 ) -> pd.DataFrame:
     data = df.copy()
     df["doi"] = df["doi"].astype(str)
@@ -56,15 +54,15 @@ def preprocess_df_for_meta_model(
     data = data[data[f"{effect_type}_var"] < var_threshold] if var_threshold else data
     n_post_var_filter = len(data)
 
-    # remove outliers
-    nparams = get_number_of_params(formula_components)
-    data, cooks_outliers = (
-        analysis.remove_cooks_outliers(
-            data, effect_type=effect_type, nparams=nparams, verbose=False
-        )
-        if apply_cooks_threshold
-        else (data, [])
-    )
+    # # remove outliers
+    # nparams = get_number_of_params(formula_components)
+    # data, cooks_outliers = (
+    #     analysis.remove_cooks_outliers(
+    #         data, effect_type=effect_type, nparams=nparams, verbose=False
+    #     )
+    #     if apply_cooks_threshold
+    #     else (data, [])
+    # )
 
     if verbose:
         # summarise processing
@@ -353,49 +351,29 @@ def _extract_variable_name(term: str) -> str:
     return ""
 
 
-def p_score(prediction: float, se: float, null_value: float = 0) -> float:
+def p_score(prediction: float, se: float, null_value: float = 0, df: int = 1) -> float:
     """
     Calculate the p-value for a given prediction and standard error.
     """
     if se == 0:
         return 0
     z = (prediction - null_value) / se
-    p = 2 * (1 - scipy_norm.cdf(abs(z)))  # two-tailed p-value
+    from scipy.stats import t as scipy_t
+
+    p = 2 * (
+        1 - scipy_t.cdf(abs(z), df=df)
+    )  # two-tailed p-value with t-distribution, df=1 as placeholder
     return p
 
 
-def pi_certainty(
-    pred: pd.Series, se: pd.Series, pi_lb: pd.Series, pi_up: pd.Series, tau2: float
-) -> pd.Series:
-    """
-    Calculate a confidence/certainty level based on the width of the prediction interval (PI)
-    relative to the magnitude of the prediction. Narrower intervals (relative to the effect size)
-    indicate higher certainty.
-
-    Args:
-        pred (pd.Series): Predicted values.
-        se (pd.Series): Standard errors of predictions.
-        pi_lb (pd.Series): Lower bounds of prediction intervals.
-        pi_up (pd.Series): Upper bounds of prediction intervals.
-        tau2 (float): Additional variance (e.g., between-group variance).
-
-    Returns:
-        pd.Series: Certainty/confidence levels (1=low, 4=very high).
-    """
-    # Calculate the width of the prediction interval
-    pi_width = pi_up - pi_lb
-    # Relative width: how wide is the interval compared to the effect size
-    rel_pi = pi_width / (np.abs(pred) + 1e-6)
-
-    # Assign certainty levels: narrower relative PI = higher certainty
-    # (Thresholds can be adjusted as needed)
-    certainty = pd.Series(index=pred.index, dtype=int)
-    certainty[rel_pi < 0.5] = 4  # very high certainty
-    certainty[(rel_pi >= 0.5) & (rel_pi < 1.0)] = 3  # high certainty
-    certainty[(rel_pi >= 1.0) & (rel_pi < 2.0)] = 2  # medium certainty
-    certainty[rel_pi >= 2.0] = 1  # low certainty
-
-    return certainty
+def assign_p_score_and_certainty(predictions: pd.DataFrame, df: int = 1):
+    # calculate p-scores and certainty
+    predictions["p_score"] = predictions.apply(
+        lambda row: p_score(row["pred"], row["se"], null_value=0, df=df),
+        axis=1,
+    )
+    predictions["certainty"] = predictions["p_score"].apply(assign_certainty)
+    return predictions
 
 
 ### assign certainty levels
@@ -403,11 +381,11 @@ def assign_certainty(p_score: float) -> int:
     """
     Assign certainty levels based on p-value.
     """
-    if p_score < 0.01:
+    if p_score < 0.001:
         return 4  # very high certainty
-    elif p_score < 0.05:
+    elif p_score < 0.01:
         return 3  # high certainty
-    elif p_score < 0.1:
+    elif p_score < 0.05:
         return 2  # medium certainty
     else:
         return 1  # low certainty
@@ -552,3 +530,41 @@ def populate_anomaly_df_with_surface_values(
             axis=1,
         )
     return anomaly_df
+
+
+# ----------------------
+# DEPRECATED FUNCTIONS
+# ----------------------
+
+# def pi_certainty(
+#     pred: pd.Series, se: pd.Series, pi_lb: pd.Series, pi_up: pd.Series, tau2: float
+# ) -> pd.Series:
+#     """
+#     Calculate a confidence/certainty level based on the width of the prediction interval (PI)
+#     relative to the magnitude of the prediction. Narrower intervals (relative to the effect size)
+#     indicate higher certainty.
+
+#     Args:
+#         pred (pd.Series): Predicted values.
+#         se (pd.Series): Standard errors of predictions.
+#         pi_lb (pd.Series): Lower bounds of prediction intervals.
+#         pi_up (pd.Series): Upper bounds of prediction intervals.
+#         tau2 (float): Additional variance (e.g., between-group variance).
+
+#     Returns:
+#         pd.Series: Certainty/confidence levels (1=low, 4=very high).
+#     """
+#     # Calculate the width of the prediction interval
+#     pi_width = pi_up - pi_lb
+#     # Relative width: how wide is the interval compared to the effect size
+#     rel_pi = pi_width / (np.abs(pred) + 1e-6)
+
+#     # Assign certainty levels: narrower relative PI = higher certainty
+#     # (Thresholds can be adjusted as needed)
+#     certainty = pd.Series(index=pred.index, dtype=int)
+#     certainty[rel_pi < 0.5] = 4  # very high certainty
+#     certainty[(rel_pi >= 0.5) & (rel_pi < 1.0)] = 3  # high certainty
+#     certainty[(rel_pi >= 1.0) & (rel_pi < 2.0)] = 2  # medium certainty
+#     certainty[rel_pi >= 2.0] = 1  # low certainty
+
+#     return certainty

@@ -373,6 +373,7 @@ climate_filter <- function(group_data, group_name, baseline_model, mods_formula,
     model_info_list <- list()
 
     print("Fitting climate filtered model...")
+    print(dt_bounds[1])
     dat_clim <- subset(
         group_data,
         dt >= dt_bounds[1] & dt <= dt_bounds[2] &
@@ -1690,7 +1691,7 @@ plot_coefficient_comparison <- function(sens_results, title = "", width = 8, hei
             n_clim_filtered <- unique(sens_results[sens_results$Group == grp & sens_results$Scenario == "Climate filtered", ]$k)
             idx <- which(sens_results$Group == grp)
             sens_results$Group_label[idx] <- sprintf(
-                "%s (Total n = %.0f | Climate filtered n = %.0f | Removed %.1f%%)",
+                "%s (Total n = %.0f | Post climate filtering n = %.0f | Removed %.1f%%)",
                 grp,
                 n_full,
                 n_clim_filtered,

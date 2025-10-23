@@ -22,13 +22,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 import rpy2.robjects as ro
-from scipy.stats import norm as scipy_norm
 
 # Add the project root to the path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from calcification.analysis import analysis_utils, meta_regression  # noqa
+from calcification.analysis import analysis_utils, meta_regression, analysis  # noqa
 from calcification.utils import config  # noqa
 from app.infrastructure import RContextManager  # noqa
 
@@ -60,6 +59,7 @@ class MetaforModel:
         process_data: bool = True,
         verbose: bool = True,
         metafor_model_kwargs: Optional[dict] = None,
+        cooks_distance: bool = False,
     ):
         """
         Initialize the unified metafor model.
@@ -89,7 +89,7 @@ class MetaforModel:
         self.var_threshold = var_threshold
         self.fitted = False
         self.metafor_model_kwargs = metafor_model_kwargs
-
+        self.cooks_distance = cooks_distance
         # Model storage
         self.r_model = None  # R model object
         self.model_dict = {}  # Python-friendly model data
@@ -199,6 +199,8 @@ class MetaforModel:
                 if self.verbose:
                     logger.info(f"Fitting model with formula: {fit_formula}")
 
+                # remove points exceeding the cooks distance threshold
+
                 # Fit the model
                 self.r_model = metafor.rma_mv(
                     yi=ro.FloatVector(self.df_r.rx2(self.effect_type)),
@@ -211,6 +213,28 @@ class MetaforModel:
                 )
                 with lc(ro.default_converter + p2ri.converter):
                     r_df = ro.conversion.py2rpy(self.df_processed)
+
+                if self.cooks_distance:
+                    self.cooks_distances = self.calculate_cooks_distance()
+                    # remove points exceeding the cooks distance threshold
+                    cooks_threshold = analysis.calc_cooks_threshold(
+                        self.cooks_distances, nparams=self.n_params
+                    )
+                    self.cooks_threshold = cooks_threshold
+                    self.df_processed = self.df_processed[
+                        self.cooks_distances < self.cooks_threshold
+                    ]
+
+                    # re-fit model
+                    self.r_model = metafor.rma_mv(
+                        yi=ro.FloatVector(self.df_r.rx2(self.effect_type)),
+                        V=ro.FloatVector(self.df_r.rx2(self.effect_type_var)),
+                        data=self.df_r,
+                        mods=ro.Formula(fit_formula),
+                        random=ro.Formula(self.random),
+                        method="REML",
+                        # **self.metafor_model_kwargs,
+                    )
 
                 # Step 2: Set up global environment with data and call
                 ro.globalenv["d"] = r_df
@@ -236,6 +260,53 @@ class MetaforModel:
             logger.error(f"Model fitting failed: {e}")
             raise RuntimeError(f"Model fitting failed: {e}")
 
+    def _get_native_r_model(self, r_ctx):
+        """Helper method to rebuild the native R model from stored call."""
+        ro = r_ctx["ro"]
+        lc = r_ctx["localconverter"]
+        p2ri = r_ctx["pandas2ri"]
+
+        with lc(ro.default_converter + p2ri.converter):
+            r_df = ro.conversion.py2rpy(self.df_processed)
+
+        ro.globalenv["d"] = r_df
+        ro.globalenv["cl"] = self.r_model["call"]
+
+        with lc(ro.default_converter):
+            return ro.r("local({ cl$data <- d; eval(cl) })")
+
+    def calculate_cooks_distance(self, progbar=True, parallel="multicore", ncpus=24):
+        """Calculate Cook's distance for the fitted model using metafor's cooks.distance function."""
+        with RContextManager() as r_ctx:
+            ro = r_ctx["ro"]
+            metafor = ro.packages.importr("metafor")
+
+            # Get native R model
+            r_model_native = self._get_native_r_model(r_ctx)
+
+            # Calculate Cook's distance with the native R model
+            cooks = metafor.cooks_distance_rma_mv(
+                r_model_native, progbar=progbar, parallel=parallel, ncpus=ncpus
+            )
+
+            # Convert to numpy array for easier handling in Python
+            cooks_array = np.array(cooks)
+            return cooks_array
+
+    def cooks_distance_exclusion(self, r_model, df_processed):
+        """Remove points exceeding the cooks distance threshold."""
+        # use native metafor cooks distance function
+        with RContextManager() as r_ctx:
+            ro = r_ctx["ro"]
+            lc = r_ctx["localconverter"]
+            p2ri = r_ctx["pandas2ri"]
+            metafor = ro.packages.importr("metafor")
+
+            with lc(ro.default_converter):
+                r_df = ro.conversion.py2rpy(df_processed)
+                # This would need to be implemented based on your filtering logic
+                return metafor.cooks_distance_filter(r_model, df_processed)
+
     def _extract_model_components(self) -> None:
         """Extract model components into Python-friendly format."""
         try:
@@ -258,6 +329,7 @@ class MetaforModel:
                 "ci.lb",
                 "ci.ub",
                 "fit.stats",
+                "sigma2",
             ]:
                 if key in self.r_model:
                     try:
@@ -270,7 +342,13 @@ class MetaforModel:
                             ]
                             self.model_dict[key] = value.to_dict()
                         elif hasattr(value, "__iter__") and not isinstance(value, str):
-                            self.model_dict[key] = list(value)
+                            if key == "sigma2":
+                                for v_i, v in enumerate(value):
+                                    self.model_dict[f"{key}.{v_i + 1}"] = v
+                            if len(value) == 1:
+                                self.model_dict[key] = value[0]
+                            else:
+                                self.model_dict[key] = list(value)
                         else:
                             self.model_dict[key] = value
                     except Exception as e:
@@ -350,7 +428,7 @@ class MetaforModel:
             ]
 
             # Create DataFrame with proper index
-            coef_df = pd.DataFrame(
+            return pd.DataFrame(
                 {
                     "Estimate": coef_values,
                     "SE": self.model_dict["se"],
@@ -367,11 +445,23 @@ class MetaforModel:
                 index=row_names,
             )
 
-            return coef_df
-
         except Exception as e:
             print(f"⚠️ Error creating coefficients DataFrame: {e}")
             return pd.DataFrame({"Error": [str(e)]})
+
+    def get_heterogeneity_dataframe(self) -> pd.DataFrame:
+        """Get dataframe description of heterogeneity"""
+        # get all keys in dict with 'sigma' in the key
+
+        sigma_dict = {k: v for k, v in self.model_dict.items() if "sigma2." in k}
+        data = {
+            "QE": self.model_dict["QE"],
+            "QEp": self.model_dict["QEp"],
+            "QM": self.model_dict["QM"],
+            "QMp": self.model_dict["QMp"],
+        }
+        data.update(sigma_dict)
+        return pd.DataFrame([data])
 
     def get_model_summary_text(self) -> str:
         """Generate a summary text for Streamlit display."""
@@ -742,26 +832,65 @@ class MetaforModel:
 
         results["se"] = se_surface
 
-        # Calculate confidence intervals
-        alpha = 1 - confidence_level
-        z_score = scipy_norm.ppf(1 - alpha / 2)  # two-tailed
+        # potential t-distribution taking into account degrees of freedom (n-k). Compare with Normal distribution. Pretty much identical.
 
-        ci_lb = pred - z_score * se
-        ci_ub = pred + z_score * se
+        # calculate confidence intervals using t-distribution
+        alpha = 1 - confidence_level
+        # degrees of freedom: n - k (number of observations - number of coefficients)
+        n_obs = getattr(self, "n_obs", None)
+        if n_obs is None:
+            # Try to infer from model or data
+            try:
+                self.model_dict.get("k", [100])[0]
+                # n_obs = self.r_model.rx2("k")[
+                #     0
+                # ]  # metafor stores k as number of studies
+            except Exception:
+                n_obs = X.shape[0]
+        n_coefs = len(self.coefficients)
+        df = max(n_obs - n_coefs, 1)
+        from scipy.stats import t as scipy_t
+
+        t_score = scipy_t.ppf(1 - alpha / 2, df)
+
+        ci_lb = pred - t_score * se
+        ci_ub = pred + t_score * se
 
         results["ci_lb"] = ci_lb.reshape(meshgrids[0].shape)
         results["ci_ub"] = ci_ub.reshape(meshgrids[0].shape)
 
-        # # Calculate prediction intervals
+        # # Calculate prediction intervals (still using normal distribution for PI, unless t is desired)
         pi_se = self._calculate_prediction_interval_se(X)
         alpha = 1 - confidence_level
-        z_score = scipy_norm.ppf(1 - alpha / 2)
+        # For prediction intervals, also use t-distribution for consistency
+        pi_t_score = scipy_t.ppf(1 - alpha / 2, df)
 
-        pi_lb = pred - z_score * pi_se
-        pi_ub = pred + z_score * pi_se
+        pi_lb = pred - pi_t_score * pi_se
+        pi_ub = pred + pi_t_score * pi_se
 
         results["pi_lb"] = pi_lb.reshape(meshgrids[0].shape)
         results["pi_ub"] = pi_ub.reshape(meshgrids[0].shape)
+
+        # # calculate confidence intervals
+        # alpha = 1 - confidence_level
+        # z_score = scipy_norm.ppf(1 - alpha / 2)  # two-tailed
+
+        # ci_lb = pred - z_score * se
+        # ci_ub = pred + z_score * se
+
+        # results["ci_lb"] = ci_lb.reshape(meshgrids[0].shape)
+        # results["ci_ub"] = ci_ub.reshape(meshgrids[0].shape)
+
+        # # # Calculate prediction intervals
+        # pi_se = self._calculate_prediction_interval_se(X)
+        # alpha = 1 - confidence_level
+        # z_score = scipy_norm.ppf(1 - alpha / 2)
+
+        # pi_lb = pred - z_score * pi_se
+        # pi_ub = pred + z_score * pi_se
+
+        # results["pi_lb"] = pi_lb.reshape(meshgrids[0].shape)
+        # results["pi_ub"] = pi_ub.reshape(meshgrids[0].shape)
 
         return results, meshgrids
 
